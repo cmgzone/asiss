@@ -1,0 +1,27 @@
+{
+  "agents": [
+    {
+      "id": "0f24abd3",
+      "name": "Tenant Manager",
+      "role": "Tenant Relations",
+      "specialization": "Tenant screening, lease management, rent collection, communication",
+      "status": "idle",
+      "assignedTasks": [],
+      "completedTasks": [],
+      "results": [],
+      "createdAt": "2026-02-08T07:26:32.282Z"
+    },
+    {
+      "id": "99e2f044",
+      "name": "Tenant Manager",
+      "role": "Tenant Relations",
+      "specialization": "Tenant screening, lease management, rent collection, communication",
+      "status": "idle",
+      "assignedTasks": [],
+      "completedTasks": [],
+      "results": [],
+      "createdAt": "2026-02-08T07:26:42.026Z"
+    }
+  ],
+  "tasks": []
+}

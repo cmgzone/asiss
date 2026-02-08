@@ -1,0 +1,14 @@
+{
+  "projects": [
+    {
+      "id": "7e26ba15",
+      "name": "Rental Apartment Management",
+      "description": "Comprehensive management system for my rental apartment including tenant tracking, maintenance requests, financial records, and task management",
+      "status": "active",
+      "createdAt": "2026-02-08T07:26:08.235Z"
+    }
+  ],
+  "tasks": [],
+  "milestones": [],
+  "recurringTasks": []
+}

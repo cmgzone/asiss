@@ -1,0 +1,494 @@
+/* Gitubot Modern Dark Theme */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+    --bg-color: #0d1117;
+    --chat-bg: #161b22;
+    --input-bg: #0d1117;
+    --text-color: #c9d1d9;
+    --text-muted: #8b949e;
+    --accent-color: #58a6ff;
+    --accent-hover: #79c0ff;
+    --user-msg-bg: #1f6feb;
+    --bot-msg-bg: #21262d;
+    --border-color: #30363d;
+    --error-color: #ff7b72;
+    --success-color: #238636;
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24);
+    --shadow-md: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    margin: 0;
+    display: flex;
+    justify-content: center;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: #30363d;
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #484f58;
+}
+
+.container {
+    width: 100%;
+    max-width: 900px;
+    background-color: var(--chat-bg);
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border-color);
+    border-right: 1px solid var(--border-color);
+    position: relative;
+    box-shadow: var(--shadow-md);
+    height: 100%;
+}
+
+/* Header */
+header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(22, 27, 34, 0.95);
+    backdrop-filter: blur(8px);
+    z-index: 10;
+}
+
+header h1 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-color);
+    letter-spacing: -0.02em;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* Controls in Header */
+.controls-bar {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    font-size: 0.85em;
+    margin-left: auto;
+}
+
+.control-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(48, 54, 61, 0.4);
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid transparent; /* var(--border-color) */
+    transition: border-color 0.2s;
+}
+
+.control-group:hover {
+    border-color: var(--border-color);
+}
+
+.control-group label {
+    color: var(--text-muted);
+    font-weight: 500;
+    font-size: 0.8em;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.control-group select {
+    padding: 2px 4px;
+    background-color: transparent;
+    border: none;
+    color: var(--text-color);
+    border-radius: 4px;
+    font-size: 0.95em;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.control-group select:focus {
+    outline: none;
+    background: var(--bg-color);
+}
+
+/* User Display & Settings */
+.user-area {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-left: 15px;
+    border-left: 1px solid var(--border-color);
+}
+
+#user-display {
+    font-size: 0.9em;
+    color: var(--text-muted);
+}
+
+.icon-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    padding: 6px;
+    border-radius: 4px;
+    transition: color 0.2s, background-color 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.icon-btn:hover {
+    color: var(--text-color);
+    background-color: var(--border-color);
+}
+
+/* Chat Area */
+#messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    scroll-behavior: smooth;
+}
+
+.message {
+    max-width: 85%;
+    padding: 12px 18px;
+    border-radius: 12px;
+    line-height: 1.6;
+    word-wrap: break-word;
+    position: relative;
+    font-size: 0.95rem;
+    animation: fadeIn 0.15s ease-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.user-message {
+    align-self: flex-end;
+    background-color: var(--user-msg-bg);
+    color: white;
+    border-bottom-right-radius: 2px;
+    box-shadow: var(--shadow-sm);
+}
+
+.bot-message {
+    align-self: flex-start;
+    background-color: var(--bot-msg-bg);
+    border-bottom-left-radius: 2px;
+    border: 1px solid var(--border-color);
+    white-space: pre-wrap;
+    color: var(--text-color);
+}
+
+/* Code Blocks in Messages */
+.bot-message pre {
+    background: #0d1117;
+    padding: 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9em;
+    border: 1px solid var(--border-color);
+    margin: 10px 0;
+}
+
+.bot-message code {
+    font-family: 'JetBrains Mono', monospace;
+    background: rgba(110, 118, 129, 0.4);
+    padding: 0.2em 0.4em;
+    border-radius: 4px;
+    font-size: 0.9em;
+}
+
+.bot-message pre code {
+    background: transparent;
+    padding: 0;
+}
+
+/* Reasoning/Thinking Blocks */
+.thinking-block {
+    font-size: 0.9em;
+    color: var(--text-muted);
+    border-left: 2px solid var(--border-color);
+    padding-left: 10px;
+    margin: 5px 0;
+    font-style: italic;
+}
+
+/* Input Area */
+#input-area {
+    padding: 1.5rem;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    gap: 12px;
+    background: var(--chat-bg);
+    position: relative;
+}
+
+.input-wrapper {
+    flex: 1;
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+input[type="text"] {
+    width: 100%;
+    padding: 14px 16px;
+    padding-right: 40px; /* Space for mic inside if needed */
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background-color: var(--input-bg);
+    color: var(--text-color);
+    font-size: 1rem;
+    font-family: inherit;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+input[type="text"]:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
+}
+
+button.primary-btn {
+    padding: 0 24px;
+    background-color: var(--success-color);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s, transform 0.1s;
+    font-size: 0.95rem;
+}
+
+button.primary-btn:hover {
+    background-color: #2ea043;
+}
+
+button.primary-btn:active {
+    transform: scale(0.98);
+}
+
+.mic-btn {
+    background: var(--bg-color);
+    border: 1px solid var(--border-color);
+    width: 46px;
+    height: 46px; /* Match input height roughly */
+    border-radius: 8px;
+    color: var(--text-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 1.2rem;
+}
+
+.mic-btn:hover {
+    background-color: var(--border-color);
+    color: var(--text-color);
+}
+
+.mic-btn.recording {
+    color: var(--error-color);
+    border-color: var(--error-color);
+    background: rgba(255, 123, 114, 0.1);
+    animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0.4); }
+    70% { box-shadow: 0 0 0 10px rgba(255, 123, 114, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0); }
+}
+
+/* Modals */
+.modal-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(13, 17, 23, 0.85);
+    backdrop-filter: blur(4px);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: var(--chat-bg);
+    padding: 2rem;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 480px;
+    box-shadow: var(--shadow-md);
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.login-box {
+    text-align: center;
+    width: 320px;
+}
+
+.login-box h2 {
+    color: var(--text-color);
+    margin-bottom: 1.5rem;
+}
+
+.modal-content h2 {
+    margin-top: 0;
+    color: var(--text-color);
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 1rem;
+    margin-bottom: 1.5rem;
+    font-size: 1.3rem;
+}
+
+.form-group {
+    margin-bottom: 1.2rem;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 500;
+    font-size: 0.9em;
+    color: var(--text-color);
+}
+
+.form-group input, .form-group select {
+    width: 100%;
+    padding: 10px;
+    background-color: var(--input-bg);
+    border: 1px solid var(--border-color);
+    color: var(--text-color);
+    border-radius: 6px;
+    font-size: 0.95rem;
+}
+
+.form-group input:focus, .form-group select:focus {
+    outline: none;
+    border-color: var(--accent-color);
+}
+
+.form-hint {
+    font-size: 0.8em;
+    color: var(--text-muted);
+    margin-top: 6px;
+}
+
+.btn-group {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 2rem;
+}
+
+button.btn-cancel {
+    background-color: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-color);
+    padding: 0 20px;
+    border-radius: 6px;
+    height: 38px;
+    font-weight: 500;
+}
+
+button.btn-cancel:hover {
+    background-color: var(--border-color);
+}
+
+#loginBtn {
+    width: 100%;
+    margin-top: 10px;
+    height: 40px;
+    border-radius: 6px;
+    background-color: var(--success-color);
+    color: white;
+    font-weight: 600;
+    border: none;
+    cursor: pointer;
+}
+
+.error-msg {
+    color: var(--error-color);
+    margin-top: 12px;
+    font-size: 0.9em;
+    background: rgba(255, 123, 114, 0.1);
+    padding: 8px;
+    border-radius: 6px;
+    display: none; /* Hide default */
+}
+.error-msg:not(:empty) {
+    display: block;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+    .container {
+        border: none;
+    }
+    
+    header {
+        padding: 0.8rem 1rem;
+        flex-wrap: wrap;
+    }
+
+    .controls-bar {
+        order: 3;
+        width: 100%;
+        margin-top: 10px;
+        justify-content: space-between;
+        background: var(--bg-color);
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+    }
+
+    .user-area {
+        margin-left: auto;
+        border-left: none;
+    }
+
+    .message {
+        max-width: 90%;
+    }
+}

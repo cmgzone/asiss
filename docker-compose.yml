@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  gitubot:
+    build: .
+    container_name: gitubot
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount config and env for persistence and easy editing
+      - ./config.json:/app/config.json
+      - ./.env:/app/.env
+      # Mount WhatsApp auth data to persist session across restarts
+      - ./.wwebjs_auth:/app/.wwebjs_auth
+    environment:
+      - NODE_ENV=production
+    stdin_open: true # tty for interactive console
+    tty: true        # tty for interactive console

@@ -1,0 +1,1473 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gitu - AI Business Assistant</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: #1a1a24;
+            --bg-card-hover: #22222e;
+            --accent-primary: #6366f1;
+            --accent-secondary: #8b5cf6;
+            --accent-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%);
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --border-color: rgba(255, 255, 255, 0.08);
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --info: #3b82f6;
+            --glass: rgba(255, 255, 255, 0.03);
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Background Effects */
+        .bg-effects {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .bg-effects::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -50%;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, transparent 50%);
+        }
+
+        .bg-effects::after {
+            content: '';
+            position: absolute;
+            bottom: -30%;
+            left: -30%;
+            width: 80%;
+            height: 80%;
+            background: radial-gradient(circle, rgba(139, 92, 246, 0.1) 0%, transparent 50%);
+        }
+
+        /* App Layout */
+        .app {
+            display: flex;
+            min-height: 100vh;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 280px;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            position: fixed;
+            height: 100vh;
+            z-index: 100;
+        }
+
+        .sidebar-header {
+            padding: 24px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: var(--accent-gradient);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            color: white;
+            -webkit-text-fill-color: white;
+        }
+
+        .nav-menu {
+            flex: 1;
+            padding: 16px;
+            overflow-y: auto;
+        }
+
+        .nav-section {
+            margin-bottom: 24px;
+        }
+
+        .nav-section-title {
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            padding: 0 12px;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            border-radius: 10px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-bottom: 4px;
+        }
+
+        .nav-item:hover {
+            background: var(--glass);
+            color: var(--text-primary);
+        }
+
+        .nav-item.active {
+            background: var(--accent-gradient);
+            color: white;
+        }
+
+        .nav-item-icon {
+            font-size: 1.2rem;
+            width: 24px;
+            text-align: center;
+        }
+
+        .nav-item-badge {
+            margin-left: auto;
+            background: var(--danger);
+            color: white;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            margin-left: 280px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Top Bar */
+        .topbar {
+            height: 70px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 32px;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+        }
+
+        .topbar-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .page-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .topbar-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            border-radius: 20px;
+            font-size: 0.85rem;
+            color: var(--success);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border-radius: 10px;
+            border: none;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: var(--accent-gradient);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
+        }
+
+        .btn-ghost {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-ghost:hover {
+            background: var(--glass);
+            color: var(--text-primary);
+        }
+
+        /* Dashboard Grid */
+        .dashboard {
+            padding: 32px;
+            display: grid;
+            gap: 24px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            transition: all 0.3s;
+        }
+
+        .stat-card:hover {
+            background: var(--bg-card-hover);
+            transform: translateY(-4px);
+            box-shadow: var(--shadow);
+        }
+
+        .stat-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+
+        .stat-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+        }
+
+        .stat-icon.purple {
+            background: rgba(139, 92, 246, 0.2);
+            color: #a78bfa;
+        }
+
+        .stat-icon.blue {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+        }
+
+        .stat-icon.green {
+            background: rgba(34, 197, 94, 0.2);
+            color: #4ade80;
+        }
+
+        .stat-icon.orange {
+            background: rgba(245, 158, 11, 0.2);
+            color: #fbbf24;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .stat-change {
+            font-size: 0.8rem;
+            padding: 4px 8px;
+            border-radius: 6px;
+        }
+
+        .stat-change.positive {
+            background: rgba(34, 197, 94, 0.1);
+            color: var(--success);
+        }
+
+        /* Content Grid */
+        .content-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 24px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            overflow: hidden;
+        }
+
+        .card-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .card-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .card-body {
+            padding: 24px;
+        }
+
+        /* Chat Section */
+        .chat-section {
+            display: flex;
+            flex-direction: column;
+            height: 500px;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .message {
+            max-width: 80%;
+            padding: 14px 18px;
+            border-radius: 16px;
+            line-height: 1.5;
+            font-size: 0.95rem;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: var(--accent-gradient);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.bot {
+            align-self: flex-start;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-bottom-left-radius: 4px;
+        }
+
+        .chat-input-area {
+            padding: 20px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 12px;
+        }
+
+        .chat-input {
+            flex: 1;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 14px 18px;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .chat-input:focus {
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+
+        .chat-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* Agent Panel */
+        .agent-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .agent-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            transition: all 0.2s;
+        }
+
+        .agent-item:hover {
+            background: var(--bg-card-hover);
+        }
+
+        .agent-avatar {
+            width: 42px;
+            height: 42px;
+            background: var(--accent-gradient);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+        }
+
+        .agent-info {
+            flex: 1;
+        }
+
+        .agent-name {
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .agent-role {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .agent-status {
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .agent-status.idle {
+            background: rgba(100, 116, 139, 0.2);
+            color: var(--text-muted);
+        }
+
+        .agent-status.working {
+            background: rgba(59, 130, 246, 0.2);
+            color: var(--info);
+            animation: pulse 1.5s infinite;
+        }
+
+        /* Project List */
+        .project-list {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .project-item {
+            padding: 16px;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            border-left: 4px solid var(--accent-primary);
+        }
+
+        .project-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .project-name {
+            font-weight: 600;
+        }
+
+        .project-deadline {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .progress-bar {
+            height: 8px;
+            background: var(--bg-primary);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--accent-gradient);
+            border-radius: 4px;
+            transition: width 0.5s ease;
+        }
+
+        .project-stats {
+            display: flex;
+            gap: 16px;
+            margin-top: 12px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        /* Quick Actions */
+        .quick-actions {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+
+        .quick-action {
+            padding: 16px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .quick-action:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--accent-primary);
+        }
+
+        .quick-action-icon {
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+        }
+
+        .quick-action-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        /* Login Overlay */
+        #login-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: var(--bg-primary);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .login-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 48px;
+            width: 400px;
+            text-align: center;
+        }
+
+        .login-logo {
+            font-size: 2rem;
+            font-weight: 700;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }
+
+        .login-subtitle {
+            color: var(--text-secondary);
+            margin-bottom: 32px;
+        }
+
+        .login-input {
+            width: 100%;
+            padding: 14px 18px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            color: var(--text-primary);
+            font-size: 1rem;
+            margin-bottom: 16px;
+            outline: none;
+        }
+
+        .login-input:focus {
+            border-color: var(--accent-primary);
+        }
+
+        .login-btn {
+            width: 100%;
+            padding: 14px;
+            background: var(--accent-gradient);
+            border: none;
+            border-radius: 10px;
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .login-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(99, 102, 241, 0.4);
+        }
+
+        /* Settings Modal */
+        #settings-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(8px);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .settings-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            width: 600px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .settings-header {
+            padding: 24px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .settings-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .settings-close {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            font-size: 1.5rem;
+            cursor: pointer;
+        }
+
+        .settings-body {
+            padding: 24px;
+        }
+
+        .settings-section {
+            margin-bottom: 24px;
+        }
+
+        .settings-section-title {
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+
+        .settings-row {
+            margin-bottom: 16px;
+        }
+
+        .settings-label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .settings-input {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            outline: none;
+        }
+
+        .settings-input:focus {
+            border-color: var(--accent-primary);
+        }
+
+        .settings-select {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            outline: none;
+        }
+
+        .settings-footer {
+            padding: 24px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+
+        /* Hide scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+
+        /* Responsive */
+        @media (max-width: 1200px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .content-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                display: none;
+            }
+
+            .main-content {
+                margin-left: 0;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="bg-effects"></div>
+
+    <!-- Login Overlay -->
+    <div id="login-overlay">
+        <div class="login-card">
+            <div class="login-logo">🤖 Gitu</div>
+            <div class="login-subtitle">Your AI Business Assistant</div>
+            <input type="text" id="login-username" class="login-input" placeholder="Username">
+            <input type="password" id="login-password" class="login-input" placeholder="Password">
+            <button id="login-btn" class="login-btn">Sign In</button>
+            <p id="login-error" style="color: var(--danger); margin-top: 12px; display: none;"></p>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal">
+        <div class="settings-card">
+            <div class="settings-header">
+                <h3 class="settings-title">⚙️ Settings</h3>
+                <button class="settings-close" id="settings-close">&times;</button>
+            </div>
+            <div class="settings-body">
+                <div class="settings-section">
+                    <div class="settings-section-title">AI Model</div>
+                    <div class="settings-row">
+                        <label class="settings-label">Model Provider</label>
+                        <select id="settings-model" class="settings-select">
+                            <option value="OpenRouter">OpenRouter</option>
+                            <option value="NVIDIA">NVIDIA</option>
+                        </select>
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label">AI Model</label>
+                        <select id="settings-aiModel" class="settings-select">
+                            <option value="">Select a model...</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <div class="settings-section-title">API Keys</div>
+                    <div class="settings-row">
+                        <label class="settings-label">OpenRouter API Key</label>
+                        <input type="password" id="settings-openrouter" class="settings-input" placeholder="sk-or-...">
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label">NVIDIA API Key</label>
+                        <input type="password" id="settings-nvidia" class="settings-input" placeholder="nvapi-...">
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label">Brave Search API Key</label>
+                        <input type="password" id="settings-brave" class="settings-input" placeholder="BSA...">
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <div class="settings-section-title">Voice Agent</div>
+                    <div class="settings-row">
+                        <label class="settings-label">ElevenLabs API Key</label>
+                        <input type="password" id="settings-elevenlabs" class="settings-input" placeholder="">
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label">Deepgram API Key</label>
+                        <input type="password" id="settings-deepgram" class="settings-input" placeholder="">
+                    </div>
+                </div>
+            </div>
+            <div class="settings-footer">
+                <button class="btn btn-ghost" id="settings-cancel">Cancel</button>
+                <button class="btn btn-primary" id="settings-save">💾 Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main App -->
+    <div class="app" id="app" style="display: none;">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <div class="logo-icon">🤖</div>
+                    <span>Gitu</span>
+                </div>
+            </div>
+            <nav class="nav-menu">
+                <div class="nav-section">
+                    <div class="nav-section-title">Main</div>
+                    <div class="nav-item active" data-view="dashboard">
+                        <span class="nav-item-icon">📊</span>
+                        <span>Dashboard</span>
+                    </div>
+                    <div class="nav-item" data-view="chat">
+                        <span class="nav-item-icon">💬</span>
+                        <span>Chat</span>
+                    </div>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-section-title">Business</div>
+                    <div class="nav-item" data-view="projects">
+                        <span class="nav-item-icon">📋</span>
+                        <span>Projects</span>
+                        <span class="nav-item-badge" id="project-count">0</span>
+                    </div>
+                    <div class="nav-item" data-view="agents">
+                        <span class="nav-item-icon">🤖</span>
+                        <span>Agent Team</span>
+                    </div>
+                    <div class="nav-item" data-view="finances">
+                        <span class="nav-item-icon">💰</span>
+                        <span>Finances</span>
+                    </div>
+                    <div class="nav-item" data-view="contacts">
+                        <span class="nav-item-icon">👥</span>
+                        <span>Contacts</span>
+                    </div>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-section-title">System</div>
+                    <div class="nav-item" id="nav-settings">
+                        <span class="nav-item-icon">⚙️</span>
+                        <span>Settings</span>
+                    </div>
+                </div>
+            </nav>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Top Bar -->
+            <header class="topbar">
+                <div class="topbar-left">
+                    <h1 class="page-title" id="page-title">Dashboard</h1>
+                </div>
+                <div class="topbar-right">
+                    <div class="status-indicator">
+                        <div class="status-dot"></div>
+                        <span>Online</span>
+                    </div>
+                    <span id="user-display" style="color: var(--text-secondary);"></span>
+                </div>
+            </header>
+
+            <!-- Dashboard View -->
+            <div class="dashboard" id="view-dashboard">
+                <!-- Stats Grid -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-card-header">
+                            <div class="stat-icon purple">📋</div>
+                            <span class="stat-change positive">+2</span>
+                        </div>
+                        <div class="stat-value" id="stat-projects">0</div>
+                        <div class="stat-label">Active Projects</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-header">
+                            <div class="stat-icon blue">🤖</div>
+                        </div>
+                        <div class="stat-value" id="stat-agents">0</div>
+                        <div class="stat-label">AI Agents</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-header">
+                            <div class="stat-icon green">💰</div>
+                            <span class="stat-change positive">+12%</span>
+                        </div>
+                        <div class="stat-value" id="stat-income">$0</div>
+                        <div class="stat-label">Total Income</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-header">
+                            <div class="stat-icon orange">✅</div>
+                        </div>
+                        <div class="stat-value" id="stat-tasks">0</div>
+                        <div class="stat-label">Tasks Done</div>
+                    </div>
+                </div>
+
+                <!-- Content Grid -->
+                <div class="content-grid">
+                    <!-- Chat Card -->
+                    <div class="card chat-section">
+                        <div class="card-header">
+                            <h3 class="card-title">💬 Chat with Gitu</h3>
+                            <button class="btn btn-ghost" id="voice-toggle">🎤 Voice</button>
+                        </div>
+                        <div class="chat-messages" id="chat-messages">
+                            <div class="message bot">Hello! I'm Gitu, your AI business assistant. How can I help you
+                                today?</div>
+                        </div>
+                        <div class="chat-input-area">
+                            <input type="text" class="chat-input" id="chat-input" placeholder="Type a message...">
+                            <button class="btn btn-primary" id="send-btn">Send</button>
+                        </div>
+                    </div>
+
+                    <!-- Right Column -->
+                    <div style="display: flex; flex-direction: column; gap: 24px;">
+                        <!-- Quick Actions -->
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title">⚡ Quick Actions</h3>
+                            </div>
+                            <div class="card-body">
+                                <div class="quick-actions">
+                                    <div class="quick-action" data-action="project">
+                                        <div class="quick-action-icon">📋</div>
+                                        <div class="quick-action-label">New Project</div>
+                                    </div>
+                                    <div class="quick-action" data-action="agent">
+                                        <div class="quick-action-icon">🤖</div>
+                                        <div class="quick-action-label">Create Agent</div>
+                                    </div>
+                                    <div class="quick-action" data-action="invoice">
+                                        <div class="quick-action-icon">📄</div>
+                                        <div class="quick-action-label">New Invoice</div>
+                                    </div>
+                                    <div class="quick-action" data-action="income">
+                                        <div class="quick-action-icon">💵</div>
+                                        <div class="quick-action-label">Log Income</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Active Agents -->
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title">🤖 Agent Team</h3>
+                            </div>
+                            <div class="card-body">
+                                <div class="agent-list" id="agent-list">
+                                    <p style="color: var(--text-muted); text-align: center;">No agents yet. Create one!
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chat View (Full Screen) -->
+            <div class="dashboard" id="view-chat" style="display: none;">
+                <div class="card chat-section" style="height: calc(100vh - 150px);">
+                    <div class="card-header">
+                        <h3 class="card-title">💬 Chat with Gitu</h3>
+                    </div>
+                    <div class="chat-messages" id="chat-messages-full"></div>
+                    <div class="chat-input-area">
+                        <input type="text" class="chat-input" id="chat-input-full" placeholder="Type a message...">
+                        <button class="btn btn-primary" id="send-btn-full">Send</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Projects View -->
+            <div class="dashboard" id="view-projects" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">📂 Active Projects</h3>
+                        <button class="btn btn-primary"
+                            onclick="document.getElementById('chat-input').value='Create a new project named '; document.getElementById('chat-input').focus();">
+                            + New Project
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div class="project-list" id="project-list-full">
+                            <!-- Projects will be rendered here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Agents View -->
+            <div class="dashboard" id="view-agents" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">🤖 Agent Team</h3>
+                        <button class="btn btn-primary"
+                            onclick="document.getElementById('chat-input').value='Create a new agent named '; document.getElementById('chat-input').focus();">
+                            + New Agent
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div class="agent-list" id="agent-list-full">
+                            <!-- Agents will be rendered here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // Socket.io connection
+        let socket;
+        let currentUser = null;
+
+        // Model lists by provider
+        const modelsByProvider = {
+            'OpenRouter': [
+                { value: 'google/gemini-2.0-flash-lite-preview-02-05:free', label: 'Gemini 2.0 Flash Lite (Free)' },
+                { value: 'google/gemini-2.0-flash-exp:free', label: 'Gemini 2.0 Flash Exp (Free)' },
+                { value: 'anthropic/claude-3-haiku', label: 'Claude 3 Haiku' },
+                { value: 'meta-llama/llama-3.1-8b-instruct:free', label: 'Llama 3.1 8B (Free)' },
+                { value: 'mistralai/mistral-7b-instruct:free', label: 'Mistral 7B (Free)' },
+                { value: 'deepseek/deepseek-chat', label: 'DeepSeek Chat' },
+                { value: 'qwen/qwen-2.5-72b-instruct:free', label: 'Qwen 2.5 72B (Free)' }
+            ],
+            'NVIDIA': [
+                { value: 'moonshotai/kimi-k2.5', label: 'Kimi K2.5' },
+                { value: 'nvidia/llama-3.1-nemotron-70b-instruct', label: 'Llama 3.1 Nemotron 70B' },
+                { value: 'deepseek/deepseek-r1', label: 'DeepSeek R1' },
+                { value: 'meta/llama-3.3-70b-instruct', label: 'Llama 3.3 70B' },
+                { value: 'google/gemma-2-27b-it', label: 'Gemma 2 27B' }
+            ]
+        };
+
+        // Update AI Model dropdown based on selected provider
+        function updateModelDropdown(provider, selectedModel = '') {
+            const modelSelect = document.getElementById('settings-aiModel');
+            const models = modelsByProvider[provider] || [];
+
+            modelSelect.innerHTML = '<option value="">Select a model...</option>';
+            models.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model.value;
+                option.textContent = model.label;
+                if (model.value === selectedModel) option.selected = true;
+                modelSelect.appendChild(option);
+            });
+        }
+
+        // DOM Elements
+        const loginOverlay = document.getElementById('login-overlay');
+        const loginBtn = document.getElementById('login-btn');
+        const loginError = document.getElementById('login-error');
+        const app = document.getElementById('app');
+        const settingsModal = document.getElementById('settings-modal');
+        const chatMessages = document.getElementById('chat-messages');
+        const chatInput = document.getElementById('chat-input');
+        const sendBtn = document.getElementById('send-btn');
+
+        // Full Chat Elements
+        const chatMessagesFull = document.getElementById('chat-messages-full');
+        const chatInputFull = document.getElementById('chat-input-full');
+        const sendBtnFull = document.getElementById('send-btn-full');
+
+        // Login
+        loginBtn.addEventListener('click', async () => {
+            const username = document.getElementById('login-username').value.trim();
+            const password = document.getElementById('login-password').value;
+
+            if (!username || !password) {
+                loginError.textContent = 'Please enter username and password';
+                loginError.style.display = 'block';
+                return;
+            }
+
+            try {
+                const res = await fetch('/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+
+                if (data.token) {
+                    localStorage.setItem('auth_token', data.token);
+                    localStorage.setItem('username', username);
+                    currentUser = username;
+                    initSocket(data.token);
+                    loginOverlay.style.display = 'none';
+                    app.style.display = 'flex';
+                    document.getElementById('user-display').textContent = `👤 ${username}`;
+                    loadDashboardData();
+                } else {
+                    loginError.textContent = data.error || 'Login failed';
+                    loginError.style.display = 'block';
+                }
+            } catch (e) {
+                loginError.textContent = 'Connection error';
+                loginError.style.display = 'block';
+            }
+        });
+
+        // Check existing session
+        const savedToken = localStorage.getItem('auth_token');
+        const savedUsername = localStorage.getItem('username');
+        if (savedToken && savedUsername) {
+            currentUser = savedUsername;
+            initSocket(savedToken);
+            loginOverlay.style.display = 'none';
+            app.style.display = 'flex';
+            document.getElementById('user-display').textContent = `👤 ${savedUsername}`;
+            loadDashboardData();
+        }
+
+        function initSocket(token) {
+            socket = io({ auth: { token } });
+
+            socket.on('connect', () => console.log('Connected'));
+            socket.on('disconnect', () => console.log('Disconnected'));
+
+            socket.on('message', (text) => {
+                addMessage(text, false);
+            });
+
+            socket.on('stream_chunk', (chunk) => {
+                // Update Dashboard Chat
+                let lastBot = chatMessages.querySelector('.message.bot:last-child');
+                if (!lastBot || lastBot.dataset.complete === 'true') {
+                    lastBot = addMessageToContainer(chatMessages, '', false);
+                    lastBot.dataset.complete = 'false';
+                }
+                lastBot.textContent += chunk;
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+
+                // Update Full Chat
+                let lastBotFull = chatMessagesFull.querySelector('.message.bot:last-child');
+                if (!lastBotFull || lastBotFull.dataset.complete === 'true') {
+                    lastBotFull = addMessageToContainer(chatMessagesFull, '', false);
+                    lastBotFull.dataset.complete = 'false';
+                }
+                lastBotFull.textContent += chunk;
+                chatMessagesFull.scrollTop = chatMessagesFull.scrollHeight;
+            });
+
+            // Handle settings data from server
+            socket.on('settings_data', handleSettingsData);
+
+            // Handle settings saved confirmation
+            socket.on('settings_saved', () => {
+                console.log('Settings saved successfully');
+            });
+        }
+
+        function addMessage(text, isUser) {
+            // Add to both containers
+            addMessageToContainer(chatMessages, text, isUser);
+            addMessageToContainer(chatMessagesFull, text, isUser);
+        }
+
+        function addMessageToContainer(container, text, isUser) {
+            const div = document.createElement('div');
+            div.className = `message ${isUser ? 'user' : 'bot'}`;
+            div.textContent = text;
+            if (!isUser) div.dataset.complete = 'true';
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+            return div;
+        }
+
+        function sendMessage(inputEl) {
+            const text = inputEl.value.trim();
+            if (!text) return;
+            addMessage(text, true);
+            socket.emit('message', text);
+            chatInput.value = '';
+            chatInputFull.value = '';
+        }
+
+        sendBtn.addEventListener('click', () => sendMessage(chatInput));
+        chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage(chatInput);
+        });
+
+        sendBtnFull.addEventListener('click', () => sendMessage(chatInputFull));
+        chatInputFull.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage(chatInputFull);
+        });
+
+        // Navigation
+        document.querySelectorAll('.nav-item[data-view]').forEach(item => {
+            item.addEventListener('click', () => {
+                document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+                item.classList.add('active');
+
+                const view = item.dataset.view;
+                document.getElementById('page-title').textContent = item.querySelector('span:last-child').textContent;
+
+                document.querySelectorAll('[id^="view-"]').forEach(v => v.style.display = 'none');
+                const viewEl = document.getElementById(`view-${view}`);
+                if (viewEl) viewEl.style.display = 'grid';
+            });
+        });
+
+        // Settings
+        document.getElementById('nav-settings').addEventListener('click', () => {
+            settingsModal.style.display = 'flex';
+            loadSettings();
+        });
+
+        document.getElementById('settings-close').addEventListener('click', () => {
+            settingsModal.style.display = 'none';
+        });
+
+        document.getElementById('settings-cancel').addEventListener('click', () => {
+            settingsModal.style.display = 'none';
+        });
+
+        // Provider change handler
+        document.getElementById('settings-model').addEventListener('change', (e) => {
+            updateModelDropdown(e.target.value);
+        });
+
+        document.getElementById('settings-save').addEventListener('click', async () => {
+            const settings = {
+                model: document.getElementById('settings-model').value,
+                aiModel: document.getElementById('settings-aiModel').value,
+                openrouterKey: document.getElementById('settings-openrouter').value,
+                nvidiaKey: document.getElementById('settings-nvidia').value,
+                braveKey: document.getElementById('settings-brave').value,
+                elevenLabsKey: document.getElementById('settings-elevenlabs').value,
+                deepgramKey: document.getElementById('settings-deepgram').value
+            };
+
+            socket.emit('save_settings', settings);
+            settingsModal.style.display = 'none';
+        });
+
+        async function loadSettings() {
+            socket.emit('get_settings');
+        }
+
+        // Handle settings data from server
+        function handleSettingsData(data) {
+            const provider = data.model || 'mock';
+            document.getElementById('settings-model').value = provider;
+            updateModelDropdown(provider, data.aiModel || '');
+            document.getElementById('settings-openrouter').value = data.openrouterKey || '';
+            document.getElementById('settings-nvidia').value = data.nvidiaKey || '';
+            document.getElementById('settings-brave').value = data.braveKey || '';
+            document.getElementById('settings-elevenlabs').value = data.elevenLabsKey || '';
+            document.getElementById('settings-deepgram').value = data.deepgramKey || '';
+        }
+
+        // Quick Actions
+        document.querySelectorAll('.quick-action').forEach(action => {
+            action.addEventListener('click', () => {
+                const type = action.dataset.action;
+                let prompt = '';
+                switch (type) {
+                    case 'project': prompt = 'Create a new project called '; break;
+                    case 'agent': prompt = 'Create an agent called '; break;
+                    case 'invoice': prompt = 'Create an invoice for '; break;
+                    case 'income': prompt = 'Log income of $'; break;
+                }
+                chatInput.value = prompt;
+                chatInput.focus();
+            });
+        });
+
+        // Load Dashboard Data
+        // Load Dashboard Data
+        async function loadDashboardData() {
+            try {
+                // Fetch Stats
+                const statsRes = await fetch('/api/stats');
+                const stats = await statsRes.json();
+
+                document.getElementById('stat-projects').textContent = stats.activeProjects || 0;
+                document.getElementById('stat-agents').textContent = stats.activeAgents || 0;
+                document.getElementById('project-count').textContent = stats.activeProjects || 0;
+                document.getElementById('stat-tasks').textContent = stats.tasksDone || 0;
+                document.getElementById('stat-income').textContent = '$' + (stats.totalIncome || 0).toLocaleString();
+
+                // Fetch Agents
+                const agentsRes = await fetch('/api/agents');
+                const agentsData = await agentsRes.json();
+                renderAgents(agentsData.agents);
+
+                // Fetch Projects
+                const projectsRes = await fetch('/api/projects');
+                const projectsData = await projectsRes.json();
+                renderProjects(projectsData.projects);
+            } catch (e) {
+                console.error('Failed to load dashboard data:', e);
+            }
+        }
+
+        function renderProjects(projects) {
+            const listFull = document.getElementById('project-list-full');
+
+            if (!projects || projects.length === 0) {
+                if (listFull) listFull.innerHTML = '<p style="color: var(--text-muted); text-align: center;">No projects yet.</p>';
+                return;
+            }
+
+            const html = projects.map(p => `
+                <div class="project-item">
+                    <div class="project-header">
+                        <div class="project-name">${p.name}</div>
+                        <div class="project-deadline">${p.status}</div>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${p.progress || 0}%"></div>
+                    </div>
+                    <div class="project-stats">
+                        <span>Tasks: ${p.doneCount || 0}/${p.taskCount || 0}</span>
+                        <span>${p.progress || 0}% Complete</span>
+                    </div>
+                </div>
+            `).join('');
+
+            if (listFull) listFull.innerHTML = html;
+        }
+
+        function renderAgents(agents) {
+            const list = document.getElementById('agent-list');
+            const listFull = document.getElementById('agent-list-full');
+
+            const html = (!agents || agents.length === 0)
+                ? '<p style="color: var(--text-muted); text-align: center;">No agents yet. Create one!</p>'
+                : agents.map(agent => `
+                    <div class="agent-item">
+                        <div class="agent-avatar">🤖</div>
+                        <div class="agent-info">
+                            <div class="agent-name">${agent.name}</div>
+                            <div class="agent-role">${agent.role}</div>
+                        </div>
+                        <div class="agent-status ${agent.status}">${agent.status}</div>
+                    </div>
+                `).join('');
+
+            if (list) list.innerHTML = html;
+            if (listFull) listFull.innerHTML = html;
+        }
+
+
+        // Poll for updates every 30s
+        setInterval(loadDashboardData, 30000);
+    </script>
+</body>
+
+</html>

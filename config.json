@@ -1,0 +1,9 @@
+{
+  "channels": [
+    "Console (CLI)",
+    "Web Interface (Chat)"
+  ],
+  "model": "NVIDIA",
+  "aiModel": "moonshotai/kimi-k2.5",
+  "createdAt": "2026-02-08T09:51:26.432Z"
+}

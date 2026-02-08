@@ -1,0 +1,13 @@
+{
+  "368cb1a8-ad1d-4193-94de-f80e3fb7cc23": {
+    "id": "368cb1a8-ad1d-4193-94de-f80e3fb7cc23",
+    "type": "agent_prompt",
+    "sessionId": "bdbe8fc2-f23a-4e8f-ad0b-9b23c2daf709",
+    "prompt": "/jobs",
+    "runAt": 1770488804170,
+    "enabled": false,
+    "createdAt": 1770488803170,
+    "runCount": 1,
+    "lastRunAt": 1770488804182
+  }
+}
