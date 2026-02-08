@@ -48,14 +48,14 @@ async function runWizard() {
       default: 'OpenRouter'
     },
     {
-        type: 'input',
-        name: 'aiModel',
-        message: 'Enter specific AI Model ID (optional, e.g. google/gemini-2.0-flash-lite-preview-02-05:free):',
-        default: (answers) => {
-            if (answers.model === 'OpenRouter') return 'google/gemini-2.0-flash-lite-preview-02-05:free';
-            if (answers.model === 'NVIDIA') return 'moonshotai/kimi-k2.5';
-            return '';
-        }
+      type: 'input',
+      name: 'aiModel',
+      message: 'Enter specific AI Model ID (optional, e.g. google/gemini-2.0-flash-lite-preview-02-05:free):',
+      default: (answers: any) => {
+        if (answers.model === 'OpenRouter') return 'google/gemini-2.0-flash-lite-preview-02-05:free';
+        if (answers.model === 'NVIDIA') return 'moonshotai/kimi-k2.5';
+        return '';
+      }
     }
   ]);
 
@@ -145,37 +145,37 @@ async function runWizard() {
   // --- User Creation Step ---
   console.log(chalk.bold.yellow('\n🔐 User Management Setup'));
   const userAnswers = await inquirer.prompt([
-      {
-          type: 'confirm',
-          name: 'createUser',
-          message: 'Do you want to create a new user account?',
-          default: true
-      }
+    {
+      type: 'confirm',
+      name: 'createUser',
+      message: 'Do you want to create a new user account?',
+      default: true
+    }
   ]);
 
   if (userAnswers.createUser) {
-      const userCreds = await inquirer.prompt([
-          {
-              type: 'input',
-              name: 'username',
-              message: 'Enter new username:',
-              validate: (input) => input.length > 0 ? true : 'Username cannot be empty'
-          },
-          {
-              type: 'password',
-              name: 'password',
-              message: 'Enter password:',
-              mask: '*',
-              validate: (input) => input.length > 0 ? true : 'Password cannot be empty'
-          }
-      ]);
-
-      const auth = new AuthManager();
-      if (auth.register(userCreds.username, userCreds.password)) {
-          console.log(chalk.green(`✅ User '${userCreds.username}' created successfully.`));
-      } else {
-          console.log(chalk.red(`❌ User '${userCreds.username}' already exists.`));
+    const userCreds = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'username',
+        message: 'Enter new username:',
+        validate: (input) => input.length > 0 ? true : 'Username cannot be empty'
+      },
+      {
+        type: 'password',
+        name: 'password',
+        message: 'Enter password:',
+        mask: '*',
+        validate: (input) => input.length > 0 ? true : 'Password cannot be empty'
       }
+    ]);
+
+    const auth = new AuthManager();
+    if (auth.register(userCreds.username, userCreds.password)) {
+      console.log(chalk.green(`✅ User '${userCreds.username}' created successfully.`));
+    } else {
+      console.log(chalk.red(`❌ User '${userCreds.username}' already exists.`));
+    }
   }
 
   // --- Save Configuration ---
@@ -210,7 +210,7 @@ async function runWizard() {
   if (secrets.discordToken) updateEnv('DISCORD_BOT_TOKEN', secrets.discordToken);
   if (secrets.slackBotToken) updateEnv('SLACK_BOT_TOKEN', secrets.slackBotToken);
   if (secrets.slackAppToken) updateEnv('SLACK_APP_TOKEN', secrets.slackAppToken);
-  
+
   if (secrets.openrouterKey) updateEnv('OPENROUTER_API_KEY', secrets.openrouterKey);
   if (secrets.nvidiaKey) updateEnv('NVIDIA_API_KEY', secrets.nvidiaKey);
   if (secrets.openaiKey) updateEnv('OPENAI_API_KEY', secrets.openaiKey);
@@ -235,31 +235,31 @@ async function runWizard() {
     dotenv.config({ override: true });
 
     const gateway = new Gateway();
-    
+
     if (answers.channels.includes('Console (CLI)')) {
       gateway.registerChannel(new ConsoleChannel());
     }
-    
+
     // Note: Web Channel would be registered here if implemented, but we rely on Gateway/Index logic mostly
     // For now we just focus on the CLI look and feel update.
     // The Gateway logic in src/index.ts handles the actual registration based on config.
 
     if (answers.channels.includes('Telegram') && process.env.TELEGRAM_BOT_TOKEN) {
-        gateway.registerChannel(new TelegramChannel(process.env.TELEGRAM_BOT_TOKEN));
+      gateway.registerChannel(new TelegramChannel(process.env.TELEGRAM_BOT_TOKEN));
     }
 
     if (answers.channels.includes('Discord') && process.env.DISCORD_BOT_TOKEN) {
-        gateway.registerChannel(new DiscordChannel(process.env.DISCORD_BOT_TOKEN));
+      gateway.registerChannel(new DiscordChannel(process.env.DISCORD_BOT_TOKEN));
     }
 
     if (answers.channels.includes('Slack') && process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
-        gateway.registerChannel(new SlackChannel(process.env.SLACK_BOT_TOKEN, process.env.SLACK_APP_TOKEN));
+      gateway.registerChannel(new SlackChannel(process.env.SLACK_BOT_TOKEN, process.env.SLACK_APP_TOKEN));
     }
 
     if (answers.channels.includes('WhatsApp')) {
-        gateway.registerChannel(new WhatsAppChannel());
+      gateway.registerChannel(new WhatsAppChannel());
     }
-    
+
     console.log(chalk.cyan(`\n[Gitubot] Initialization sequence started for ${answers.name}...`));
     await gateway.start();
   }
