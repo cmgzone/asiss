@@ -3,7 +3,13 @@ import * as readline from 'readline';
 import { v4 as uuidv4 } from 'uuid';
 import chalk from 'chalk';
 import ora from 'ora';
-import boxen from 'boxen';
+import { marked } from 'marked';
+import TerminalRenderer from 'marked-terminal';
+
+// Setup marked with terminal renderer
+marked.setOptions({
+  renderer: new TerminalRenderer() as any
+});
 
 export class ConsoleChannel implements ChannelAdapter {
   name = 'console';
@@ -27,7 +33,7 @@ export class ConsoleChannel implements ChannelAdapter {
     console.log(chalk.green('✔ Console Channel Active'));
     console.log(chalk.gray('  Type a message and press Enter to chat.'));
     console.log(chalk.gray('──────────────────────────────────────────────────\n'));
-    
+
     process.stdout.write(chalk.blue('❯ '));
 
     this.rl.on('line', (input) => {
@@ -35,7 +41,7 @@ export class ConsoleChannel implements ChannelAdapter {
         process.stdout.write(chalk.blue('❯ '));
         return;
       }
-      
+
       // Start spinner immediately to show responsiveness
       this.spinner.start();
 
@@ -56,21 +62,27 @@ export class ConsoleChannel implements ChannelAdapter {
     if (this.spinner.isSpinning) {
       this.spinner.stop();
     }
-    
-    // Format the output beautifully using Boxen
+
+    // Format the output using marked (Markdown -> Terminal)
     console.log('');
-    console.log(boxen(text, {
-        title: 'Gitubot 🤖',
-        titleAlignment: 'center',
-        padding: 1,
-        margin: 1,
-        borderStyle: 'round',
-        borderColor: 'cyan',
-        backgroundColor: '#1e1e1e'
-    }));
-    
+    console.log(marked(text));
+
     // Reset prompt
     process.stdout.write(chalk.blue('❯ '));
+  }
+
+  // Handle streaming chunks
+  sendStream(userId: string, chunk: string) {
+    if (this.spinner.isSpinning) {
+      this.spinner.stop();
+      process.stdout.write('\n'); // Move to new line after spinner
+    }
+
+    // Direct write for streaming effect (no markdown processing on partial chunks usually, 
+    // but specific terminal renderers might handle it. For now, raw text stream is better than nothing)
+    // Ideally we would buffer and render markdown incrementally, but that's complex.
+    // Simple approach: just print the chunk.
+    process.stdout.write(chunk);
   }
 
   onMessage(handler: (msg: Message) => void) {

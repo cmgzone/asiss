@@ -52,7 +52,7 @@ async function runWizard() {
       name: 'aiModel',
       message: 'Enter specific AI Model ID (optional, e.g. google/gemini-2.0-flash-lite-preview-02-05:free):',
       default: (answers: any) => {
-        if (answers.model === 'OpenRouter') return 'google/gemini-2.0-flash-lite-preview-02-05:free';
+        if (answers.model === 'OpenRouter') return process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-lite-preview-02-05:free';
         if (answers.model === 'NVIDIA') return 'moonshotai/kimi-k2.5';
         return '';
       }
@@ -212,6 +212,7 @@ async function runWizard() {
   if (secrets.slackAppToken) updateEnv('SLACK_APP_TOKEN', secrets.slackAppToken);
 
   if (secrets.openrouterKey) updateEnv('OPENROUTER_API_KEY', secrets.openrouterKey);
+  if (answers.model === 'OpenRouter' && answers.aiModel) updateEnv('OPENROUTER_MODEL', answers.aiModel);
   if (secrets.nvidiaKey) updateEnv('NVIDIA_API_KEY', secrets.nvidiaKey);
   if (secrets.openaiKey) updateEnv('OPENAI_API_KEY', secrets.openaiKey);
   if (secrets.anthropicKey) updateEnv('ANTHROPIC_API_KEY', secrets.anthropicKey);

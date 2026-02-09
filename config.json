@@ -3,7 +3,30 @@
     "Console (CLI)",
     "Web Interface (Chat)"
   ],
-  "model": "NVIDIA",
-  "aiModel": "moonshotai/kimi-k2.5",
-  "createdAt": "2026-02-08T09:51:26.432Z"
+  "model": "OpenRouter",
+  "aiModel": "mistralai/mistral-7b-instruct:free",
+  "createdAt": "2026-02-08T09:51:26.432Z",
+  "proactive": {
+    "enabled": true,
+    "idleMs": 300000,
+    "minGapMs": 600000,
+    "everyMs": 60000
+  },
+  "dnd": {
+    "enabled": true,
+    "quietHoursStart": 22,
+    "quietHoursEnd": 8,
+    "allowUrgent": true
+  },
+  "backgroundWorker": {
+    "enabled": true,
+    "maxConcurrentGoals": 1,
+    "idleThresholdMs": 300000,
+    "checkIntervalMs": 60000,
+    "respectDND": true,
+    "reportOnCompletion": true
+  },
+  "agent": {
+    "maxTurns": 15
+  }
 }

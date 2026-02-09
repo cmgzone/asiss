@@ -5,6 +5,11 @@
   "main": "index.js",
   "scripts": {
     "start": "ts-node src/index.ts",
+    "start:prod": "pm2 start ecosystem.config.js",
+    "stop": "pm2 stop gitu",
+    "restart": "pm2 restart gitu",
+    "logs": "pm2 logs gitu",
+    "status": "pm2 status",
     "wizard": "ts-node src/cli/wizard.ts",
     "wizzard": "npm run wizard",
     "nvidia:models": "ts-node src/scripts/nvidia_list_models.ts",
@@ -30,6 +35,8 @@
     "express": "^5.2.1",
     "figlet": "^1.10.0",
     "inquirer": "^8.2.5",
+    "marked": "^15.0.12",
+    "marked-terminal": "^7.3.0",
     "multer": "^2.0.2",
     "openai": "^6.18.0",
     "ora": "^5.4.1",
@@ -45,8 +52,9 @@
   },
   "devDependencies": {
     "@types/inquirer": "^8.2.6",
-    "@types/uuid": "^8.3.4",
+    "@types/marked-terminal": "^6.1.1",
     "@types/multer": "^2.0.0",
-    "@types/qrcode-terminal": "^0.12.2"
+    "@types/qrcode-terminal": "^0.12.2",
+    "@types/uuid": "^8.3.4"
   }
 }

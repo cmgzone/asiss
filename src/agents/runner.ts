@@ -23,6 +23,9 @@ import { scratchpad } from '../core/scratchpad';
 import { taskContext } from '../core/task-context';
 import { agentSwarm } from '../core/agent-swarm';
 import { TaskMemorySkill } from '../skills/task-memory';
+import { backgroundWorker } from '../core/background-worker';
+import { dndManager } from '../core/dnd';
+import { BackgroundGoalsSkill, DNDSkill } from '../skills/background';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -85,6 +88,8 @@ export class AgentRunner {
     SkillRegistry.register(new ProjectManagerSkill());
     SkillRegistry.register(new AgentsMdSkill());
     SkillRegistry.register(new TaskMemorySkill());
+    SkillRegistry.register(new BackgroundGoalsSkill());
+    SkillRegistry.register(new DNDSkill());
 
     // Wire up agent swarm executor
     agentSwarm.setExecutor(async (agentId: string, prompt: string) => {
@@ -217,7 +222,8 @@ export class AgentRunner {
     if (modelKey === 'openrouter') {
       // Re-check env var in case it was updated
       if (process.env.OPENROUTER_API_KEY) {
-        const aiModel = config.aiModel || 'google/gemini-2.0-flash-lite-preview-02-05:free';
+        // Prioritize Env Var > Config > Default
+        const aiModel = process.env.OPENROUTER_MODEL || config.aiModel || 'google/gemini-2.0-flash-lite-preview-02-05:free';
         console.log(`[AgentRunner] Using OpenRouter with model: ${aiModel}`);
         // Ensure registry has it (idempotent-ish, updates model ID)
         ModelRegistry.register(new OpenRouterProvider(process.env.OPENROUTER_API_KEY, aiModel));
@@ -275,6 +281,20 @@ export class AgentRunner {
       }
       await this.proactiveTick();
     }, this.heartbeatMs);
+
+    // Start background worker with goal executor
+    backgroundWorker.setExecutor(async (goal, progressCallback) => {
+      progressCallback(10, 'Starting goal execution...');
+      const model = this.getModel();
+      const prompt = `You are working on a background task autonomously.\n\nGoal: ${goal.title}\n\nDescription: ${goal.description}\n\nTags: ${goal.tags.join(', ') || 'none'}\n\nWork on this goal step by step. When done, provide a summary of what was accomplished.`;
+      const response = await model.generate(prompt, this.baseSystemPrompt, []);
+      progressCallback(100, 'Goal completed');
+      return response.content || 'Task completed';
+    });
+    backgroundWorker.setOnComplete(async (goal) => {
+      await this.gateway.sendResponse(goal.sessionId, `✅ **Background task completed:** ${goal.title}\n\n${goal.result || 'Done'}`);
+    });
+    backgroundWorker.start();
   }
 
   stopLoop() {
@@ -288,7 +308,22 @@ export class AgentRunner {
   async processMessage(sessionId: string, msg: Message) {
     console.log(`[AgentRunner] Processing message for session ${sessionId}`);
 
+    // Track user activity for background worker idle detection
+    backgroundWorker.recordActivity(sessionId);
+
+    // Flush any queued DND notifications when user becomes active
+    const pendingNotifications = dndManager.flushQueue(sessionId);
+    if (pendingNotifications.length > 0) {
+      const summary = pendingNotifications.map(n => `• ${n.message}`).join('\n');
+      await this.gateway.sendResponse(sessionId, `📬 **${pendingNotifications.length} notifications while you were away:**\n\n${summary}`);
+    }
+
     if (this.handleScheduleCommand(sessionId, msg.content)) {
+      return;
+    }
+
+    // Handle background goal commands
+    if (this.handleBackgroundGoalCommand(sessionId, msg.content)) {
       return;
     }
 
@@ -659,6 +694,79 @@ ${context ? `\nSystem Context: ${context}` : ''}
       }
       const ok = this.scheduler.cancel(id);
       void this.gateway.sendResponse(sessionId, ok ? `Cancelled: ${id}` : `Not found: ${id}`);
+      return true;
+    }
+
+    return false;
+  }
+
+  private handleBackgroundGoalCommand(sessionId: string, text: string): boolean {
+    const trimmed = (text || '').trim();
+
+    // /goal <title> - <description>
+    if (trimmed.toLowerCase().startsWith('/goal ')) {
+      const rest = trimmed.slice(6).trim();
+      const dashIndex = rest.indexOf(' - ');
+      let title: string;
+      let description: string;
+
+      if (dashIndex > 0) {
+        title = rest.slice(0, dashIndex).trim();
+        description = rest.slice(dashIndex + 3).trim();
+      } else {
+        title = rest;
+        description = rest;
+      }
+
+      if (!title) {
+        void this.gateway.sendResponse(sessionId, 'Usage: /goal <title> - <description>');
+        return true;
+      }
+
+      const goal = backgroundWorker.addGoal({
+        title,
+        description,
+        sessionId,
+        priority: 'normal'
+      });
+      void this.gateway.sendResponse(sessionId, `🎯 **Goal queued:** ${goal.title}\n\nThis will run automatically when you're idle.`);
+      return true;
+    }
+
+    // /goals - list pending goals
+    if (trimmed.toLowerCase() === '/goals') {
+      const pending = backgroundWorker.getPendingGoals(sessionId);
+      const active = backgroundWorker.getActiveGoals();
+
+      if (pending.length === 0 && active.length === 0) {
+        void this.gateway.sendResponse(sessionId, '📋 No background goals. Use `/goal <title> - <description>` to add one.');
+        return true;
+      }
+
+      let response = '';
+      if (active.length > 0) {
+        response += '**🟢 Active:**\n';
+        response += active.map(g => `• ${g.title} (${g.progress}%)`).join('\n');
+        response += '\n\n';
+      }
+      if (pending.length > 0) {
+        response += '**⏳ Pending:**\n';
+        response += pending.map(g => `• [${g.priority}] ${g.title}`).join('\n');
+      }
+
+      void this.gateway.sendResponse(sessionId, response);
+      return true;
+    }
+
+    // /dnd - check DND status
+    if (trimmed.toLowerCase() === '/dnd') {
+      const status = dndManager.getStatus();
+      const inDnd = status.inQuietHours ? '🔕 **Quiet Hours Active**' : '🔔 **Available**';
+      const pending = status.pendingCount > 0 ? `\n📬 ${status.pendingCount} notifications queued` : '';
+      const config = status.config.enabled
+        ? `\nQuiet hours: ${status.config.quietHoursStart}:00 - ${status.config.quietHoursEnd}:00`
+        : '\nQuiet hours: Disabled';
+      void this.gateway.sendResponse(sessionId, `${inDnd}${config}${pending}`);
       return true;
     }
 

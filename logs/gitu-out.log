@@ -1,0 +1,23 @@
+2026-02-09 01:22:00 -08:00: [dotenv@17.2.4] injecting env (4) from .env -- tip: ✅ audit secrets and track compliance: https://dotenvx.com/ops
+2026-02-09 01:22:09 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+2026-02-09 01:22:09 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
+2026-02-09 01:22:09 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: 🔄 add secrets lifecycle management: https://dotenvx.com/ops
+2026-02-09 01:22:09 -08:00: [Gateway] Registered channel: console
+2026-02-09 01:22:09 -08:00: [Gateway] Registered channel: web
+2026-02-09 01:22:09 -08:00: [System] Telegram enabled
+2026-02-09 01:22:09 -08:00: [Gateway] Registered channel: telegram
+2026-02-09 01:22:09 -08:00: [Gateway] Starting control plane...
+2026-02-09 01:22:09 -08:00: ──────────────────────────────────────────────────
+2026-02-09 01:22:09 -08:00: ✔ Console Channel Active
+2026-02-09 01:22:09 -08:00:   Type a message and press Enter to chat.
+2026-02-09 01:22:09 -08:00: ──────────────────────────────────────────────────
+2026-02-09 01:22:09 -08:00: 
+2026-02-09 01:22:10 -08:00: [TelegramChannel] Starting polling...
+2026-02-09 01:22:10 -08:00: [AgentRunner] Heartbeat loop started (Interval: 60000ms).
+2026-02-09 01:22:10 -08:00: [BackgroundWorker] Started (check every 60000ms)
+2026-02-09 01:22:10 -08:00: [WebChannel] Server running at http://localhost:3000
+2026-02-09 01:22:35 -08:00: [TelegramChannel] Using bot @gitubot_bot (8381528303)
+2026-02-09 01:23:10 -08:00: [Heartbeat] ❤️ Thump at 01:23:10
+2026-02-09 01:24:10 -08:00: [Heartbeat] ❤️ Thump at 01:24:10
+2026-02-09 01:25:10 -08:00: [Heartbeat] ❤️ Thump at 01:25:10
+2026-02-09 01:26:10 -08:00: [Heartbeat] ❤️ Thump at 01:26:10
