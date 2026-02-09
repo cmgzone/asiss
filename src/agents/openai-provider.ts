@@ -95,16 +95,116 @@ export class GenericOpenAIProvider implements ModelProvider {
     }
 
     async generateStream(prompt: string, systemPrompt?: string, tools?: Tool[], onChunk?: (chunk: string) => void): Promise<ModelResponse> {
-        // Basic streaming simulation for now
-        const result = await this.generate(prompt, systemPrompt, tools);
-        if (onChunk && result.content) {
-            // Split by words to simulate stream
-            const words = result.content.split(' ');
-            for (const word of words) {
-                onChunk(word + ' ');
-                await new Promise(r => setTimeout(r, 10));
-            }
+        const messages = [];
+        if (systemPrompt) {
+            messages.push({ role: 'system', content: systemPrompt });
         }
-        return result;
+        messages.push({ role: 'user', content: prompt });
+
+        const body: any = {
+            model: this.modelName,
+            messages: messages,
+            temperature: 0.7,
+            max_tokens: 4096,
+            stream: true
+        };
+
+        if (tools && tools.length > 0) {
+            body.tools = tools.map((t: Tool) => ({
+                type: 'function',
+                function: {
+                    name: t.name,
+                    description: t.description,
+                    parameters: t.inputSchema
+                }
+            }));
+            body.tool_choice = 'auto';
+        }
+
+        try {
+            const response = await fetch(`${this.baseURL}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.apiKey}`
+                },
+                body: JSON.stringify(body)
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`API error (${response.status}): ${errorText}`);
+            }
+
+            // Real streaming implementation
+            const result: ModelResponse = { content: '' };
+            const toolCallsMap: Record<number, any> = {};
+
+            // Note: node-fetch v2 doesn't have AsyncIterator on body by default
+            // but we can use response.body.on('data', ...) or similar if it's a Node stream
+            // In many environments node-fetch v2 body is a Node Readable Stream
+
+            return new Promise((resolve, reject) => {
+                let fullContent = '';
+                const stream = response.body;
+
+                stream.on('data', (chunk: Buffer) => {
+                    const lines = chunk.toString().split('\n');
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (!trimmed || trimmed === 'data: [DONE]') continue;
+
+                        if (trimmed.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(trimmed.slice(6));
+                                const delta = data.choices[0]?.delta;
+
+                                if (delta?.content) {
+                                    fullContent += delta.content;
+                                    if (onChunk) onChunk(delta.content);
+                                }
+
+                                if (delta?.tool_calls) {
+                                    delta.tool_calls.forEach((tc: any) => {
+                                        if (!toolCallsMap[tc.index]) {
+                                            toolCallsMap[tc.index] = {
+                                                id: tc.id,
+                                                name: tc.function?.name || '',
+                                                arguments: ''
+                                            };
+                                        }
+                                        if (tc.function?.arguments) {
+                                            toolCallsMap[tc.index].arguments += tc.function.arguments;
+                                        }
+                                    });
+                                }
+                            } catch (e) {
+                                // Ignore partial or malformed lines
+                            }
+                        }
+                    }
+                });
+
+                stream.on('end', () => {
+                    result.content = fullContent;
+                    const toolCalls = Object.values(toolCallsMap).map((tc: any) => ({
+                        id: tc.id || 'unknown',
+                        name: tc.name,
+                        arguments: tc.arguments ? JSON.parse(tc.arguments) : {}
+                    }));
+                    if (toolCalls.length > 0) result.toolCalls = toolCalls;
+                    resolve(result);
+                });
+
+                stream.on('error', (err: Error) => {
+                    reject(err);
+                });
+            });
+
+        } catch (error: any) {
+            console.error(`[GenericOpenAI] Stream Error (${this.name}):`, error);
+            if (onChunk) onChunk(`\n⚠️ **Stream Error**: ${error.message}`);
+            return { content: `⚠️ **Model Error**: ${error.message}` };
+        }
     }
 }

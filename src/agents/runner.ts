@@ -238,22 +238,29 @@ export class AgentRunner {
 
   // Helper to get the current model based on config/env at runtime
   private getModel(): ModelProvider {
-    // Reload config to get latest model selection
-    const config = this.loadConfig();
+    // 1. Check ModelRegistry for a specifically selected model (e.g. from Web UI)
+    const currentModelId = ModelRegistry.getCurrentModelId();
+    if (currentModelId && currentModelId !== 'mock') {
+      const model = ModelRegistry.get(currentModelId);
+      if (model) {
+        console.log(`[AgentRunner] Using registry-selected model: ${currentModelId}`);
+        return model;
+      }
+    }
 
-    console.log(`[AgentRunner] Selecting model. Config: ${config.model}`);
+    // 2. Fallback to Legacy Provider Logic (from config.json)
+    const config = this.loadConfig();
+    console.log(`[AgentRunner] Selecting model from config. Config: ${config.model}`);
     const modelKey = String(config.model || '').trim().toLowerCase();
 
     // Check OpenRouter
     if (modelKey === 'openrouter') {
-      // Re-check env var in case it was updated
       if (process.env.OPENROUTER_API_KEY) {
-        // Prioritize Env Var > Config > Default
         const aiModel = process.env.OPENROUTER_MODEL || config.aiModel || 'google/gemini-2.0-flash-lite-preview-02-05:free';
-        console.log(`[AgentRunner] Using OpenRouter with model: ${aiModel}`);
-        // Ensure registry has it (idempotent-ish, updates model ID)
-        ModelRegistry.register(new OpenRouterProvider(process.env.OPENROUTER_API_KEY, aiModel));
-        return ModelRegistry.get('openrouter')!;
+        console.log(`[AgentRunner] Using OpenRouter legacy config: ${aiModel}`);
+        const provider = new OpenRouterProvider(process.env.OPENROUTER_API_KEY, aiModel);
+        ModelRegistry.register(provider);
+        return provider;
       } else {
         console.warn('[AgentRunner] Config is OpenRouter but OPENROUTER_API_KEY is missing.');
         return {
@@ -270,9 +277,10 @@ export class AgentRunner {
       if (process.env.NVIDIA_API_KEY) {
         const aiModel = config.aiModel || 'moonshotai/kimi-k2.5';
         const enableThinking = typeof config?.nvidia?.thinking === 'boolean' ? config.nvidia.thinking : true;
-        console.log(`[AgentRunner] Using NVIDIA with model: ${aiModel}`);
-        ModelRegistry.register(new NvidiaProvider(process.env.NVIDIA_API_KEY, aiModel, enableThinking));
-        return ModelRegistry.get('nvidia')!;
+        console.log(`[AgentRunner] Using NVIDIA legacy config: ${aiModel}`);
+        const provider = new NvidiaProvider(process.env.NVIDIA_API_KEY, aiModel, enableThinking);
+        ModelRegistry.register(provider);
+        return provider;
       } else {
         console.warn('[AgentRunner] Config is NVIDIA but NVIDIA_API_KEY is missing.');
         return {
@@ -286,7 +294,7 @@ export class AgentRunner {
     }
 
     // Fallback to mock
-    console.log('[AgentRunner] Using Mock Provider');
+    console.log('[AgentRunner] No specific model selected, falling back to Mock');
     return ModelRegistry.get('mock')!;
   }
 
