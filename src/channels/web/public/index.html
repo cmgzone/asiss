@@ -7,6 +7,8 @@
     <title>Gitu - AI Business Assistant</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js"></script>
     <style>
         :root {
             --bg-primary: #0a0a0f;
@@ -1334,7 +1336,7 @@
             if (streamFinalizeTimer) clearTimeout(streamFinalizeTimer);
             streamFinalizeTimer = setTimeout(() => {
                 finalizeStream();
-            }, 1200);
+            }, 5000);
         }
 
         function finalizeStream() {
@@ -1360,6 +1362,27 @@
                 addMessageToContainer(chatMessages, item.text, item.isUser, true);
                 addMessageToContainer(chatMessagesFull, item.text, item.isUser, true);
             });
+        }
+
+        function escapeHtml(text) {
+            return String(text || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function renderMarkdown(text) {
+            const raw = String(text || '');
+            if (window.marked && typeof window.marked.parse === 'function') {
+                const html = window.marked.parse(raw, { breaks: true, gfm: true });
+                if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
+                    return window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+                }
+                return html;
+            }
+            return escapeHtml(raw).replace(/\n/g, '<br>');
         }
 
         // DOM Elements
@@ -1445,7 +1468,9 @@
                     lastBot = addMessageToContainer(chatMessages, '', false);
                     lastBot.dataset.complete = 'false';
                 }
-                lastBot.textContent += chunk;
+                const currentRaw = (lastBot.dataset.raw || '') + chunk;
+                lastBot.dataset.raw = currentRaw;
+                lastBot.innerHTML = renderMarkdown(currentRaw);
                 chatMessages.scrollTop = chatMessages.scrollHeight;
 
                 // Update Full Chat
@@ -1454,7 +1479,9 @@
                     lastBotFull = addMessageToContainer(chatMessagesFull, '', false);
                     lastBotFull.dataset.complete = 'false';
                 }
-                lastBotFull.textContent += chunk;
+                const currentRawFull = (lastBotFull.dataset.raw || '') + chunk;
+                lastBotFull.dataset.raw = currentRawFull;
+                lastBotFull.innerHTML = renderMarkdown(currentRawFull);
                 chatMessagesFull.scrollTop = chatMessagesFull.scrollHeight;
 
                 persistStreamChunk(chunk);
@@ -1481,8 +1508,8 @@
 
         function addMessage(text, isUser, skipPersist = false) {
             // Add to both containers
-            addMessageToContainer(chatMessages, text, isUser);
-            addMessageToContainer(chatMessagesFull, text, isUser);
+            addMessageToContainer(chatMessages, text, isUser, !isUser);
+            addMessageToContainer(chatMessagesFull, text, isUser, !isUser);
             if (!skipPersist) {
                 persistMessage(text, isUser);
             }
@@ -1491,8 +1518,13 @@
         function addMessageToContainer(container, text, isUser, markComplete = false) {
             const div = document.createElement('div');
             div.className = `message ${isUser ? 'user' : 'bot'}`;
-            div.textContent = text;
-            if (!isUser) div.dataset.complete = markComplete ? 'true' : 'false';
+            if (isUser) {
+                div.textContent = text;
+            } else {
+                div.dataset.raw = String(text || '');
+                div.innerHTML = renderMarkdown(text);
+                div.dataset.complete = markComplete ? 'true' : 'false';
+            }
             container.appendChild(div);
             container.scrollTop = container.scrollHeight;
             return div;
