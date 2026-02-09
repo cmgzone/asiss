@@ -767,6 +767,57 @@
             margin-bottom: 12px;
         }
 
+        .settings-checkbox-group {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px 16px;
+            margin-top: 6px;
+        }
+
+        .settings-checkbox {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .settings-checkbox input {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent-primary);
+        }
+
+        .settings-hint {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 8px;
+        }
+
+        .settings-status {
+            padding: 6px 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+
+        .settings-qr {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .settings-qr img {
+            width: 220px;
+            height: 220px;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            background: #fff;
+            display: none;
+        }
+
         .settings-row {
             margin-bottom: 16px;
         }
@@ -887,9 +938,39 @@
                     </div>
                     <div class="settings-row">
                         <label class="settings-label">AI Model</label>
-                        <select id="settings-aiModel" class="settings-select">
-                            <option value="">Select a model...</option>
-                        </select>
+                        <input type="text" id="settings-aiModel" class="settings-input"
+                            placeholder="e.g. provider/model-id">
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <div class="settings-section-title">Channels</div>
+                    <div class="settings-row">
+                        <label class="settings-label">Enabled Channels</label>
+                        <div class="settings-checkbox-group">
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-console"> Console (CLI)</label>
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-web"> Web Interface (Chat)</label>
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-telegram"> Telegram</label>
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-discord"> Discord</label>
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-slack"> Slack</label>
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-whatsapp"> WhatsApp</label>
+                        </div>
+                        <div class="settings-hint">Channel changes require a restart.</div>
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <div class="settings-section-title">WhatsApp</div>
+                    <div class="settings-row">
+                        <label class="settings-label">Status</label>
+                        <div id="whatsapp-status" class="settings-status">Unknown</div>
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label">QR Code</label>
+                        <div class="settings-qr">
+                            <img id="whatsapp-qr" alt="WhatsApp QR Code">
+                            <div id="whatsapp-qr-empty" class="settings-hint">
+                                QR will appear when WhatsApp is enabled and ready to pair.
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="settings-section">
@@ -901,6 +982,10 @@
                     <div class="settings-row">
                         <label class="settings-label">NVIDIA API Key</label>
                         <input type="password" id="settings-nvidia" class="settings-input" placeholder="nvapi-...">
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label">Serper API Key</label>
+                        <input type="password" id="settings-serper" class="settings-input" placeholder="serper-...">
                     </div>
                     <div class="settings-row">
                         <label class="settings-label">Brave Search API Key</label>
@@ -1199,39 +1284,81 @@
         // Socket.io connection
         let socket;
         let currentUser = null;
+        let activeStreamIndex = null;
+        let streamFinalizeTimer = null;
+        const CHAT_HISTORY_LIMIT = 200;
 
-        // Model lists by provider
-        const modelsByProvider = {
-            'OpenRouter': [
-                { value: 'google/gemini-2.0-flash-lite-preview-02-05:free', label: 'Gemini 2.0 Flash Lite (Free)' },
-                { value: 'google/gemini-2.0-flash-exp:free', label: 'Gemini 2.0 Flash Exp (Free)' },
-                { value: 'anthropic/claude-3-haiku', label: 'Claude 3 Haiku' },
-                { value: 'meta-llama/llama-3.1-8b-instruct:free', label: 'Llama 3.1 8B (Free)' },
-                { value: 'mistralai/mistral-7b-instruct:free', label: 'Mistral 7B (Free)' },
-                { value: 'deepseek/deepseek-chat', label: 'DeepSeek Chat' },
-                { value: 'qwen/qwen-2.5-72b-instruct:free', label: 'Qwen 2.5 72B (Free)' }
-            ],
-            'NVIDIA': [
-                { value: 'moonshotai/kimi-k2.5', label: 'Kimi K2.5' },
-                { value: 'nvidia/llama-3.1-nemotron-70b-instruct', label: 'Llama 3.1 Nemotron 70B' },
-                { value: 'deepseek/deepseek-r1', label: 'DeepSeek R1' },
-                { value: 'meta/llama-3.3-70b-instruct', label: 'Llama 3.3 70B' },
-                { value: 'google/gemma-2-27b-it', label: 'Gemma 2 27B' }
-            ]
-        };
+        function getChatStorageKey() {
+            return `gitu_chat_history_${currentUser || 'guest'}`;
+        }
 
-        // Update AI Model dropdown based on selected provider
-        function updateModelDropdown(provider, selectedModel = '') {
-            const modelSelect = document.getElementById('settings-aiModel');
-            const models = modelsByProvider[provider] || [];
+        function loadChatHistory() {
+            try {
+                const raw = localStorage.getItem(getChatStorageKey());
+                if (!raw) return [];
+                const parsed = JSON.parse(raw);
+                return Array.isArray(parsed) ? parsed : [];
+            } catch {
+                return [];
+            }
+        }
 
-            modelSelect.innerHTML = '<option value="">Select a model...</option>';
-            models.forEach(model => {
-                const option = document.createElement('option');
-                option.value = model.value;
-                option.textContent = model.label;
-                if (model.value === selectedModel) option.selected = true;
-                modelSelect.appendChild(option);
+        function saveChatHistory(history) {
+            const trimmed = history.slice(-CHAT_HISTORY_LIMIT);
+            localStorage.setItem(getChatStorageKey(), JSON.stringify(trimmed));
+        }
+
+        function persistMessage(text, isUser) {
+            const history = loadChatHistory();
+            history.push({ text, isUser, timestamp: Date.now(), streaming: false });
+            saveChatHistory(history);
+            if (!isUser) {
+                activeStreamIndex = null;
+            }
+        }
+
+        function persistStreamChunk(chunk) {
+            const history = loadChatHistory();
+            if (activeStreamIndex === null || !history[activeStreamIndex]) {
+                history.push({ text: '', isUser: false, timestamp: Date.now(), streaming: true });
+                activeStreamIndex = history.length - 1;
+            }
+            history[activeStreamIndex].text += chunk;
+            history[activeStreamIndex].timestamp = Date.now();
+            history[activeStreamIndex].streaming = true;
+            saveChatHistory(history);
+            scheduleStreamFinalize();
+        }
+
+        function scheduleStreamFinalize() {
+            if (streamFinalizeTimer) clearTimeout(streamFinalizeTimer);
+            streamFinalizeTimer = setTimeout(() => {
+                finalizeStream();
+            }, 1200);
+        }
+
+        function finalizeStream() {
+            const history = loadChatHistory();
+            if (activeStreamIndex !== null && history[activeStreamIndex]) {
+                history[activeStreamIndex].streaming = false;
+                saveChatHistory(history);
+            }
+            activeStreamIndex = null;
+            streamFinalizeTimer = null;
+            const lastBot = chatMessages.querySelector('.message.bot:last-child');
+            if (lastBot) lastBot.dataset.complete = 'true';
+            const lastBotFull = chatMessagesFull.querySelector('.message.bot:last-child');
+            if (lastBotFull) lastBotFull.dataset.complete = 'true';
+        }
+
+        function renderChatHistory() {
+            const history = loadChatHistory();
+            if (!history.length) return;
+            chatMessages.innerHTML = '';
+            chatMessagesFull.innerHTML = '';
+            history.forEach(item => {
+                addMessageToContainer(chatMessages, item.text, item.isUser, true);
+                addMessageToContainer(chatMessagesFull, item.text, item.isUser, true);
             });
         }
 
@@ -1307,6 +1434,7 @@
             socket.on('disconnect', () => console.log('Disconnected'));
 
             socket.on('message', (text) => {
+                finalizeStream();
                 addMessage(text, false);
             });
 
@@ -1328,6 +1456,8 @@
                 }
                 lastBotFull.textContent += chunk;
                 chatMessagesFull.scrollTop = chatMessagesFull.scrollHeight;
+
+                persistStreamChunk(chunk);
             });
 
             // Handle settings data from server
@@ -1337,19 +1467,32 @@
             socket.on('settings_saved', () => {
                 console.log('Settings saved successfully');
             });
+
+            socket.on('whatsapp_status', (data) => {
+                updateWhatsAppStatus(data);
+            });
+
+            socket.on('whatsapp_qr', (data) => {
+                updateWhatsAppQr(data?.dataUrl || null);
+            });
+
+            renderChatHistory();
         }
 
-        function addMessage(text, isUser) {
+        function addMessage(text, isUser, skipPersist = false) {
             // Add to both containers
             addMessageToContainer(chatMessages, text, isUser);
             addMessageToContainer(chatMessagesFull, text, isUser);
+            if (!skipPersist) {
+                persistMessage(text, isUser);
+            }
         }
 
-        function addMessageToContainer(container, text, isUser) {
+        function addMessageToContainer(container, text, isUser, markComplete = false) {
             const div = document.createElement('div');
             div.className = `message ${isUser ? 'user' : 'bot'}`;
             div.textContent = text;
-            if (!isUser) div.dataset.complete = 'true';
+            if (!isUser) div.dataset.complete = markComplete ? 'true' : 'false';
             container.appendChild(div);
             container.scrollTop = container.scrollHeight;
             return div;
@@ -1358,6 +1501,7 @@
         function sendMessage(inputEl) {
             const text = inputEl.value.trim();
             if (!text) return;
+            finalizeStream();
             addMessage(text, true);
             socket.emit('message', text);
             chatInput.value = '';
@@ -1403,20 +1547,17 @@
             settingsModal.style.display = 'none';
         });
 
-        // Provider change handler
-        document.getElementById('settings-model').addEventListener('change', (e) => {
-            updateModelDropdown(e.target.value);
-        });
-
         document.getElementById('settings-save').addEventListener('click', async () => {
             const settings = {
                 model: document.getElementById('settings-model').value,
                 aiModel: document.getElementById('settings-aiModel').value,
                 openrouterKey: document.getElementById('settings-openrouter').value,
                 nvidiaKey: document.getElementById('settings-nvidia').value,
+                serperKey: document.getElementById('settings-serper').value,
                 braveKey: document.getElementById('settings-brave').value,
                 elevenLabsKey: document.getElementById('settings-elevenlabs').value,
-                deepgramKey: document.getElementById('settings-deepgram').value
+                deepgramKey: document.getElementById('settings-deepgram').value,
+                channels: getSelectedChannels()
             };
 
             socket.emit('save_settings', settings);
@@ -1431,12 +1572,67 @@
         function handleSettingsData(data) {
             const provider = data.model || 'mock';
             document.getElementById('settings-model').value = provider;
-            updateModelDropdown(provider, data.aiModel || '');
+            document.getElementById('settings-aiModel').value = data.aiModel || '';
             document.getElementById('settings-openrouter').value = data.openrouterKey || '';
             document.getElementById('settings-nvidia').value = data.nvidiaKey || '';
+            document.getElementById('settings-serper').value = data.serperKey || '';
             document.getElementById('settings-brave').value = data.braveKey || '';
             document.getElementById('settings-elevenlabs').value = data.elevenLabsKey || '';
             document.getElementById('settings-deepgram').value = data.deepgramKey || '';
+
+            const channels = Array.isArray(data.channels) ? data.channels : [];
+            document.getElementById('channel-console').checked = channels.includes('Console (CLI)');
+            document.getElementById('channel-web').checked = channels.includes('Web Interface (Chat)');
+            document.getElementById('channel-telegram').checked = channels.includes('Telegram');
+            document.getElementById('channel-discord').checked = channels.includes('Discord');
+            document.getElementById('channel-slack').checked = channels.includes('Slack');
+            document.getElementById('channel-whatsapp').checked = channels.includes('WhatsApp');
+
+            if (!channels.includes('WhatsApp')) {
+                updateWhatsAppStatus({ status: 'disabled', message: 'Enable and restart to connect' });
+                updateWhatsAppQr(null);
+            }
+        }
+
+        function getSelectedChannels() {
+            const channels = [];
+            if (document.getElementById('channel-console').checked) channels.push('Console (CLI)');
+            if (document.getElementById('channel-web').checked) channels.push('Web Interface (Chat)');
+            if (document.getElementById('channel-telegram').checked) channels.push('Telegram');
+            if (document.getElementById('channel-discord').checked) channels.push('Discord');
+            if (document.getElementById('channel-slack').checked) channels.push('Slack');
+            if (document.getElementById('channel-whatsapp').checked) channels.push('WhatsApp');
+            return channels;
+        }
+
+        function updateWhatsAppStatus(data) {
+            const statusEl = document.getElementById('whatsapp-status');
+            if (!statusEl) return;
+            const status = data?.status || 'unknown';
+            let label = status;
+            if (status === 'qr') label = 'QR ready - scan to connect';
+            if (status === 'ready') label = 'Connected';
+            if (status === 'starting') label = 'Starting...';
+            if (status === 'authenticated') label = 'Authenticated';
+            if (status === 'disconnected') label = 'Disconnected';
+            if (status === 'auth_failure') label = 'Auth failure';
+            if (status === 'disabled') label = 'Disabled';
+            statusEl.textContent = label + (data?.message ? ` (${data.message})` : '');
+        }
+
+        function updateWhatsAppQr(dataUrl) {
+            const qrImg = document.getElementById('whatsapp-qr');
+            const qrEmpty = document.getElementById('whatsapp-qr-empty');
+            if (!qrImg || !qrEmpty) return;
+            if (dataUrl) {
+                qrImg.src = dataUrl;
+                qrImg.style.display = 'block';
+                qrEmpty.style.display = 'none';
+            } else {
+                qrImg.src = '';
+                qrImg.style.display = 'none';
+                qrEmpty.style.display = 'block';
+            }
         }
 
         // Quick Actions

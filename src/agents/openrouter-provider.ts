@@ -7,7 +7,7 @@ export class OpenRouterProvider implements ModelProvider {
   private client: OpenAI;
   private modelName: string;
 
-  constructor(apiKey: string, modelName: string = 'google/gemini-2.0-flash-lite-preview-02-05:free') {
+  constructor(apiKey: string, modelName: string) {
     this.client = new OpenAI({
       baseURL: 'https://openrouter.ai/api/v1',
       apiKey: apiKey,

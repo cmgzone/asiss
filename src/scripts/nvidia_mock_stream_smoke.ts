@@ -24,7 +24,7 @@ async function* fakeStream() {
 }
 
 async function main() {
-  const provider = new NvidiaProvider('dummy');
+  const provider = new NvidiaProvider('dummy', 'dummy-model');
   (provider as any).client = {
     chat: {
       completions: {
@@ -57,4 +57,3 @@ main().catch((e) => {
   process.stderr.write(String(e?.stack || e) + '\n');
   process.exit(1);
 });
-

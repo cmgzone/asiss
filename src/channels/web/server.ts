@@ -12,6 +12,8 @@ import { ttsService } from '../../core/tts';
 import { modelManager } from '../../core/model-manager';
 import { ModelRegistry } from '../../core/models';
 import { GenericOpenAIProvider } from '../../agents/openai-provider';
+import { whatsappEvents, WhatsAppStatusPayload } from '../../core/whatsapp-events';
+import QRCode from 'qrcode';
 
 export class WebChannel implements ChannelAdapter {
   name = 'web';
@@ -23,6 +25,8 @@ export class WebChannel implements ChannelAdapter {
   private port = 3000;
   private startTime: number;
   private auth: AuthManager;
+  private lastWhatsAppQr: string | null = null;
+  private lastWhatsAppStatus: WhatsAppStatusPayload = { status: 'idle' };
 
   constructor(port: number = 3000) {
     this.port = port;
@@ -36,6 +40,37 @@ export class WebChannel implements ChannelAdapter {
     // Serve static frontend files
     this.app.use(express.static(path.join(__dirname, 'public')));
     this.app.use(express.json());
+
+    const sendWhatsAppState = (socket: any) => {
+      if (this.lastWhatsAppStatus) {
+        socket.emit('whatsapp_status', this.lastWhatsAppStatus);
+      }
+      if (this.lastWhatsAppQr) {
+        socket.emit('whatsapp_qr', { dataUrl: this.lastWhatsAppQr });
+      } else {
+        socket.emit('whatsapp_qr', { dataUrl: null });
+      }
+    };
+
+    whatsappEvents.on('qr', async (qr: string) => {
+      try {
+        this.lastWhatsAppQr = await QRCode.toDataURL(qr);
+        this.lastWhatsAppStatus = { status: 'qr' };
+        this.io.emit('whatsapp_qr', { dataUrl: this.lastWhatsAppQr });
+        this.io.emit('whatsapp_status', this.lastWhatsAppStatus);
+      } catch (e: any) {
+        console.error('[WebChannel] Failed to generate WhatsApp QR:', e?.message || e);
+      }
+    });
+
+    whatsappEvents.on('status', (status: WhatsAppStatusPayload) => {
+      this.lastWhatsAppStatus = status;
+      if (status.status !== 'qr') {
+        this.lastWhatsAppQr = null;
+        this.io.emit('whatsapp_qr', { dataUrl: null });
+      }
+      this.io.emit('whatsapp_status', status);
+    });
 
     // Login Endpoint
     this.app.post('/auth/login', (req, res) => {
@@ -313,6 +348,7 @@ export class WebChannel implements ChannelAdapter {
           socket.data.userId = user.id;
           console.log(`[WebChannel] User ${user.username} authenticated via token on socket ${socket.id}`);
           socket.emit('login_success', { username: user.username, socketId: socket.id });
+          sendWhatsAppState(socket);
         }
       }
 
@@ -325,6 +361,7 @@ export class WebChannel implements ChannelAdapter {
           socket.data.userId = user.id;
           socket.emit('login_success', { username: user.username, socketId: socket.id });
           console.log(`[WebChannel] User ${username} logged in on socket ${socket.id}`);
+          sendWhatsAppState(socket);
         } else {
           socket.emit('login_failed', { message: 'Invalid credentials' });
         }
@@ -354,6 +391,7 @@ export class WebChannel implements ChannelAdapter {
             slackAppToken: process.env.SLACK_APP_TOKEN ? '********' : '',
             openrouterKey: process.env.OPENROUTER_API_KEY ? '********' : '',
             nvidiaKey: process.env.NVIDIA_API_KEY ? '********' : '',
+            serperKey: process.env.SERPER_API_KEY ? '********' : '',
             openaiKey: process.env.OPENAI_API_KEY ? '********' : '',
             anthropicKey: process.env.ANTHROPIC_API_KEY ? '********' : '',
             geminiKey: process.env.GEMINI_API_KEY ? '********' : '',
@@ -432,7 +470,11 @@ export class WebChannel implements ChannelAdapter {
           updateEnv('SLACK_BOT_TOKEN', data.slackBotToken);
           updateEnv('SLACK_APP_TOKEN', data.slackAppToken);
           updateEnv('OPENROUTER_API_KEY', data.openrouterKey);
+          if (String(data.model || '').toLowerCase() === 'openrouter') {
+            updateEnv('OPENROUTER_MODEL', data.aiModel);
+          }
           updateEnv('NVIDIA_API_KEY', data.nvidiaKey);
+          updateEnv('SERPER_API_KEY', data.serperKey);
           updateEnv('OPENAI_API_KEY', data.openaiKey);
           updateEnv('ANTHROPIC_API_KEY', data.anthropicKey);
           updateEnv('GEMINI_API_KEY', data.geminiKey);

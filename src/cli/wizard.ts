@@ -50,10 +50,9 @@ async function runWizard() {
     {
       type: 'input',
       name: 'aiModel',
-      message: 'Enter specific AI Model ID (optional, e.g. google/gemini-2.0-flash-lite-preview-02-05:free):',
+      message: 'Enter specific AI Model ID (optional):',
       default: (answers: any) => {
-        if (answers.model === 'OpenRouter') return process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-lite-preview-02-05:free';
-        if (answers.model === 'NVIDIA') return 'moonshotai/kimi-k2.5';
+        if (answers.model === 'OpenRouter') return process.env.OPENROUTER_MODEL || '';
         return '';
       }
     }

@@ -1,6 +1,7 @@
 import { ChannelAdapter, Message } from '../core/types';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import qrcode from 'qrcode-terminal';
+import { whatsappEvents } from '../core/whatsapp-events';
 
 export class WhatsAppChannel implements ChannelAdapter {
   name = 'whatsapp';
@@ -20,11 +21,26 @@ export class WhatsAppChannel implements ChannelAdapter {
     this.client.on('qr', (qr) => {
       console.log('[WhatsAppChannel] QR Code received. Scan it with your phone:');
       qrcode.generate(qr, { small: true });
+      whatsappEvents.setQr(qr);
     });
 
     this.client.on('ready', () => {
       console.log('[WhatsAppChannel] Client is ready!');
       this.isStarted = true;
+      whatsappEvents.setStatus('ready');
+    });
+
+    this.client.on('authenticated', () => {
+      whatsappEvents.setStatus('authenticated');
+    });
+
+    this.client.on('auth_failure', (msg) => {
+      whatsappEvents.setStatus('auth_failure', String(msg || 'auth_failure'));
+    });
+
+    this.client.on('disconnected', (reason) => {
+      whatsappEvents.setStatus('disconnected', String(reason || 'disconnected'));
+      this.isStarted = false;
     });
 
     this.client.on('message', (message) => {
@@ -48,10 +64,12 @@ export class WhatsAppChannel implements ChannelAdapter {
   async start() {
     if (!this.isStarted) {
       console.log('[WhatsAppChannel] Initializing...');
+      whatsappEvents.setStatus('starting');
       try {
         await this.client.initialize();
       } catch (err) {
         console.error('[WhatsAppChannel] Failed to initialize:', err);
+        whatsappEvents.setStatus('disconnected', 'init_failed');
       }
     }
   }

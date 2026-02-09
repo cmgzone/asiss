@@ -2,6 +2,7 @@ import { ChannelAdapter, Message, Session } from '../core/types';
 import { AgentRunner } from '../agents/runner';
 import { elevatedManager } from '../core/elevated';
 import { thinkingManager } from '../core/thinking';
+import { planModeManager } from '../core/plan-mode';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import { scratchpad } from '../core/scratchpad';
@@ -148,6 +149,11 @@ export class Gateway {
     const thinkingResult = thinkingManager.handleDirective(sessionId, msg.content);
     if (thinkingResult.handled) {
       await this.sendResponse(sessionId, thinkingResult.message || 'OK');
+      return;
+    }
+    const planResult = planModeManager.handleDirective(sessionId, msg.content);
+    if (planResult.handled) {
+      await this.sendResponse(sessionId, planResult.message || 'OK');
       return;
     }
 

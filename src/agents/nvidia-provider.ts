@@ -8,7 +8,7 @@ export class NvidiaProvider implements ModelProvider {
   private modelName: string;
   private enableThinking: boolean;
 
-  constructor(apiKey: string, modelName: string = 'moonshotai/kimi-k2.5', enableThinking: boolean = true) {
+  constructor(apiKey: string, modelName: string, enableThinking: boolean = true) {
     this.client = new OpenAI({
       baseURL: 'https://integrate.api.nvidia.com/v1',
       apiKey: apiKey,

@@ -33,6 +33,9 @@ import { ModelsSkill } from '../skills/models';
 import { GenericOpenAIProvider } from './openai-provider';
 import { SerperSkill } from '../skills/serper';
 import { MemorySkill } from '../skills/memory';
+import { PlanModeSkill } from '../skills/plan-mode';
+import { planModeManager } from '../core/plan-mode';
+import { DeepResearchSkill } from '../skills/deep-research';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -101,6 +104,8 @@ export class AgentRunner {
     SkillRegistry.register(new ModelsSkill());
     SkillRegistry.register(new SerperSkill());
     SkillRegistry.register(new MemorySkill(this.memory));
+    SkillRegistry.register(new PlanModeSkill());
+    SkillRegistry.register(new DeepResearchSkill());
 
     // Load custom models
     for (const config of modelManager.listModels()) {
@@ -256,7 +261,17 @@ export class AgentRunner {
     // Check OpenRouter
     if (modelKey === 'openrouter') {
       if (process.env.OPENROUTER_API_KEY) {
-        const aiModel = process.env.OPENROUTER_MODEL || config.aiModel || 'google/gemini-2.0-flash-lite-preview-02-05:free';
+        const aiModel = String(config.aiModel || process.env.OPENROUTER_MODEL || '').trim();
+        if (!aiModel) {
+          console.warn('[AgentRunner] OpenRouter selected but no model id is configured.');
+          return {
+            id: 'error',
+            name: 'Error',
+            generate: async () => ({
+              content: "Configuration Error: OpenRouter selected but no model id is set. Set config.aiModel or OPENROUTER_MODEL."
+            })
+          };
+        }
         console.log(`[AgentRunner] Using OpenRouter legacy config: ${aiModel}`);
         const provider = new OpenRouterProvider(process.env.OPENROUTER_API_KEY, aiModel);
         ModelRegistry.register(provider);
@@ -275,7 +290,17 @@ export class AgentRunner {
 
     if (modelKey === 'nvidia') {
       if (process.env.NVIDIA_API_KEY) {
-        const aiModel = config.aiModel || 'moonshotai/kimi-k2.5';
+        const aiModel = String(config.aiModel || '').trim();
+        if (!aiModel) {
+          console.warn('[AgentRunner] NVIDIA selected but no model id is configured.');
+          return {
+            id: 'error',
+            name: 'Error',
+            generate: async () => ({
+              content: "Configuration Error: NVIDIA selected but no model id is set. Set config.aiModel in config.json."
+            })
+          };
+        }
         const enableThinking = typeof config?.nvidia?.thinking === 'boolean' ? config.nvidia.thinking : true;
         console.log(`[AgentRunner] Using NVIDIA legacy config: ${aiModel}`);
         const provider = new NvidiaProvider(process.env.NVIDIA_API_KEY, aiModel, enableThinking);
@@ -368,6 +393,10 @@ export class AgentRunner {
 
     // Handle model commands
     if (this.handleModelCommand(sessionId, msg.content)) {
+      return;
+    }
+
+    if (await this.handleDeepResearchCommand(sessionId, msg)) {
       return;
     }
 
@@ -499,6 +528,10 @@ ${context ? `\nSystem Context: ${context}` : ''}
       const enhancedSystemPrompt = thinkingPrompt
         ? `${systemPrompt}\n\n[Thinking Mode: ${thinkingPrompt}]`
         : systemPrompt;
+      const planPrompt = planModeManager.getPlanPrompt(sessionId);
+      const finalSystemPrompt = planPrompt
+        ? `${enhancedSystemPrompt}\n\n${planPrompt}`
+        : enhancedSystemPrompt;
 
       // Call Model (Dynamic Selection)
       const currentModel = this.getModel();
@@ -507,7 +540,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
       let response;
       if (currentModel.generateStream) {
         let streamedAnyChunk = false;
-        response = await currentModel.generateStream(prompt, enhancedSystemPrompt, allTools, (chunk) => {
+        response = await currentModel.generateStream(prompt, finalSystemPrompt, allTools, (chunk) => {
           if (!chunk) return;
           streamedAnyChunk = true;
           void this.gateway.sendStreamChunk(sessionId, chunk);
@@ -517,7 +550,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
         }
       } else {
         // Fallback for non-streaming models
-        response = await currentModel.generate(prompt, enhancedSystemPrompt, allTools);
+        response = await currentModel.generate(prompt, finalSystemPrompt, allTools);
         if (!currentModel.generateStream) {
           await this.gateway.sendResponse(sessionId, response.content || '');
         }
@@ -1005,5 +1038,136 @@ ${context ? `\nSystem Context: ${context}` : ''}
     }
 
     return false;
+  }
+
+  private async handleDeepResearchCommand(sessionId: string, msg: Message): Promise<boolean> {
+    const trimmed = (msg.content || '').trim();
+    let query = '';
+    const slashMatch = /^\/(deep|research)\s+([\s\S]+)$/i.exec(trimmed);
+    if (slashMatch) {
+      query = slashMatch[2].trim();
+    } else {
+      const patterns: RegExp[] = [
+        /^do\s+(?:a\s+)?deep\s+research(?:\s*(?:on|about|into))?\s*[:\-]?\s+([\s\S]+)$/i,
+        /^deep\s+research(?:\s*(?:on|about|into))?\s*[:\-]?\s+([\s\S]+)$/i,
+        /^deep\s+dive(?:\s*(?:on|about|into))?\s*[:\-]?\s+([\s\S]+)$/i,
+        /^research\s+report(?:\s*(?:on|about|into))?\s*[:\-]?\s+([\s\S]+)$/i,
+        /^please\s+do\s+(?:a\s+)?deep\s+research(?:\s*(?:on|about|into))?\s*[:\-]?\s+([\s\S]+)$/i
+      ];
+      for (const pattern of patterns) {
+        const m = pattern.exec(trimmed);
+        if (m && m[1]) {
+          query = m[1].trim();
+          break;
+        }
+      }
+    }
+
+    if (!query) return false;
+    if (!query) {
+      await this.gateway.sendResponse(sessionId, 'Usage: /deep <topic> or /research <topic>');
+      return true;
+    }
+
+    // Save user message to memory for continuity
+    this.memory.add(sessionId, {
+      role: 'user',
+      content: msg.content,
+      timestamp: Date.now(),
+      metadata: msg.metadata
+    });
+
+    await this.gateway.sendResponse(sessionId, `ðŸ” Deep research started for: **${query}**`);
+
+    const skill = new DeepResearchSkill();
+    const data = await skill.execute({ query, maxSources: 5, maxImages: 4, maxFetchChars: 6000 });
+    if (data?.error) {
+      await this.gateway.sendResponse(sessionId, `âŒ Deep research failed: ${data.error}`);
+      return true;
+    }
+
+    const sources = Array.isArray(data?.sources) ? data.sources : [];
+    const images = Array.isArray(data?.images) ? data.images : [];
+    const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
+
+    if (sources.length === 0) {
+      await this.gateway.sendResponse(sessionId, 'âŒ Deep research found no sources. Try a different query.');
+      return true;
+    }
+
+    const truncate = (text: string, max: number) => {
+      if (!text) return '';
+      if (text.length <= max) return text;
+      return text.slice(0, max) + `\n... [Truncated ${text.length - max} chars] ...`;
+    };
+
+    const sourceText = sources.map((s: any, i: number) => {
+      const idx = i + 1;
+      const title = s.title || 'Untitled';
+      const url = s.url || '';
+      const snippet = s.snippet ? `Snippet: ${s.snippet}` : '';
+      const extract = s.content ? `Extract:\n${truncate(String(s.content), 1200)}` : '';
+      return `[${idx}] ${title}\nURL: ${url}${snippet ? `\n${snippet}` : ''}${extract ? `\n${extract}` : ''}`;
+    }).join('\n\n');
+
+    const imageText = images.length > 0
+      ? images.map((img: any, i: number) => {
+        const idx = i + 1;
+        const title = img.title || 'Image';
+        const url = img.url || '';
+        const source = img.source || img.link || '';
+        return `[IMG${idx}] ${title}\nURL: ${url}${source ? `\nSource: ${source}` : ''}`;
+      }).join('\n\n')
+      : 'None';
+
+    const warningText = warnings.length > 0
+      ? `Warnings:\n- ${warnings.join('\n- ')}\n\n`
+      : '';
+
+    const researchInstructions = [
+      'You are in deep research mode.',
+      'Use only the provided sources and images.',
+      'Include citations like [1], [2] for factual statements.',
+      'Provide sections: Executive Summary, Key Findings, Details, Images, Sources.',
+      'In Images, list each image with caption and URL on its own line.',
+      'Keep the output clean and readable for chat apps.'
+    ].join(' ');
+
+    let systemPrompt = this.baseSystemPrompt;
+    systemPrompt += this.buildWorkspacePrompt(msg.channel);
+    const username = msg.metadata?.username || 'User';
+    systemPrompt += `\n\nYou are speaking with ${username}.`;
+
+    const planPrompt = planModeManager.getPlanPrompt(sessionId);
+    const finalSystemPrompt = planPrompt ? `${systemPrompt}\n\n${planPrompt}` : systemPrompt;
+
+    const prompt = `${researchInstructions}\n\nTopic: ${query}\n\n${warningText}Sources:\n${sourceText}\n\nImages:\n${imageText}`;
+
+    const currentModel = this.getModel();
+    let response: any;
+    if (currentModel.generateStream) {
+      let streamedAnyChunk = false;
+      response = await currentModel.generateStream(prompt, finalSystemPrompt, [], (chunk) => {
+        if (!chunk) return;
+        streamedAnyChunk = true;
+        void this.gateway.sendStreamChunk(sessionId, chunk);
+      });
+      if (!streamedAnyChunk && response?.content) {
+        await this.gateway.sendResponse(sessionId, response.content);
+      }
+    } else {
+      response = await currentModel.generate(prompt, finalSystemPrompt, []);
+      await this.gateway.sendResponse(sessionId, response?.content || '');
+    }
+
+    if (response?.content) {
+      this.memory.add(sessionId, {
+        role: 'assistant',
+        content: response.content,
+        timestamp: Date.now()
+      });
+    }
+
+    return true;
   }
 }
