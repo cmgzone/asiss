@@ -704,8 +704,9 @@
             box-shadow: 0 8px 24px rgba(99, 102, 241, 0.4);
         }
 
-        /* Settings Modal */
-        #settings-modal {
+        /* Modals */
+        #settings-modal,
+        #add-model-modal {
             display: none;
             position: fixed;
             top: 0;
@@ -921,6 +922,52 @@
             <div class="settings-footer">
                 <button class="btn btn-ghost" id="settings-cancel">Cancel</button>
                 <button class="btn btn-primary" id="settings-save">💾 Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Model Modal -->
+    <div id="add-model-modal">
+        <div class="settings-card">
+            <div class="settings-header">
+                <h3 class="settings-title">➕ Add Custom Model</h3>
+                <button class="settings-close" id="add-model-close">&times;</button>
+            </div>
+            <div class="settings-body">
+                <div class="settings-section">
+                    <div class="settings-row">
+                        <label class="settings-label">Display Name</label>
+                        <input type="text" id="add-model-name" class="settings-input"
+                            placeholder="e.g. My Custom Model">
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label">Model Provider</label>
+                        <select id="add-model-provider" class="settings-select">
+                            <option value="openrouter">OpenRouter</option>
+                            <option value="ollama">Ollama</option>
+                            <option value="openai">OpenAI Compatible</option>
+                        </select>
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label">Model ID (on provider)</label>
+                        <input type="text" id="add-model-id" class="settings-input"
+                            placeholder="e.g. google/gemini-2.0-flash">
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label">Base URL (optional)</label>
+                        <input type="text" id="add-model-url" class="settings-input"
+                            placeholder="e.g. https://openrouter.ai/api/v1">
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label">API Key (optional)</label>
+                        <input type="password" id="add-model-key" class="settings-input"
+                            placeholder="Leave blank to use default">
+                    </div>
+                </div>
+            </div>
+            <div class="settings-footer">
+                <button class="btn btn-ghost" id="add-model-cancel">Cancel</button>
+                <button class="btn btn-primary" id="add-model-save">🚀 Add Model</button>
             </div>
         </div>
     </div>
@@ -1464,6 +1511,14 @@
                 // Bind change event
                 select.onchange = async (e) => {
                     const newId = e.target.value;
+
+                    if (newId === '__add_new__') {
+                        document.getElementById('add-model-modal').style.display = 'flex';
+                        // Reset select to previous value or default
+                        select.value = currentVal || data.current;
+                        return;
+                    }
+
                     try {
                         const switchRes = await fetch('/api/models/use', {
                             method: 'POST',
@@ -1484,10 +1539,61 @@
                     }
                 };
 
+                // Add "Add New Model" option
+                const divider = document.createElement('option');
+                divider.disabled = true;
+                divider.textContent = '──────────';
+                select.appendChild(divider);
+
+                const addOption = document.createElement('option');
+                addOption.value = '__add_new__';
+                addOption.textContent = '➕ Add Custom Model...';
+                select.appendChild(addOption);
+
             } catch (e) {
                 console.error('Failed to load models:', e);
             }
         }
+
+        // Add Model Event Listeners
+        document.getElementById('add-model-close').onclick = () => document.getElementById('add-model-modal').style.display = 'none';
+        document.getElementById('add-model-cancel').onclick = () => document.getElementById('add-model-modal').style.display = 'none';
+
+        document.getElementById('add-model-save').onclick = async () => {
+            const name = document.getElementById('add-model-name').value;
+            const provider = document.getElementById('add-model-provider').value;
+            const modelId = document.getElementById('add-model-id').value;
+            const baseUrl = document.getElementById('add-model-url').value;
+            const apiKey = document.getElementById('add-model-key').value;
+
+            if (!name || !modelId) {
+                alert('Name and Model ID are required');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/models/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, provider, modelId, baseUrl, apiKey })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    document.getElementById('add-model-modal').style.display = 'none';
+                    await loadModels(); // Refresh list
+                    // Auto-select the new model
+                    document.getElementById('header-model-select').value = data.id;
+                    document.getElementById('header-model-select').onchange({ target: { value: data.id } });
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            } catch (e) {
+                console.error('Failed to add model:', e);
+                alert('Failed to add model');
+            }
+        };
+
+
 
         function renderProjects(projects) {
             const listFull = document.getElementById('project-list-full');

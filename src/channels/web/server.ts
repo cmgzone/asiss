@@ -11,6 +11,7 @@ import { sttService } from '../../core/stt';
 import { ttsService } from '../../core/tts';
 import { modelManager } from '../../core/model-manager';
 import { ModelRegistry } from '../../core/models';
+import { GenericOpenAIProvider } from '../../agents/openai-provider';
 
 export class WebChannel implements ChannelAdapter {
   name = 'web';
@@ -241,6 +242,49 @@ export class WebChannel implements ChannelAdapter {
       } else {
         res.status(404).json({ error: 'Model not found' });
       }
+    });
+
+    this.app.post('/api/models/add', express.json(), (req, res) => {
+      let { name, provider, modelId, baseUrl, apiKey } = req.body;
+
+      if (!name || !modelId) {
+        return res.status(400).json({ error: 'Name and Model ID are required.' });
+      }
+
+      // Default Base URL for OpenRouter
+      if (provider === 'openrouter' && !baseUrl) {
+        baseUrl = 'https://openrouter.ai/api/v1';
+      }
+
+      // Default Base URL for Ollama
+      if (provider === 'ollama' && !baseUrl) {
+        baseUrl = 'http://localhost:11434/v1';
+      }
+
+      const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
+      // Add to config (persistent)
+      modelManager.addModel({
+        id,
+        name,
+        provider: provider || 'openai',
+        modelName: modelId,
+        baseUrl,
+        apiKey
+      });
+
+      // Register runtime
+      const model = new GenericOpenAIProvider(
+        id,
+        name,
+        baseUrl,
+        apiKey,
+        modelId
+      );
+      ModelRegistry.register(model);
+
+      res.json({ success: true, id });
+      console.log(`[WebChannel] Added new model: ${name}`);
     });
 
     // Heartbeat Endpoint

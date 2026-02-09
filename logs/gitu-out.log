@@ -268,3 +268,61 @@
 2026-02-09 04:51:13 -08:00: [Heartbeat] ❤️ Thump at 04:51:13
 2026-02-09 04:52:13 -08:00: [Heartbeat] ❤️ Thump at 04:52:13
 2026-02-09 04:53:13 -08:00: [Heartbeat] ❤️ Thump at 04:53:13
+2026-02-09 04:54:13 -08:00: [Heartbeat] ❤️ Thump at 04:54:13
+2026-02-09 04:55:13 -08:00: [Heartbeat] ❤️ Thump at 04:55:13
+2026-02-09 04:56:13 -08:00: [Heartbeat] ❤️ Thump at 04:56:13
+2026-02-09 04:57:13 -08:00: [Heartbeat] ❤️ Thump at 04:57:13
+2026-02-09 04:58:14 -08:00: [Heartbeat] ❤️ Thump at 04:58:14
+2026-02-09 04:59:14 -08:00: [Heartbeat] ❤️ Thump at 04:59:14
+2026-02-09 05:00:14 -08:00: [Heartbeat] ❤️ Thump at 05:00:14
+2026-02-09 05:00:14 -08:00: [Heartbeat] ⏰ It is the top of the hour!
+2026-02-09 05:01:14 -08:00: [Heartbeat] ❤️ Thump at 05:01:14
+2026-02-09 05:02:14 -08:00: [Heartbeat] ❤️ Thump at 05:02:14
+2026-02-09 05:03:14 -08:00: [Heartbeat] ❤️ Thump at 05:03:14
+2026-02-09 05:04:14 -08:00: [Heartbeat] ❤️ Thump at 05:04:14
+2026-02-09 05:05:14 -08:00: [Heartbeat] ❤️ Thump at 05:05:14
+2026-02-09 05:06:14 -08:00: [Heartbeat] ❤️ Thump at 05:06:14
+2026-02-09 05:07:14 -08:00: [Heartbeat] ❤️ Thump at 05:07:14
+2026-02-09 05:08:14 -08:00: [Heartbeat] ❤️ Thump at 05:08:14
+2026-02-09 05:09:14 -08:00: [Heartbeat] ❤️ Thump at 05:09:14
+2026-02-09 05:09:48 -08:00: [CustomAgents] Loaded agent from file: assistant
+2026-02-09 05:09:48 -08:00: [dotenv@17.2.4] injecting env (4) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+2026-02-09 05:09:57 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: 👥 sync secrets across teammates & machines: https://dotenvx.com/ops
+2026-02-09 05:09:57 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+2026-02-09 05:09:57 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+2026-02-09 05:09:57 -08:00: [MemoryManager] Migrating from memory.json to SQLite...
+2026-02-09 05:09:57 -08:00: [MemoryManager] Migration complete.
+2026-02-09 05:09:57 -08:00: [Gateway] Registered channel: console
+2026-02-09 05:09:57 -08:00: [Gateway] Registered channel: web
+2026-02-09 05:09:57 -08:00: [System] Telegram enabled
+2026-02-09 05:09:57 -08:00: [Gateway] Registered channel: telegram
+2026-02-09 05:09:57 -08:00: [Gateway] Starting control plane...
+2026-02-09 05:09:57 -08:00: ──────────────────────────────────────────────────
+2026-02-09 05:09:57 -08:00: ✔ Console Channel Active
+2026-02-09 05:09:57 -08:00:   Type a message and press Enter to chat.
+2026-02-09 05:09:57 -08:00: ──────────────────────────────────────────────────
+2026-02-09 05:09:57 -08:00: 
+2026-02-09 05:09:57 -08:00: [TelegramChannel] Starting polling...
+2026-02-09 05:09:57 -08:00: [AgentRunner] Heartbeat loop started (Interval: 60000ms).
+2026-02-09 05:09:57 -08:00: [BackgroundWorker] Started (check every 60000ms)
+2026-02-09 05:09:57 -08:00: [WebChannel] Server running at http://localhost:3000
+2026-02-09 05:10:02 -08:00: [TelegramChannel] Using bot @gitubot_bot (8381528303)
+2026-02-09 05:10:08 -08:00: [CustomAgents] Loaded agent from file: assistant
+2026-02-09 05:10:08 -08:00: [dotenv@17.2.4] injecting env (4) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
+2026-02-09 05:10:13 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: ✅ audit secrets and track compliance: https://dotenvx.com/ops
+2026-02-09 05:10:13 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: ⚙️  override existing env vars with { override: true }
+2026-02-09 05:10:13 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: ✅ audit secrets and track compliance: https://dotenvx.com/ops
+2026-02-09 05:10:13 -08:00: [Gateway] Registered channel: console
+2026-02-09 05:10:13 -08:00: [Gateway] Registered channel: web
+2026-02-09 05:10:13 -08:00: [System] Telegram enabled
+2026-02-09 05:10:13 -08:00: [Gateway] Registered channel: telegram
+2026-02-09 05:10:13 -08:00: [Gateway] Starting control plane...
+2026-02-09 05:10:13 -08:00: ──────────────────────────────────────────────────
+2026-02-09 05:10:13 -08:00: ✔ Console Channel Active
+2026-02-09 05:10:13 -08:00:   Type a message and press Enter to chat.
+2026-02-09 05:10:13 -08:00: ──────────────────────────────────────────────────
+2026-02-09 05:10:13 -08:00: 
+2026-02-09 05:10:13 -08:00: [TelegramChannel] Starting polling...
+2026-02-09 05:10:13 -08:00: [AgentRunner] Heartbeat loop started (Interval: 60000ms).
+2026-02-09 05:10:13 -08:00: [BackgroundWorker] Started (check every 60000ms)
+2026-02-09 05:10:13 -08:00: [WebChannel] Server running at http://localhost:3000
