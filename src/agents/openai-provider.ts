@@ -18,9 +18,20 @@ export class GenericOpenAIProvider implements ModelProvider {
         this.id = id;
         this.name = name;
         this.baseURL = baseURL.replace(/\/$/, ''); // Remove trailing slash
-        this.apiKey = apiKey;
         this.modelName = modelName;
         this.contextWindow = contextWindow;
+
+        // Fallback to environment variables if apiKey is missing or empty
+        this.apiKey = apiKey;
+        if (!this.apiKey || this.apiKey.trim() === '') {
+            if (this.baseURL.includes('openrouter.ai')) {
+                this.apiKey = process.env.OPENROUTER_API_KEY || '';
+            } else if (this.baseURL.includes('nvidia.com')) {
+                this.apiKey = process.env.NVIDIA_API_KEY || '';
+            } else {
+                this.apiKey = process.env.OPENAI_API_KEY || '';
+            }
+        }
     }
 
     async generate(prompt: string, systemPrompt?: string, tools?: Tool[]): Promise<ModelResponse> {
@@ -55,7 +66,9 @@ export class GenericOpenAIProvider implements ModelProvider {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${this.apiKey}`
+                    'Authorization': `Bearer ${this.apiKey}`,
+                    'HTTP-Referer': 'https://github.com/cmgzone/asiss',
+                    'X-Title': 'Gitu AI Assistant'
                 },
                 body: JSON.stringify(body)
             });
@@ -126,7 +139,9 @@ export class GenericOpenAIProvider implements ModelProvider {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${this.apiKey}`
+                    'Authorization': `Bearer ${this.apiKey}`,
+                    'HTTP-Referer': 'https://github.com/cmgzone/asiss',
+                    'X-Title': 'Gitu AI Assistant'
                 },
                 body: JSON.stringify(body)
             });
