@@ -191,3 +191,50 @@
 2026-02-09 03:53:52 -08:00: [Heartbeat] ❤️ Thump at 03:53:52
 2026-02-09 03:54:52 -08:00: [Heartbeat] ❤️ Thump at 03:54:52
 2026-02-09 03:55:52 -08:00: [Heartbeat] ❤️ Thump at 03:55:52
+2026-02-09 03:56:52 -08:00: [Heartbeat] ❤️ Thump at 03:56:52
+2026-02-09 03:57:52 -08:00: [Heartbeat] ❤️ Thump at 03:57:52
+2026-02-09 03:58:52 -08:00: [Heartbeat] ❤️ Thump at 03:58:52
+2026-02-09 03:59:52 -08:00: [Heartbeat] ❤️ Thump at 03:59:52
+2026-02-09 04:00:05 -08:00: [CustomAgents] Loaded agent from file: assistant
+2026-02-09 04:00:05 -08:00: [dotenv@17.2.4] injecting env (4) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+2026-02-09 04:00:10 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+2026-02-09 04:00:10 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: 🔄 add secrets lifecycle management: https://dotenvx.com/ops
+2026-02-09 04:00:10 -08:00: [dotenv@17.2.4] injecting env (0) from .env -- tip: 📡 add observability to secrets: https://dotenvx.com/ops
+2026-02-09 04:00:11 -08:00: [Gateway] Registered channel: console
+2026-02-09 04:00:11 -08:00: [Gateway] Registered channel: web
+2026-02-09 04:00:11 -08:00: [System] Telegram enabled
+2026-02-09 04:00:11 -08:00: [Gateway] Registered channel: telegram
+2026-02-09 04:00:11 -08:00: [Gateway] Starting control plane...
+2026-02-09 04:00:11 -08:00: ──────────────────────────────────────────────────
+2026-02-09 04:00:11 -08:00: ✔ Console Channel Active
+2026-02-09 04:00:11 -08:00:   Type a message and press Enter to chat.
+2026-02-09 04:00:11 -08:00: ──────────────────────────────────────────────────
+2026-02-09 04:00:11 -08:00: 
+2026-02-09 04:00:11 -08:00: [TelegramChannel] Starting polling...
+2026-02-09 04:00:11 -08:00: [AgentRunner] Heartbeat loop started (Interval: 60000ms).
+2026-02-09 04:00:11 -08:00: [BackgroundWorker] Started (check every 60000ms)
+2026-02-09 04:00:11 -08:00: [WebChannel] Server running at http://localhost:3000
+2026-02-09 04:00:11 -08:00: [TelegramChannel] Using bot @gitubot_bot (8381528303)
+2026-02-09 04:01:11 -08:00: [Heartbeat] ❤️ Thump at 04:01:11
+2026-02-09 04:02:11 -08:00: [Heartbeat] ❤️ Thump at 04:02:11
+2026-02-09 04:03:11 -08:00: [Heartbeat] ❤️ Thump at 04:03:11
+2026-02-09 04:04:11 -08:00: [Heartbeat] ❤️ Thump at 04:04:11
+2026-02-09 04:05:11 -08:00: [Heartbeat] ❤️ Thump at 04:05:11
+2026-02-09 04:06:11 -08:00: [Heartbeat] ❤️ Thump at 04:06:11
+2026-02-09 04:07:11 -08:00: [Heartbeat] ❤️ Thump at 04:07:11
+2026-02-09 04:08:11 -08:00: [Heartbeat] ❤️ Thump at 04:08:11
+2026-02-09 04:09:11 -08:00: [Heartbeat] ❤️ Thump at 04:09:11
+2026-02-09 04:10:11 -08:00: [Heartbeat] ❤️ Thump at 04:10:11
+2026-02-09 04:11:11 -08:00: [Heartbeat] ❤️ Thump at 04:11:11
+2026-02-09 04:12:11 -08:00: [Heartbeat] ❤️ Thump at 04:12:11
+2026-02-09 04:13:11 -08:00: [Heartbeat] ❤️ Thump at 04:13:11
+2026-02-09 04:14:11 -08:00: [Heartbeat] ❤️ Thump at 04:14:11
+2026-02-09 04:15:11 -08:00: [Heartbeat] ❤️ Thump at 04:15:11
+2026-02-09 04:16:11 -08:00: [Heartbeat] ❤️ Thump at 04:16:11
+2026-02-09 04:17:11 -08:00: [Heartbeat] ❤️ Thump at 04:17:11
+2026-02-09 04:18:11 -08:00: [Heartbeat] ❤️ Thump at 04:18:11
+2026-02-09 04:19:11 -08:00: [Heartbeat] ❤️ Thump at 04:19:11
+2026-02-09 04:20:11 -08:00: [Heartbeat] ❤️ Thump at 04:20:11
+2026-02-09 04:21:11 -08:00: [Heartbeat] ❤️ Thump at 04:21:11
+2026-02-09 04:22:11 -08:00: [Heartbeat] ❤️ Thump at 04:22:11
+2026-02-09 04:23:11 -08:00: [Heartbeat] ❤️ Thump at 04:23:11
