@@ -9,6 +9,8 @@ import { AuthManager } from '../../core/auth';
 import multer from 'multer';
 import { sttService } from '../../core/stt';
 import { ttsService } from '../../core/tts';
+import { modelManager } from '../../core/model-manager';
+import { ModelRegistry } from '../../core/models';
 
 export class WebChannel implements ChannelAdapter {
   name = 'web';
@@ -203,6 +205,41 @@ export class WebChannel implements ChannelAdapter {
         res.json({ projects });
       } catch (e: any) {
         res.status(500).json({ error: e.message });
+      }
+    });
+
+    // Models API
+    this.app.get('/api/models', (req, res) => {
+      const models = modelManager.listModels();
+      // Add built-in models if not in the list (like OpenRouter if configured but not persistent)
+      // Actually, modelManager tracks persisted models. ModelRegistry tracks runtime models.
+      // Let's return runtime models to be safe + metadata
+
+      const runtimeModels = ModelRegistry.getAll();
+      const current = ModelRegistry.getCurrentModelId();
+
+      // Merge metadata if available
+      const result = runtimeModels.map(m => {
+        const config = models.find(c => c.id === m.id);
+        return {
+          id: m.id,
+          name: m.name,
+          provider: config?.provider || 'unknown',
+          modelName: config?.modelName || m.id,
+          active: m.id === current
+        };
+      });
+
+      res.json({ models: result, current });
+    });
+
+    this.app.post('/api/models/use', express.json(), (req, res) => {
+      const { id } = req.body;
+      if (ModelRegistry.setCurrentModel(id)) {
+        res.json({ success: true, current: id });
+        console.log(`[WebChannel] Switched model to: ${id}`);
+      } else {
+        res.status(404).json({ error: 'Model not found' });
       }
     });
 

@@ -208,6 +208,22 @@
             gap: 16px;
         }
 
+        .model-selector {
+            padding: 8px 12px;
+            border-radius: 8px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            font-size: 0.85rem;
+            outline: none;
+            cursor: pointer;
+            min-width: 150px;
+        }
+
+        .model-selector:hover {
+            border-color: var(--accent-primary);
+        }
+
         .page-title {
             font-size: 1.25rem;
             font-weight: 600;
@@ -969,6 +985,10 @@
                     <h1 class="page-title" id="page-title">Dashboard</h1>
                 </div>
                 <div class="topbar-right">
+                    <select class="model-selector" id="header-model-select">
+                        <option value="" disabled selected>Loading models...</option>
+                    </select>
+
                     <div class="status-indicator">
                         <div class="status-dot"></div>
                         <span>Online</span>
@@ -1411,8 +1431,61 @@
                 const projectsRes = await fetch('/api/projects');
                 const projectsData = await projectsRes.json();
                 renderProjects(projectsData.projects);
+
+                // Load Models
+                await loadModels();
             } catch (e) {
                 console.error('Failed to load dashboard data:', e);
+            }
+        }
+
+        // Load Models
+        async function loadModels() {
+            try {
+                const res = await fetch('/api/models');
+                const data = await res.json();
+                const select = document.getElementById('header-model-select');
+
+                // Save current selection to restore if needed
+                const currentVal = select.value;
+
+                select.innerHTML = '';
+
+                data.models.forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = model.id;
+                    option.textContent = `${model.name} (${model.provider})`;
+                    if (model.id === data.current) {
+                        option.selected = true;
+                    }
+                    select.appendChild(option);
+                });
+
+                // Bind change event
+                select.onchange = async (e) => {
+                    const newId = e.target.value;
+                    try {
+                        const switchRes = await fetch('/api/models/use', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ id: newId })
+                        });
+                        const switchData = await switchRes.json();
+                        if (switchData.success) {
+                            console.log('Switched model to:', newId);
+                            // Visual feedback?
+                            select.style.borderColor = 'var(--success)';
+                            setTimeout(() => select.style.borderColor = '', 1000);
+                        } else {
+                            alert('Failed to switch model');
+                        }
+                    } catch (err) {
+                        console.error('Error switching model:', err);
+                    }
+                };
+
+            } catch (e) {
+                console.error('Failed to load models:', e);
             }
         }
 

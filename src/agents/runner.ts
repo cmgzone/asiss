@@ -26,6 +26,11 @@ import { TaskMemorySkill } from '../skills/task-memory';
 import { backgroundWorker } from '../core/background-worker';
 import { dndManager } from '../core/dnd';
 import { BackgroundGoalsSkill, DNDSkill } from '../skills/background';
+import { customAgentManager } from '../core/custom-agents';
+import { CustomAgentsSkill } from '../skills/custom-agents';
+import { modelManager } from '../core/model-manager';
+import { ModelsSkill } from '../skills/models';
+import { GenericOpenAIProvider } from './openai-provider';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -90,6 +95,23 @@ export class AgentRunner {
     SkillRegistry.register(new TaskMemorySkill());
     SkillRegistry.register(new BackgroundGoalsSkill());
     SkillRegistry.register(new DNDSkill());
+    SkillRegistry.register(new CustomAgentsSkill());
+    SkillRegistry.register(new ModelsSkill());
+
+    // Load custom models
+    for (const config of modelManager.listModels()) {
+      if (config.enabled) {
+        const provider = new GenericOpenAIProvider(
+          config.id,
+          config.name,
+          config.baseUrl,
+          config.apiKey || process.env.OPENAI_API_KEY || '',
+          config.modelName
+        );
+        ModelRegistry.register(provider);
+        console.log(`[AgentRunner] Loaded custom model: ${config.name} (${config.provider})`);
+      }
+    }
 
     // Wire up agent swarm executor
     agentSwarm.setExecutor(async (agentId: string, prompt: string) => {
@@ -324,6 +346,16 @@ export class AgentRunner {
 
     // Handle background goal commands
     if (this.handleBackgroundGoalCommand(sessionId, msg.content)) {
+      return;
+    }
+
+    // Handle custom agent commands
+    if (await this.handleCustomAgentCommand(sessionId, msg)) {
+      return;
+    }
+
+    // Handle model commands
+    if (this.handleModelCommand(sessionId, msg.content)) {
       return;
     }
 
@@ -767,6 +799,196 @@ ${context ? `\nSystem Context: ${context}` : ''}
         ? `\nQuiet hours: ${status.config.quietHoursStart}:00 - ${status.config.quietHoursEnd}:00`
         : '\nQuiet hours: Disabled';
       void this.gateway.sendResponse(sessionId, `${inDnd}${config}${pending}`);
+      return true;
+    }
+
+    return false;
+  }
+
+  private async handleCustomAgentCommand(sessionId: string, msg: Message): Promise<boolean> {
+    const trimmed = (msg.content || '').trim();
+
+    // /agent create <name> - <persona>
+    if (trimmed.toLowerCase().startsWith('/agent create ')) {
+      const rest = trimmed.slice(14).trim();
+      const dashIndex = rest.indexOf(' - ');
+      let name: string;
+      let persona: string;
+
+      if (dashIndex > 0) {
+        name = rest.slice(0, dashIndex).trim();
+        persona = rest.slice(dashIndex + 3).trim();
+      } else {
+        void this.gateway.sendResponse(sessionId, 'Usage: /agent create <name> - <persona description>');
+        return true;
+      }
+
+      const agent = customAgentManager.createAgent({
+        name,
+        displayName: name,
+        persona
+      });
+      void this.gateway.sendResponse(sessionId, `🤖 **Agent Created:** ${agent.displayName}\n\nID: \`${agent.id}\`\nPersona: ${persona.slice(0, 100)}...`);
+      return true;
+    }
+
+    // /agent template <name>
+    if (trimmed.toLowerCase().startsWith('/agent template ')) {
+      const templateName = trimmed.slice(16).trim();
+      const agent = customAgentManager.createFromTemplate(templateName);
+      if (!agent) {
+        const templates = customAgentManager.getTemplates();
+        void this.gateway.sendResponse(sessionId, `❌ Template not found: ${templateName}\n\nAvailable templates:\n${templates.map(t => `• ${t}`).join('\n')}`);
+        return true;
+      }
+      void this.gateway.sendResponse(sessionId, `🤖 **Agent Created from Template:** ${agent.displayName}\n\nID: \`${agent.id}\`\nSkills: ${agent.skills.join(', ') || 'none'}`);
+      return true;
+    }
+
+    // /agents - list all agents
+    if (trimmed.toLowerCase() === '/agents') {
+      const agents = customAgentManager.listAgents();
+      if (agents.length === 0) {
+        void this.gateway.sendResponse(sessionId, '📋 No custom agents yet.\n\nCreate one with:\n• `/agent create <name> - <persona>`\n• `/agent template researcher`');
+        return true;
+      }
+
+      const lines = agents.map(a => `• **${a.displayName}** (\`${a.name}\`) - ${a.description || 'No description'}`);
+      void this.gateway.sendResponse(sessionId, `🤖 **Custom Agents (${agents.length}):**\n\n${lines.join('\n')}`);
+      return true;
+    }
+
+    // /agent templates - list available templates
+    if (trimmed.toLowerCase() === '/agent templates') {
+      const templates = customAgentManager.getTemplates();
+      const details = templates.map(name => {
+        const t = customAgentManager.getTemplate(name);
+        return `• **${t?.displayName || name}** (\`${name}\`) - ${t?.description || ''}`;
+      });
+      void this.gateway.sendResponse(sessionId, `📋 **Agent Templates:**\n\n${details.join('\n')}\n\nUse: \`/agent template <name>\` to create one`);
+      return true;
+    }
+
+    // /agent delete <name>
+    if (trimmed.toLowerCase().startsWith('/agent delete ')) {
+      const name = trimmed.slice(14).trim();
+      const success = customAgentManager.deleteAgent(name);
+      void this.gateway.sendResponse(sessionId, success ? `✅ Deleted agent: ${name}` : `❌ Agent not found: ${name}`);
+      return true;
+    }
+
+    // @AgentName <message> - Talk to a specific agent
+    if (trimmed.startsWith('@')) {
+      const spaceIndex = trimmed.indexOf(' ');
+      if (spaceIndex > 1) {
+        const agentName = trimmed.slice(1, spaceIndex);
+        const userMessage = trimmed.slice(spaceIndex + 1).trim();
+
+        const agent = customAgentManager.getAgent(agentName);
+        if (agent) {
+          // Build agent-specific prompt
+          const agentSystemPrompt = customAgentManager.buildSystemPrompt(agent);
+
+          // Get conversation history for this agent
+          const history = customAgentManager.getConversation(sessionId, agent.id);
+          const historyText = history.slice(-10).map(m =>
+            m.role === 'user' ? `User: ${m.content}` : `${agent.displayName}: ${m.content}`
+          ).join('\n');
+
+          const prompt = historyText
+            ? `Previous conversation:\n${historyText}\n\nUser: ${userMessage}`
+            : `User: ${userMessage}`;
+
+          // Store user message
+          customAgentManager.addMessage(sessionId, agent.id, 'user', userMessage);
+
+          // Generate response
+          const model = this.getModel();
+          await this.gateway.sendResponse(sessionId, `💭 *${agent.displayName} is thinking...*`);
+
+          try {
+            const response = await model.generate(prompt, agentSystemPrompt, []);
+            const agentResponse = response.content || 'I have no response.';
+
+            // Store agent response
+            customAgentManager.addMessage(sessionId, agent.id, 'agent', agentResponse);
+
+            await this.gateway.sendResponse(sessionId, `**${agent.displayName}:**\n\n${agentResponse}`);
+          } catch (err: any) {
+            await this.gateway.sendResponse(sessionId, `❌ ${agent.displayName} encountered an error: ${err.message}`);
+          }
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private handleModelCommand(sessionId: string, text: string): boolean {
+    const trimmed = (text || '').trim();
+
+    // /models
+    if (trimmed.toLowerCase() === '/models') {
+      const models = ModelRegistry.getAll();
+      const current = ModelRegistry.getCurrentModelId();
+
+      let response = '**🤖 Available Models:**\n\n';
+      response += models.map(m => {
+        const isCurrent = m.id === current ? '✅' : '  ';
+        return `${isCurrent} **${m.name}** (\`${m.id}\`)`;
+      }).join('\n');
+
+      response += '\n\n**Usage:**\n`/model use <id>` - Switch model\n`/model add <name> <base_url> <key> <model_name>` - Add new model';
+
+      void this.gateway.sendResponse(sessionId, response);
+      return true;
+    }
+
+    // /model use <id>
+    if (trimmed.toLowerCase().startsWith('/model use ')) {
+      const id = trimmed.slice(11).trim();
+      if (ModelRegistry.setCurrentModel(id)) {
+        void this.gateway.sendResponse(sessionId, `✅ Switched to model: **${id}**`);
+      } else {
+        void this.gateway.sendResponse(sessionId, `❌ Model not found: **${id}**\nUse \`/models\` to see available models.`);
+      }
+      return true;
+    }
+
+    // /model add <name> <provider> <url> <key> <model>
+    // Simplified: /model add openai gpt-4o sk-key... 
+    // Or: /model add ollama llama3 http://localhost:11434 
+    if (trimmed.toLowerCase().startsWith('/model add ')) {
+      // This is complex to parse via chat, better to rely on the ModelsSkill tool use
+      // But let's support a simple version for Ollama:
+      // /model add ollama <name> <model_id> [url]
+      const parts = trimmed.split(' ');
+      if (parts.length >= 4 && parts[2] === 'ollama') {
+        const name = parts[3];
+        const modelId = parts[4] || name;
+        const url = parts[5] || 'http://localhost:11434/v1';
+
+        const config = {
+          id: name.toLowerCase(),
+          name,
+          provider: 'ollama' as const,
+          modelName: modelId,
+          baseUrl: url,
+          apiKey: 'ollama'
+        };
+
+        if (modelManager.addModel(config)) {
+          const provider = new GenericOpenAIProvider(config.id, config.name, config.baseUrl, config.apiKey || '', config.modelName);
+          ModelRegistry.register(provider);
+          void this.gateway.sendResponse(sessionId, `✅ Added Ollama model: **${name}** (${modelId})`);
+        } else {
+          void this.gateway.sendResponse(sessionId, `❌ Model **${name}** already exists.`);
+        }
+        return true;
+      }
+
+      void this.gateway.sendResponse(sessionId, 'To add models, please use:\n`/model add ollama <name> <model_id> [url]`\n\nFor OpenAI/others, ask me: "Add a new OpenAI model named gpt-4o..."');
       return true;
     }
 
