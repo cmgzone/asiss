@@ -32,6 +32,7 @@ import { modelManager } from '../core/model-manager';
 import { ModelsSkill } from '../skills/models';
 import { GenericOpenAIProvider } from './openai-provider';
 import { SerperSkill } from '../skills/serper';
+import { MemorySkill } from '../skills/memory';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -99,6 +100,7 @@ export class AgentRunner {
     SkillRegistry.register(new CustomAgentsSkill());
     SkillRegistry.register(new ModelsSkill());
     SkillRegistry.register(new SerperSkill());
+    SkillRegistry.register(new MemorySkill(this.memory));
 
     // Load custom models
     for (const config of modelManager.listModels()) {

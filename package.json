@@ -29,6 +29,7 @@
     "@types/node": "^25.2.1",
     "@types/node-fetch": "^2.6.13",
     "@types/socket.io": "^3.0.1",
+    "better-sqlite3": "^12.6.2",
     "boxen": "^5.1.2",
     "chalk": "^4.1.2",
     "discord.js": "^14.25.1",
@@ -53,6 +54,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/inquirer": "^8.2.6",
     "@types/marked-terminal": "^6.1.1",
     "@types/multer": "^2.0.0",
