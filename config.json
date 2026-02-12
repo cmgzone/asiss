@@ -27,6 +27,19 @@
     "reportOnCompletion": true
   },
   "agent": {
-    "maxTurns": 15
+    "maxTurns": 15,
+    "autoContinue": {
+      "enabled": true,
+      "maxBatches": 3,
+      "notify": true
+    },
+    "autoCompact": {
+      "enabled": true,
+      "minMessages": 80,
+      "minNewMessages": 30,
+      "keepLast": 20,
+      "maxChars": 18000,
+      "perMessageMaxChars": 1200
+    }
   }
 }

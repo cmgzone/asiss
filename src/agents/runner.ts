@@ -1,7 +1,7 @@
 import { Message } from '../core/types';
 import { ModelProvider, ModelRegistry } from '../core/models';
 import { SkillRegistry } from '../core/skills';
-import { MemoryManager } from '../core/memory';
+import { Memory, MemoryManager } from '../core/memory';
 import { McpManager } from '../core/mcp';
 import { MockProvider } from './mock-provider';
 import { OpenRouterProvider } from './openrouter-provider';
@@ -42,6 +42,8 @@ import dotenv from 'dotenv';
 import { v4 as uuidv4 } from 'uuid';
 
 dotenv.config();
+
+const DEBUG_PREFIX = '__DEBUG__';
 
 // Interface to avoid circular dependency import issues
 interface IGateway {
@@ -239,6 +241,106 @@ export class AgentRunner {
       }
     }
     return config;
+  }
+
+  private isCompactionMemory(memory: Memory): boolean {
+    return memory.role === 'system' && memory.metadata?.type === 'compaction';
+  }
+
+  private getLatestCompaction(memories: Memory[]): Memory | null {
+    for (let i = memories.length - 1; i >= 0; i--) {
+      if (this.isCompactionMemory(memories[i])) return memories[i];
+    }
+    return null;
+  }
+
+  private applyCompactionFilter(memories: Memory[]): Memory[] {
+    const latest = this.getLatestCompaction(memories);
+    if (!latest) return memories;
+    const upto = typeof latest.metadata?.uptoTimestamp === 'number'
+      ? latest.metadata.uptoTimestamp
+      : latest.timestamp;
+    const filtered = memories.filter((m) => m.timestamp > upto && m !== latest);
+    return [latest, ...filtered];
+  }
+
+  private async autoCompactSessionIfNeeded(sessionId: string, config: any, memories: Memory[]): Promise<boolean> {
+    const agentConfig = config?.agent ?? {};
+    const autoCompactCfg = agentConfig.autoCompact;
+    const autoCompactEnabled = autoCompactCfg === true
+      || (typeof autoCompactCfg === 'object' && autoCompactCfg.enabled !== false);
+
+    if (!autoCompactEnabled) return false;
+
+    const minMessages = typeof autoCompactCfg?.minMessages === 'number' ? autoCompactCfg.minMessages : 80;
+    const keepLast = typeof autoCompactCfg?.keepLast === 'number' ? autoCompactCfg.keepLast : 20;
+    const minNewMessages = typeof autoCompactCfg?.minNewMessages === 'number' ? autoCompactCfg.minNewMessages : 30;
+    const maxChars = typeof autoCompactCfg?.maxChars === 'number' ? autoCompactCfg.maxChars : 18000;
+    const perMessageMaxChars = typeof autoCompactCfg?.perMessageMaxChars === 'number' ? autoCompactCfg.perMessageMaxChars : 1200;
+
+    if (memories.length < minMessages) return false;
+
+    const latestCompaction = this.getLatestCompaction(memories);
+    const lastUpto = typeof latestCompaction?.metadata?.uptoTimestamp === 'number'
+      ? latestCompaction.metadata.uptoTimestamp
+      : (latestCompaction?.timestamp || 0);
+
+    const cutoffIndex = Math.max(0, memories.length - keepLast);
+    const candidates = memories.slice(0, cutoffIndex).filter((m) => {
+      if (this.isCompactionMemory(m)) return false;
+      return m.timestamp > lastUpto;
+    });
+
+    if (candidates.length < minNewMessages) return false;
+
+    const lastTimestamp = candidates[candidates.length - 1].timestamp;
+
+    const truncate = (value: string, max: number) => {
+            if (value.length <= max) return value;
+            return value.slice(0, max) + `\n... (truncated ${value.length - max} chars)`;
+    };
+
+    let body = '';
+    for (const msg of candidates) {
+      const role = msg.role === 'user' ? 'User' : msg.role === 'assistant' ? 'Assistant' : 'System';
+      const line = `${role}: ${truncate(msg.content, perMessageMaxChars)}\n`;
+      if (body.length + line.length > maxChars) break;
+      body += line;
+    }
+
+    if (!body.trim()) return false;
+
+    const summaryPrompt = [
+      'Summarize the conversation history below for future context.',
+      'Focus on: user goal, key decisions, constraints, actions taken (including tool results), and open tasks.',
+      'Write 6-12 bullet points, concise and factual. Do not invent anything.',
+      '',
+      'Conversation:',
+      body
+    ].join('\n');
+
+    try {
+      const model = this.getModel();
+      const summaryResp = await model.generate(summaryPrompt, 'You are a summarization assistant.', []);
+      const summary = (summaryResp.content || '').trim();
+      if (!summary) return false;
+
+      this.memory.add(sessionId, {
+        role: 'system',
+        content: `Compacted summary (auto):\n${summary}`,
+        timestamp: Date.now(),
+        metadata: {
+          type: 'compaction',
+          uptoTimestamp: lastTimestamp,
+          messageCount: candidates.length,
+          createdAt: Date.now()
+        }
+      });
+      return true;
+    } catch (e) {
+      console.error('[AgentRunner] Auto-compact failed:', e);
+      return false;
+    }
   }
 
   // Helper to get the current model based on config/env at runtime
@@ -441,314 +543,352 @@ export class AgentRunner {
 
     // Multi-turn Loop for Tool Execution
     const config = this.loadConfig();
+    const agentConfig = config?.agent ?? {};
     const configuredMaxTurnsRaw =
-      typeof config?.agent?.maxTurns === 'number'
+      typeof config?.agent?.maxTurns === "number"
         ? config.agent.maxTurns
-        : (typeof config?.maxTurns === 'number' ? config.maxTurns : undefined);
+        : (typeof config?.maxTurns === "number" ? config.maxTurns : undefined);
     const maxTurns = Number.isFinite(configuredMaxTurnsRaw)
       ? Math.min(50, Math.max(1, Math.floor(configuredMaxTurnsRaw)))
       : this.defaultMaxTurns;
 
+    const autoContinueCfg = agentConfig.autoContinue;
+    const autoContinueEnabled = autoContinueCfg === true
+      || (typeof autoContinueCfg === "object" && autoContinueCfg.enabled !== false);
+    const autoContinueMax = typeof autoContinueCfg === "number"
+      ? Math.max(0, Math.floor(autoContinueCfg))
+      : (typeof autoContinueCfg?.maxBatches === "number"
+        ? Math.max(0, Math.floor(autoContinueCfg.maxBatches))
+        : 3);
+    const autoContinueNotify = typeof autoContinueCfg?.notify === "boolean"
+      ? autoContinueCfg.notify
+      : true;
+
+    const initialMemories = this.memory.getAll(sessionId);
+    await this.autoCompactSessionIfNeeded(sessionId, config, initialMemories);
+
     let executedAnyTools = false;
     let stoppedByStepLimit = true;
-    for (let i = 0; i < maxTurns; i++) {
-      // Smart Context Construction
-      const allMemories = this.memory.get(sessionId);
-      const totalMemories = allMemories.length;
-      const recentCount = 10;
+    let autoContinueCount = 0;
+    let continuationBatch = 0;
+    for (;;) {
+      stoppedByStepLimit = true;
+      for (let i = 0; i < maxTurns; i++) {
+        // Smart Context Construction
+        const allMemories = this.applyCompactionFilter(this.memory.getAll(sessionId));
+        const totalMemories = allMemories.length;
+        const recentCount = 10;
 
-      let contextMemories: typeof allMemories = [];
+        let contextMemories: typeof allMemories = [];
 
-      if (totalMemories <= recentCount + 2) {
-        // Short conversation, use everything
-        contextMemories = allMemories;
-      } else {
-        // Long conversation: Pin Goal + Recent
-        const firstUserMsg = allMemories.find(m => m.role === 'user');
-        const recentMemories = allMemories.slice(-recentCount);
-
-        if (firstUserMsg && !recentMemories.includes(firstUserMsg)) {
-          contextMemories = [
-            firstUserMsg,
-            { role: 'system', content: `... (Skipped ${totalMemories - recentCount - 1} messages) ...`, timestamp: Date.now() },
-            ...recentMemories
-          ];
+        if (totalMemories <= recentCount + 2) {
+          // Short conversation, use everything
+          contextMemories = allMemories;
         } else {
-          contextMemories = recentMemories;
+          // Long conversation: Pin Goal + Recent
+          const firstUserMsg = allMemories.find(m => m.role === "user");
+          const recentMemories = allMemories.slice(-recentCount);
+
+          if (firstUserMsg && !recentMemories.includes(firstUserMsg)) {
+            contextMemories = [
+              firstUserMsg,
+              { role: "system", content: `... (Skipped ${totalMemories - recentCount - 1} messages) ...`, timestamp: Date.now() },
+              ...recentMemories
+            ];
+          } else {
+            contextMemories = recentMemories;
+          }
         }
-      }
 
-      // Re-fetch logic for loop i > 0 is handled implicitly because we fetch from memory each time
-      // But we must respect the 'current state' if we just added things in previous iterations of THIS loop
-      // The `this.memory.get` fetches the latest state including what we just added.
-      // However, for the *very first* message (Goal), we want to make sure it's labeled clearly if we are skipping.
+        // Re-fetch logic for loop i > 0 is handled implicitly because we fetch from memory each time
+        // But we must respect the 'current state' if we just added things in previous iterations of THIS loop
+        // The `this.memory.get` fetches the latest state including what we just added.
+        // However, for the *very first* message (Goal), we want to make sure it's labeled clearly if we are skipping.
 
-      // Truncate function for context
-      const truncateForContext = (content: string, maxLen: number = 20000) => {
-        if (content.length <= maxLen) return content;
-        return content.slice(0, maxLen) + `\n... [Truncated ${content.length - maxLen} chars] ...`;
-      };
+        // Truncate function for context
+        const truncateForContext = (content: string, maxLen: number = 20000) => {
+          if (content.length <= maxLen) return content;
+          return content.slice(0, maxLen) + `\n... [Truncated ${content.length - maxLen} chars] ...`;
+        };
 
-      const currentHistoryText = contextMemories.map((m, index) => {
-        const truncatedContent = truncateForContext(m.content);
-        if (m.role === 'user') {
-          return (index === 0 && totalMemories > recentCount) ? `User (Original Goal): ${truncatedContent}` : `User: ${truncatedContent}`;
-        }
-        if (m.role === 'assistant') return `Assistant: ${truncatedContent}`;
-        if (m.role === 'system') return `System: ${truncatedContent}`;
-        return `System: ${truncatedContent}`;
-      }).join('\n');
+        const currentHistoryText = contextMemories.map((m, index) => {
+          const truncatedContent = truncateForContext(m.content);
+          if (m.role === "user") {
+            return (index === 0 && totalMemories > recentCount) ? `User (Original Goal): ${truncatedContent}` : `User: ${truncatedContent}`;
+          }
+          if (m.role === "assistant") return `Assistant: ${truncatedContent}`;
+          if (m.role === "system") return `System: ${truncatedContent}`;
+          return `System: ${truncatedContent}`;
+        }).join('\n');
 
-      // Dynamic Identity Injection
-      const agentName = config.name || "Gitubot";
-      let systemPrompt = this.baseSystemPrompt.replace('{{AGENT_NAME}}', agentName);
-      systemPrompt += this.buildWorkspacePrompt(msg.channel);
+        // Dynamic Identity Injection
+        const agentName = config.name || "Gitubot";
+        let systemPrompt = this.baseSystemPrompt.replace("{{AGENT_NAME}}", agentName);
+        systemPrompt += this.buildWorkspacePrompt(msg.channel);
 
-      // User Context Injection
-      const lastUserMsg = [...allMemories].reverse().find(m => m.role === 'user');
-      const username = lastUserMsg?.metadata?.username || msg.metadata?.username || 'User';
-      systemPrompt += `\n\nYou are speaking with ${username}.`;
+        // User Context Injection
+        const lastUserMsg = [...allMemories].reverse().find(m => m.role === "user");
+        const username = lastUserMsg?.metadata?.username || msg.metadata?.username || "User";
+        systemPrompt += `\n\nYou are speaking with ${username}.`;
 
-      const prompt = `
+        const prompt = `
 Previous Conversation:
 ${currentHistoryText}
 
-${i === 0 ? `Current User Input: ${msg.content}` : '(Continuing execution...)'}
+${i === 0 && continuationBatch === 0 ? `Current User Input: ${msg.content}` : '(Continuing execution...)'}
 ${context ? `\nSystem Context: ${context}` : ''}
 `;
 
-      // Inject Long-Term Memory (Scratchpad)
-      const notesSummary = scratchpad.getSummary();
-      if (notesSummary) {
-        systemPrompt += `\n\n${notesSummary}`;
-      }
-
-      // Apply thinking level enhancement
-      const thinkingPrompt = thinkingManager.getThinkingPrompt(sessionId);
-      const enhancedSystemPrompt = thinkingPrompt
-        ? `${systemPrompt}\n\n[Thinking Mode: ${thinkingPrompt}]`
-        : systemPrompt;
-      const planPrompt = planModeManager.getPlanPrompt(sessionId);
-      const finalSystemPrompt = planPrompt
-        ? `${enhancedSystemPrompt}\n\n${planPrompt}`
-        : enhancedSystemPrompt;
-
-      // Call Model (Dynamic Selection)
-      const currentModel = this.getModel();
-
-      // STREAMING LOGIC
-      let response;
-      if (currentModel.generateStream) {
-        let streamedAnyChunk = false;
-        response = await currentModel.generateStream(prompt, finalSystemPrompt, allTools, (chunk) => {
-          if (!chunk) return;
-          streamedAnyChunk = true;
-          void this.gateway.sendStreamChunk(sessionId, chunk);
-        });
-        if (!streamedAnyChunk && response?.content) {
-          await this.gateway.sendResponse(sessionId, response.content);
+        // Inject Long-Term Memory (Scratchpad)
+        const notesSummary = scratchpad.getSummary();
+        if (notesSummary) {
+          systemPrompt += `\n\n${notesSummary}`;
         }
-      } else {
-        // Fallback for non-streaming models
-        response = await currentModel.generate(prompt, finalSystemPrompt, allTools);
-        if (!currentModel.generateStream) {
-          await this.gateway.sendResponse(sessionId, response.content || '');
+
+        // Apply thinking level enhancement
+        const thinkingPrompt = thinkingManager.getThinkingPrompt(sessionId);
+        const enhancedSystemPrompt = thinkingPrompt
+          ? `${systemPrompt}\n\n[Thinking Mode: ${thinkingPrompt}]`
+          : systemPrompt;
+        const planPrompt = planModeManager.getPlanPrompt(sessionId);
+        const finalSystemPrompt = planPrompt
+          ? `${enhancedSystemPrompt}\n\n${planPrompt}`
+          : enhancedSystemPrompt;
+
+        // Call Model (Dynamic Selection)
+        const currentModel = this.getModel();
+
+        // STREAMING LOGIC
+        let response;
+        if (currentModel.generateStream) {
+          let streamedAnyChunk = false;
+          response = await currentModel.generateStream(prompt, finalSystemPrompt, allTools, (chunk) => {
+            if (!chunk) return;
+            streamedAnyChunk = true;
+            void this.gateway.sendStreamChunk(sessionId, chunk);
+          });
+          if (!streamedAnyChunk && response?.content) {
+            await this.gateway.sendResponse(sessionId, response.content);
+          }
+        } else {
+          // Fallback for non-streaming models
+          response = await currentModel.generate(prompt, finalSystemPrompt, allTools);
+          if (!currentModel.generateStream) {
+            await this.gateway.sendResponse(sessionId, response.content || "");
+          }
         }
-      }
 
-      // Handle Content (Save to Memory)
-      if (response.content) {
-        this.memory.add(sessionId, {
-          role: 'assistant',
-          content: response.content,
-          timestamp: Date.now()
-        });
-      }
+        // Handle Content (Save to Memory)
+        if (response.content) {
+          this.memory.add(sessionId, {
+            role: "assistant",
+            content: response.content,
+            timestamp: Date.now()
+          });
+        }
 
-      // Handle Tool Calls
-      if (response.toolCalls && response.toolCalls.length > 0) {
-        console.log(`[AgentRunner] Executing ${response.toolCalls.length} tools in parallel...`);
-        await this.gateway.sendResponse(sessionId, `🛠️ Executing ${response.toolCalls.length} tools...`);
-        executedAnyTools = true;
+        // Handle Tool Calls
+        if (response.toolCalls && response.toolCalls.length > 0) {
+          console.log(`[AgentRunner] Executing ${response.toolCalls.length} tools in parallel...`);
+          await this.gateway.sendResponse(sessionId, `${DEBUG_PREFIX} 🛠️ Executing ${response.toolCalls.length} tools...`);
+          executedAnyTools = true;
 
-        // Map each tool call to a Promise
-        const toolPromises = response.toolCalls.map(async (call) => {
-          try {
-            let output;
-            const nativeSkill = SkillRegistry.get(call.name);
+          // Map each tool call to a Promise
+          const toolPromises = response.toolCalls.map(async (call) => {
+            try {
+              let output;
+              const nativeSkill = SkillRegistry.get(call.name);
 
-            if (nativeSkill) {
-              const args = { ...(call.arguments || {}), __sessionId: sessionId };
-              if (call.name === 'shell') {
-                (args as any).__stream = (chunk: string) => {
-                  if (chunk) {
-                    void this.gateway.sendStreamChunk(sessionId, chunk);
-                  }
-                };
+              if (nativeSkill) {
+                const args = { ...(call.arguments || {}), __sessionId: sessionId };
+                if (call.name === "shell") {
+                  (args as any).__stream = (chunk: string) => {
+                    if (chunk) {
+                      void this.gateway.sendStreamChunk(sessionId, chunk);
+                    }
+                  };
+                }
+                output = JSON.stringify(await nativeSkill.execute(args));
+              } else {
+                const result = await this.mcpManager.callTool(call.name, call.arguments);
+                output = JSON.stringify(result);
               }
-              output = JSON.stringify(await nativeSkill.execute(args));
+
+              return {
+                success: true,
+                call: call,
+                output: output
+              };
+            } catch (err: any) {
+              return {
+                success: false,
+                call: call,
+                error: err.message
+              };
+            }
+          });
+
+          // Wait for all tools to finish
+          const results = await Promise.all(toolPromises);
+
+          // Process results
+          for (const result of results) {
+            if (result.success) {
+              this.memory.add(sessionId, {
+                role: "system",
+                content: `Tool '${result.call.name}' Output: ${result.output}` ,
+                timestamp: Date.now()
+              });
             } else {
-              const result = await this.mcpManager.callTool(call.name, call.arguments);
-              output = JSON.stringify(result);
+              this.memory.add(sessionId, {
+                role: "system",
+                content: `Tool '${result.call.name}' Error: ${result.error}` ,
+                timestamp: Date.now()
+              });
+            }
+          }
+
+          const truncate = (value: string, max: number) => {
+            if (value.length <= max) return value;
+            return value.slice(0, max) + `\n... (truncated ${value.length - max} chars)`;
+          };
+
+          const normalizeOutput = (value: any) => {
+            if (value === null || value === undefined) return "";
+            return String(value).replace(/\r\n/g, "\n").trimEnd();
+          };
+
+          const parseJson = (value: string) => {
+            try {
+              return JSON.parse(value);
+            } catch {
+              return null;
+            }
+          };
+
+          const ensureClosedCodeFences = (value: string) => {
+            const matches = value.match(/```/g);
+            if (matches && matches.length % 2 === 1) {
+              return value + "\n```";
+            }
+            return value;
+          };
+
+          const formatShellResult = (result: any) => {
+            const args = result.call?.arguments || {};
+            const command = typeof args.command === "string" ? args.command : "";
+            const outputObj = result.success ? parseJson(String(result.output)) : null;
+            if (!outputObj) {
+              const raw = normalizeOutput(result.output);
+              return raw || "_No output_";
             }
 
-            return {
-              success: true,
-              call: call,
-              output: output
-            };
-          } catch (err: any) {
-            return {
-              success: false,
-              call: call,
-              error: err.message
-            };
-          }
-        });
+            const streamed = Boolean(outputObj?.streamed);
+            const stdout = normalizeOutput(outputObj?.stdout);
+            const stderr = normalizeOutput(outputObj?.stderr);
+            const errorText = normalizeOutput(outputObj?.error || result.error);
+            const exitCode = outputObj?.exitCode;
+            const elevated = outputObj?.elevated;
 
-        // Wait for all tools to finish
-        const results = await Promise.all(toolPromises);
+            const metaParts: string[] = [];
+            if (typeof exitCode !== "undefined") metaParts.push(`exit: ${exitCode}`);
+            if (elevated) metaParts.push(`elevated: ${elevated}`);
+            const meta = metaParts.length ? `_${metaParts.join(" | ")}_` : "";
 
-        // Process results
-        for (const result of results) {
-          if (result.success) {
-            this.memory.add(sessionId, {
-              role: 'system',
-              content: `Tool '${result.call.name}' Output: ${result.output}`,
-              timestamp: Date.now()
-            });
-          } else {
-            this.memory.add(sessionId, {
-              role: 'system',
-              content: `Tool '${result.call.name}' Error: ${result.error}`,
-              timestamp: Date.now()
-            });
+            if (streamed) {
+              const commandLabel = command ? `\`${command}\`` : "command";
+              const summaryLines = [`Shell stream complete for ${commandLabel}.`];
+              if (errorText) summaryLines.push(`Error: ${errorText}`);
+              if (meta) summaryLines.push(meta);
+              return summaryLines.join("\n");
+            }
+
+            const prompt = process.platform === "win32" ? "PS>" : "$";
+            const lines = ["```shell"];
+            const cwd = process.cwd();
+            if (cwd) {
+              lines.push(`# cwd: ${cwd}`);
+            }
+            lines.push(`${prompt} ${command || "(command unavailable)"}`);
+            if (stdout) {
+              lines.push(stdout);
+            }
+            if (stderr) {
+              if (stdout) lines.push("");
+              lines.push("# stderr");
+              lines.push(stderr);
+            }
+            if (errorText && errorText !== stderr) {
+              if (stdout || stderr) lines.push("");
+              lines.push("# error");
+              lines.push(errorText);
+            }
+            if (!stdout && !stderr && !errorText) {
+              lines.push("# (no output)");
+            }
+            lines.push("```");
+
+            return [lines.join("\n"), meta].filter(Boolean).join("\n");
+          };
+
+          const formatToolResult = (result: any) => {
+            if (result.call?.name === "shell") {
+              const rendered = formatShellResult(result);
+              return `${result.success ? "✅" : "❌"} shell\n${rendered}`;
+            }
+            if (result.success) {
+              return `✅ ${result.call.name}\n${String(result.output)}`;
+            }
+            return `❌ ${result.call.name}\n${String(result.error || "Unknown error")}`;
+          };
+
+          const maxPerTool = 1500;
+          const maxTotal = 3500;
+          let toolOutputText = results.map((r) => {
+            const formatted = formatToolResult(r);
+            return ensureClosedCodeFences(truncate(formatted, maxPerTool));
+          }).join("\n\n");
+
+          toolOutputText = ensureClosedCodeFences(truncate(toolOutputText, maxTotal));
+          await this.gateway.sendResponse(sessionId, `${DEBUG_PREFIX}\n${toolOutputText}`);
+
+          // Continue loop to let model interpret results
+        } else {
+          const text = (response.content || "").trim();
+          if (!text && executedAnyTools) {
+            await this.gateway.sendResponse(
+              sessionId,
+              'Automation paused without a final message. Send "continue" to keep going, or describe the next step you want.'
+            );
           }
+          stoppedByStepLimit = false;
+          break;
         }
+      }
 
-        const truncate = (value: string, max: number) => {
-          if (value.length <= max) return value;
-          return value.slice(0, max) + `\n... (truncated ${value.length - max} chars)`;
-        };
-
-        const normalizeOutput = (value: any) => {
-          if (value === null || value === undefined) return '';
-          return String(value).replace(/\r\n/g, '\n').trimEnd();
-        };
-
-        const parseJson = (value: string) => {
-          try {
-            return JSON.parse(value);
-          } catch {
-            return null;
-          }
-        };
-
-        const ensureClosedCodeFences = (value: string) => {
-          const matches = value.match(/```/g);
-          if (matches && matches.length % 2 === 1) {
-            return value + '\n```';
-          }
-          return value;
-        };
-
-        const formatShellResult = (result: any) => {
-          const args = result.call?.arguments || {};
-          const command = typeof args.command === 'string' ? args.command : '';
-          const outputObj = result.success ? parseJson(String(result.output)) : null;
-          if (!outputObj) {
-            const raw = normalizeOutput(result.output);
-            return raw || '_No output_';
-          }
-
-          const streamed = Boolean(outputObj?.streamed);
-          const stdout = normalizeOutput(outputObj?.stdout);
-          const stderr = normalizeOutput(outputObj?.stderr);
-          const errorText = normalizeOutput(outputObj?.error || result.error);
-          const exitCode = outputObj?.exitCode;
-          const elevated = outputObj?.elevated;
-
-          const metaParts: string[] = [];
-          if (typeof exitCode !== 'undefined') metaParts.push(`exit: ${exitCode}`);
-          if (elevated) metaParts.push(`elevated: ${elevated}`);
-          const meta = metaParts.length ? `_${metaParts.join(' | ')}_` : '';
-
-          if (streamed) {
-            const commandLabel = command ? `\`${command}\`` : 'command';
-            const summaryLines = [`Shell stream complete for ${commandLabel}.`];
-            if (errorText) summaryLines.push(`Error: ${errorText}`);
-            if (meta) summaryLines.push(meta);
-            return summaryLines.join('\n');
-          }
-
-          const prompt = process.platform === 'win32' ? 'PS>' : '$';
-          const lines = ['```shell'];
-          const cwd = process.cwd();
-          if (cwd) {
-            lines.push(`# cwd: ${cwd}`);
-          }
-          lines.push(`${prompt} ${command || '(command unavailable)'}`);
-          if (stdout) {
-            lines.push(stdout);
-          }
-          if (stderr) {
-            if (stdout) lines.push('');
-            lines.push('# stderr');
-            lines.push(stderr);
-          }
-          if (errorText && errorText !== stderr) {
-            if (stdout || stderr) lines.push('');
-            lines.push('# error');
-            lines.push(errorText);
-          }
-          if (!stdout && !stderr && !errorText) {
-            lines.push('# (no output)');
-          }
-          lines.push('```');
-
-          return [lines.join('\n'), meta].filter(Boolean).join('\n');
-        };
-
-        const formatToolResult = (result: any) => {
-          if (result.call?.name === 'shell') {
-            const rendered = formatShellResult(result);
-            return `${result.success ? '✅' : '❌'} shell\n${rendered}`;
-          }
-          if (result.success) {
-            return `✅ ${result.call.name}\n${String(result.output)}`;
-          }
-          return `❌ ${result.call.name}\n${String(result.error || 'Unknown error')}`;
-        };
-
-        const maxPerTool = 1500;
-        const maxTotal = 3500;
-        let toolOutputText = results.map((r) => {
-          const formatted = formatToolResult(r);
-          return ensureClosedCodeFences(truncate(formatted, maxPerTool));
-        }).join('\n\n');
-
-        toolOutputText = ensureClosedCodeFences(truncate(toolOutputText, maxTotal));
-        await this.gateway.sendResponse(sessionId, toolOutputText);
-
-        // Continue loop to let model interpret results
-      } else {
-        const text = (response.content || '').trim();
-        if (!text && executedAnyTools) {
-          await this.gateway.sendResponse(
-            sessionId,
-            'Automation paused without a final message. Send "continue" to keep going, or describe the next step you want.'
-          );
-        }
-        stoppedByStepLimit = false;
+      if (!stoppedByStepLimit) {
         break;
       }
-    }
 
-    if (stoppedByStepLimit) {
+      if (autoContinueEnabled && autoContinueCount < autoContinueMax) {
+        autoContinueCount += 1;
+        continuationBatch += 1;
+        if (autoContinueNotify) {
+          await this.gateway.sendResponse(
+            sessionId,
+            `🔁 Auto-continue (${autoContinueCount}/${autoContinueMax})...`
+          );
+        }
+        const updatedMemories = this.memory.getAll(sessionId);
+        await this.autoCompactSessionIfNeeded(sessionId, config, updatedMemories);
+        continue;
+      }
+
       await this.gateway.sendResponse(
         sessionId,
         `Automation step limit reached (${maxTurns}). Send "continue" to keep going, or increase config.agent.maxTurns in config.json.`
       );
+      break;
     }
   }
 

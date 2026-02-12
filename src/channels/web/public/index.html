@@ -549,6 +549,49 @@
             display: none;
         }
 
+        .message.bot.debug-block .debug-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 10px 12px;
+            margin-bottom: 8px;
+            border-radius: 10px;
+            background: rgba(148, 163, 184, 0.08);
+            border: 1px solid var(--border-color);
+            font-size: 0.85rem;
+        }
+
+        .message.bot.debug-block .debug-title {
+            font-weight: 600;
+        }
+
+        .message.bot.debug-block .debug-status {
+            color: var(--text-muted);
+            margin-left: auto;
+            font-size: 0.75rem;
+        }
+
+        .message.bot.debug-block .debug-toggle {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            padding: 4px 10px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: all 0.2s ease;
+        }
+
+        .message.bot.debug-block .debug-toggle:hover {
+            color: var(--text-primary);
+            border-color: var(--accent-primary);
+        }
+
+        .message.bot.debug-block.debug-collapsed .debug-body {
+            display: none;
+        }
+
         .chat-input-area {
             padding: 20px;
             border-top: 1px solid var(--border-color);
@@ -1429,6 +1472,7 @@
         const CHAT_HISTORY_LIMIT = 200;
         const SHELL_STREAM_MARKER = '__SHELL_STREAM__';
         const SHELL_STREAM_END_MARKER = '__SHELL_STREAM_END__';
+        const DEBUG_PREFIX = '__DEBUG__';
 
         function getChatStorageKey() {
             return `gitu_chat_history_${currentUser || 'guest'}`;
@@ -1462,14 +1506,15 @@
         function persistStreamChunk(chunk, streamType = null) {
             const history = loadChatHistory();
             if (activeStreamIndex === null || !history[activeStreamIndex]) {
-                history.push({ text: '', isUser: false, timestamp: Date.now(), streaming: true, streamType: streamType, collapsed: false });
+                const shouldCollapse = streamType === 'shell';
+                history.push({ text: '', isUser: false, timestamp: Date.now(), streaming: true, streamType: streamType, collapsed: shouldCollapse });
                 activeStreamIndex = history.length - 1;
             }
             if (streamType && !history[activeStreamIndex].streamType) {
                 history[activeStreamIndex].streamType = streamType;
             }
             if (history[activeStreamIndex].streamType === 'shell') {
-                history[activeStreamIndex].collapsed = false;
+                history[activeStreamIndex].collapsed = true;
             }
             history[activeStreamIndex].text += chunk;
             history[activeStreamIndex].timestamp = Date.now();
@@ -1548,6 +1593,62 @@
             return escapeHtml(raw).replace(/\n/g, '<br>');
         }
 
+        function extractDebugPrefix(text) {
+            if (typeof text !== 'string') return { text: String(text || ''), isDebug: false };
+            if (text.startsWith(DEBUG_PREFIX)) {
+                let trimmed = text.slice(DEBUG_PREFIX.length);
+                if (trimmed.startsWith(' ')) trimmed = trimmed.slice(1);
+                if (trimmed.startsWith('\n')) trimmed = trimmed.slice(1);
+                return { text: trimmed, isDebug: true };
+            }
+            return { text, isDebug: false };
+        }
+
+        function setDebugCollapsed(div, collapsed) {
+            div.dataset.collapsed = collapsed ? 'true' : 'false';
+            div.classList.toggle('debug-collapsed', collapsed);
+            const toggle = div.querySelector('.debug-toggle');
+            if (toggle) {
+                toggle.textContent = collapsed ? 'Expand' : 'Collapse';
+            }
+            const status = div.querySelector('.debug-status');
+            if (status) {
+                status.textContent = collapsed ? 'Collapsed' : 'Expanded';
+            }
+        }
+
+        function ensureDebugHeader(div) {
+            let header = div.querySelector('.debug-header');
+            if (header) return header;
+
+            header = document.createElement('div');
+            header.className = 'debug-header';
+
+            const title = document.createElement('span');
+            title.className = 'debug-title';
+            title.textContent = 'System Output';
+
+            const status = document.createElement('span');
+            status.className = 'debug-status';
+            status.textContent = 'Collapsed';
+
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'debug-toggle';
+            toggle.textContent = 'Expand';
+            toggle.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const isCollapsed = div.dataset.collapsed === 'true';
+                setDebugCollapsed(div, !isCollapsed);
+            });
+
+            header.appendChild(title);
+            header.appendChild(status);
+            header.appendChild(toggle);
+            div.prepend(header);
+            return header;
+        }
+
         function setShellCollapsed(div, collapsed) {
             div.dataset.collapsed = collapsed ? 'true' : 'false';
             div.classList.toggle('shell-collapsed', collapsed);
@@ -1597,7 +1698,8 @@
         function applyStreamChunk(container, chunk, streamType) {
             let lastBot = container.querySelector('.message.bot:last-child');
             if (!lastBot || lastBot.dataset.complete === 'true') {
-                lastBot = addMessageToContainer(container, '', false, false, streamType, false);
+                const collapsed = streamType === 'shell';
+                lastBot = addMessageToContainer(container, '', false, false, streamType, collapsed);
                 lastBot.dataset.complete = 'false';
             }
 
@@ -1609,7 +1711,6 @@
                 lastBot.dataset.streamType = 'shell';
                 ensureShellHeader(lastBot);
                 updateShellStatus(lastBot, 'Streaming...');
-                setShellCollapsed(lastBot, false);
                 let codeEl = lastBot.querySelector('pre.shell-stream code');
                 if (!codeEl) {
                     lastBot.innerHTML = '';
@@ -1792,8 +1893,10 @@
         function addMessageToContainer(container, text, isUser, markComplete = false, streamType = null, collapsed = false) {
             const div = document.createElement('div');
             const roleClass = isUser ? 'user' : 'bot';
+            const debugInfo = !isUser ? extractDebugPrefix(String(text || '')) : { text, isDebug: false };
             const shellStream = !isUser && streamType === 'shell';
-            div.className = `message ${roleClass}${shellStream ? ' shell-stream' : ''}`;
+            const isDebug = !isUser && debugInfo.isDebug;
+            div.className = `message ${roleClass}${shellStream ? ' shell-stream' : ''}${isDebug ? ' debug-block' : ''}`;
             if (isUser) {
                 div.textContent = text;
             } else if (shellStream) {
@@ -1810,6 +1913,17 @@
                 div.appendChild(pre);
                 updateShellStatus(div, markComplete ? 'Completed' : 'Streaming...');
                 setShellCollapsed(div, collapsed);
+            } else if (isDebug) {
+                div.dataset.raw = debugInfo.text;
+                div.dataset.debug = 'true';
+                div.dataset.collapsed = 'true';
+                div.dataset.complete = markComplete ? 'true' : 'false';
+                ensureDebugHeader(div);
+                const body = document.createElement('div');
+                body.className = 'debug-body';
+                body.innerHTML = renderMarkdown(debugInfo.text);
+                div.appendChild(body);
+                setDebugCollapsed(div, true);
             } else {
                 div.dataset.raw = String(text || '');
                 div.innerHTML = renderMarkdown(text);
