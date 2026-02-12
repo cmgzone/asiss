@@ -578,7 +578,15 @@ ${context ? `\nSystem Context: ${context}` : ''}
             const nativeSkill = SkillRegistry.get(call.name);
 
             if (nativeSkill) {
-              output = JSON.stringify(await nativeSkill.execute({ ...(call.arguments || {}), __sessionId: sessionId }));
+              const args = { ...(call.arguments || {}), __sessionId: sessionId };
+              if (call.name === 'shell') {
+                (args as any).__stream = (chunk: string) => {
+                  if (chunk) {
+                    void this.gateway.sendStreamChunk(sessionId, chunk);
+                  }
+                };
+              }
+              output = JSON.stringify(await nativeSkill.execute(args));
             } else {
               const result = await this.mcpManager.callTool(call.name, call.arguments);
               output = JSON.stringify(result);
@@ -623,14 +631,103 @@ ${context ? `\nSystem Context: ${context}` : ''}
           return value.slice(0, max) + `\n... (truncated ${value.length - max} chars)`;
         };
 
+        const normalizeOutput = (value: any) => {
+          if (value === null || value === undefined) return '';
+          return String(value).replace(/\r\n/g, '\n').trimEnd();
+        };
+
+        const parseJson = (value: string) => {
+          try {
+            return JSON.parse(value);
+          } catch {
+            return null;
+          }
+        };
+
+        const ensureClosedCodeFences = (value: string) => {
+          const matches = value.match(/```/g);
+          if (matches && matches.length % 2 === 1) {
+            return value + '\n```';
+          }
+          return value;
+        };
+
+        const formatShellResult = (result: any) => {
+          const args = result.call?.arguments || {};
+          const command = typeof args.command === 'string' ? args.command : '';
+          const outputObj = result.success ? parseJson(String(result.output)) : null;
+          if (!outputObj) {
+            const raw = normalizeOutput(result.output);
+            return raw || '_No output_';
+          }
+
+          const streamed = Boolean(outputObj?.streamed);
+          const stdout = normalizeOutput(outputObj?.stdout);
+          const stderr = normalizeOutput(outputObj?.stderr);
+          const errorText = normalizeOutput(outputObj?.error || result.error);
+          const exitCode = outputObj?.exitCode;
+          const elevated = outputObj?.elevated;
+
+          const metaParts: string[] = [];
+          if (typeof exitCode !== 'undefined') metaParts.push(`exit: ${exitCode}`);
+          if (elevated) metaParts.push(`elevated: ${elevated}`);
+          const meta = metaParts.length ? `_${metaParts.join(' | ')}_` : '';
+
+          if (streamed) {
+            const commandLabel = command ? `\`${command}\`` : 'command';
+            const summaryLines = [`Shell stream complete for ${commandLabel}.`];
+            if (errorText) summaryLines.push(`Error: ${errorText}`);
+            if (meta) summaryLines.push(meta);
+            return summaryLines.join('\n');
+          }
+
+          const prompt = process.platform === 'win32' ? 'PS>' : '$';
+          const lines = ['```shell'];
+          const cwd = process.cwd();
+          if (cwd) {
+            lines.push(`# cwd: ${cwd}`);
+          }
+          lines.push(`${prompt} ${command || '(command unavailable)'}`);
+          if (stdout) {
+            lines.push(stdout);
+          }
+          if (stderr) {
+            if (stdout) lines.push('');
+            lines.push('# stderr');
+            lines.push(stderr);
+          }
+          if (errorText && errorText !== stderr) {
+            if (stdout || stderr) lines.push('');
+            lines.push('# error');
+            lines.push(errorText);
+          }
+          if (!stdout && !stderr && !errorText) {
+            lines.push('# (no output)');
+          }
+          lines.push('```');
+
+          return [lines.join('\n'), meta].filter(Boolean).join('\n');
+        };
+
+        const formatToolResult = (result: any) => {
+          if (result.call?.name === 'shell') {
+            const rendered = formatShellResult(result);
+            return `${result.success ? '✅' : '❌'} shell\n${rendered}`;
+          }
+          if (result.success) {
+            return `✅ ${result.call.name}\n${String(result.output)}`;
+          }
+          return `❌ ${result.call.name}\n${String(result.error || 'Unknown error')}`;
+        };
+
         const maxPerTool = 1500;
         const maxTotal = 3500;
         let toolOutputText = results.map((r) => {
-          if (r.success) return `✅ ${r.call.name}\n${truncate(String(r.output), maxPerTool)}`;
-          return `❌ ${r.call.name}\n${truncate(String(r.error || 'Unknown error'), maxPerTool)}`;
+          const formatted = formatToolResult(r);
+          return ensureClosedCodeFences(truncate(formatted, maxPerTool));
         }).join('\n\n');
 
-        toolOutputText = truncate(toolOutputText, maxTotal);
+        toolOutputText = ensureClosedCodeFences(truncate(toolOutputText, maxTotal));
         await this.gateway.sendResponse(sessionId, toolOutputText);
 
         // Continue loop to let model interpret results

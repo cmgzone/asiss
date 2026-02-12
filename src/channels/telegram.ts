@@ -1,6 +1,7 @@
 import { ChannelAdapter, Message } from '../core/types';
 import { Telegraf } from 'telegraf';
 import { v4 as uuidv4 } from 'uuid';
+import { stripShellStreamMarker } from '../core/stream-markers';
 
 export class TelegramChannel implements ChannelAdapter {
   name = 'telegram';
@@ -86,7 +87,9 @@ export class TelegramChannel implements ChannelAdapter {
   }
 
   sendStream(userId: string, chunk: string) {
-    void this.enqueueStream(userId, chunk);
+    const cleaned = stripShellStreamMarker(chunk).chunk;
+    if (!cleaned) return;
+    void this.enqueueStream(userId, cleaned);
   }
 
   private async enqueueStream(userId: string, chunk: string) {

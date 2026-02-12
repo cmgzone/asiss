@@ -6,6 +6,7 @@ import { planModeManager } from '../core/plan-mode';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import { scratchpad } from '../core/scratchpad';
+import { stripShellStreamMarker } from '../core/stream-markers';
 
 export class Gateway {
   private channels: Map<string, ChannelAdapter> = new Map();
@@ -199,12 +200,14 @@ export class Gateway {
         return;
       }
       if (channel && chunk) {
+        const cleaned = stripShellStreamMarker(chunk).chunk;
+        if (!cleaned) return;
         let state = this.streamFallbackBySessionId.get(sessionId);
         if (!state) {
           state = { buffer: '', timer: null };
           this.streamFallbackBySessionId.set(sessionId, state);
         }
-        state.buffer += chunk;
+        state.buffer += cleaned;
         if (state.buffer.length > 12000) {
           state.buffer = state.buffer.slice(state.buffer.length - 12000);
         }

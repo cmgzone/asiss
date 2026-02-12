@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
+import { stripShellStreamMarker } from '../core/stream-markers';
 
 // Setup marked with terminal renderer
 marked.setOptions({
@@ -73,6 +74,8 @@ export class ConsoleChannel implements ChannelAdapter {
 
   // Handle streaming chunks
   sendStream(userId: string, chunk: string) {
+    const cleaned = stripShellStreamMarker(chunk).chunk;
+    if (!cleaned) return;
     if (this.spinner.isSpinning) {
       this.spinner.stop();
       process.stdout.write('\n'); // Move to new line after spinner
@@ -82,7 +85,7 @@ export class ConsoleChannel implements ChannelAdapter {
     // but specific terminal renderers might handle it. For now, raw text stream is better than nothing)
     // Ideally we would buffer and render markdown incrementally, but that's complex.
     // Simple approach: just print the chunk.
-    process.stdout.write(chunk);
+    process.stdout.write(cleaned);
   }
 
   onMessage(handler: (msg: Message) => void) {

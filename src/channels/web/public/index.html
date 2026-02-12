@@ -458,6 +458,97 @@
             border-bottom-left-radius: 4px;
         }
 
+        .message.bot pre {
+            background: #0b0f16;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 14px 16px;
+            overflow-x: auto;
+            font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+            font-size: 0.85rem;
+            margin-top: 10px;
+        }
+
+        .message.bot code {
+            font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+            background: rgba(148, 163, 184, 0.12);
+            padding: 0.15em 0.35em;
+            border-radius: 6px;
+        }
+
+        .message.bot pre code {
+            background: transparent;
+            padding: 0;
+        }
+
+        .message.bot pre code.language-shell,
+        .message.bot pre code.language-bash,
+        .message.bot pre code.language-powershell,
+        .message.bot pre code.language-sh {
+            display: block;
+            color: #e2e8f0;
+        }
+
+        .message.bot pre code.language-shell::before,
+        .message.bot pre code.language-bash::before,
+        .message.bot pre code.language-powershell::before,
+        .message.bot pre code.language-sh::before {
+            content: 'Shell';
+            display: block;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .message.bot.shell-stream pre {
+            margin: 0;
+        }
+
+        .message.bot.shell-stream .shell-stream-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 10px 12px;
+            margin-bottom: 8px;
+            border-radius: 10px;
+            background: rgba(148, 163, 184, 0.08);
+            border: 1px solid var(--border-color);
+            font-size: 0.85rem;
+        }
+
+        .message.bot.shell-stream .shell-stream-title {
+            font-weight: 600;
+        }
+
+        .message.bot.shell-stream .shell-stream-status {
+            color: var(--text-muted);
+            margin-left: auto;
+            font-size: 0.75rem;
+        }
+
+        .message.bot.shell-stream .shell-stream-toggle {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            padding: 4px 10px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: all 0.2s ease;
+        }
+
+        .message.bot.shell-stream .shell-stream-toggle:hover {
+            color: var(--text-primary);
+            border-color: var(--accent-primary);
+        }
+
+        .message.bot.shell-stream.shell-collapsed pre {
+            display: none;
+        }
+
         .chat-input-area {
             padding: 20px;
             border-top: 1px solid var(--border-color);
@@ -1333,8 +1424,11 @@
         let socket;
         let currentUser = null;
         let activeStreamIndex = null;
+        let activeStreamType = null;
         let streamFinalizeTimer = null;
         const CHAT_HISTORY_LIMIT = 200;
+        const SHELL_STREAM_MARKER = '__SHELL_STREAM__';
+        const SHELL_STREAM_END_MARKER = '__SHELL_STREAM_END__';
 
         function getChatStorageKey() {
             return `gitu_chat_history_${currentUser || 'guest'}`;
@@ -1365,11 +1459,17 @@
             }
         }
 
-        function persistStreamChunk(chunk) {
+        function persistStreamChunk(chunk, streamType = null) {
             const history = loadChatHistory();
             if (activeStreamIndex === null || !history[activeStreamIndex]) {
-                history.push({ text: '', isUser: false, timestamp: Date.now(), streaming: true });
+                history.push({ text: '', isUser: false, timestamp: Date.now(), streaming: true, streamType: streamType, collapsed: false });
                 activeStreamIndex = history.length - 1;
+            }
+            if (streamType && !history[activeStreamIndex].streamType) {
+                history[activeStreamIndex].streamType = streamType;
+            }
+            if (history[activeStreamIndex].streamType === 'shell') {
+                history[activeStreamIndex].collapsed = false;
             }
             history[activeStreamIndex].text += chunk;
             history[activeStreamIndex].timestamp = Date.now();
@@ -1389,14 +1489,30 @@
             const history = loadChatHistory();
             if (activeStreamIndex !== null && history[activeStreamIndex]) {
                 history[activeStreamIndex].streaming = false;
+                if (history[activeStreamIndex].streamType === 'shell') {
+                    history[activeStreamIndex].collapsed = true;
+                }
                 saveChatHistory(history);
             }
             activeStreamIndex = null;
+            activeStreamType = null;
             streamFinalizeTimer = null;
             const lastBot = chatMessages.querySelector('.message.bot:last-child');
-            if (lastBot) lastBot.dataset.complete = 'true';
+            if (lastBot) {
+                lastBot.dataset.complete = 'true';
+                if (lastBot.dataset.streamType === 'shell') {
+                    updateShellStatus(lastBot, 'Completed');
+                    setShellCollapsed(lastBot, true);
+                }
+            }
             const lastBotFull = chatMessagesFull.querySelector('.message.bot:last-child');
-            if (lastBotFull) lastBotFull.dataset.complete = 'true';
+            if (lastBotFull) {
+                lastBotFull.dataset.complete = 'true';
+                if (lastBotFull.dataset.streamType === 'shell') {
+                    updateShellStatus(lastBotFull, 'Completed');
+                    setShellCollapsed(lastBotFull, true);
+                }
+            }
             hideTypingIndicator();
         }
 
@@ -1406,8 +1522,8 @@
             chatMessages.innerHTML = '';
             chatMessagesFull.innerHTML = '';
             history.forEach(item => {
-                addMessageToContainer(chatMessages, item.text, item.isUser, true);
-                addMessageToContainer(chatMessagesFull, item.text, item.isUser, true);
+                addMessageToContainer(chatMessages, item.text, item.isUser, true, item.streamType || null, Boolean(item.collapsed));
+                addMessageToContainer(chatMessagesFull, item.text, item.isUser, true, item.streamType || null, Boolean(item.collapsed));
             });
         }
 
@@ -1430,6 +1546,87 @@
                 return html;
             }
             return escapeHtml(raw).replace(/\n/g, '<br>');
+        }
+
+        function setShellCollapsed(div, collapsed) {
+            div.dataset.collapsed = collapsed ? 'true' : 'false';
+            div.classList.toggle('shell-collapsed', collapsed);
+            const toggle = div.querySelector('.shell-stream-toggle');
+            if (toggle) {
+                toggle.textContent = collapsed ? 'Expand' : 'Collapse';
+            }
+        }
+
+        function updateShellStatus(div, status) {
+            const statusEl = div.querySelector('.shell-stream-status');
+            if (statusEl) statusEl.textContent = status;
+        }
+
+        function ensureShellHeader(div) {
+            let header = div.querySelector('.shell-stream-header');
+            if (header) return header;
+
+            header = document.createElement('div');
+            header.className = 'shell-stream-header';
+
+            const title = document.createElement('span');
+            title.className = 'shell-stream-title';
+            title.textContent = 'Shell Output';
+
+            const status = document.createElement('span');
+            status.className = 'shell-stream-status';
+            status.textContent = 'Streaming...';
+
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'shell-stream-toggle';
+            toggle.textContent = 'Collapse';
+            toggle.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const isCollapsed = div.dataset.collapsed === 'true';
+                setShellCollapsed(div, !isCollapsed);
+            });
+
+            header.appendChild(title);
+            header.appendChild(status);
+            header.appendChild(toggle);
+            div.prepend(header);
+            return header;
+        }
+
+        function applyStreamChunk(container, chunk, streamType) {
+            let lastBot = container.querySelector('.message.bot:last-child');
+            if (!lastBot || lastBot.dataset.complete === 'true') {
+                lastBot = addMessageToContainer(container, '', false, false, streamType, false);
+                lastBot.dataset.complete = 'false';
+            }
+
+            const currentRaw = (lastBot.dataset.raw || '') + chunk;
+            lastBot.dataset.raw = currentRaw;
+
+            const effectiveType = streamType || lastBot.dataset.streamType || null;
+            if (effectiveType === 'shell') {
+                lastBot.dataset.streamType = 'shell';
+                ensureShellHeader(lastBot);
+                updateShellStatus(lastBot, 'Streaming...');
+                setShellCollapsed(lastBot, false);
+                let codeEl = lastBot.querySelector('pre.shell-stream code');
+                if (!codeEl) {
+                    lastBot.innerHTML = '';
+                    ensureShellHeader(lastBot);
+                    const pre = document.createElement('pre');
+                    pre.className = 'shell-stream';
+                    const code = document.createElement('code');
+                    pre.appendChild(code);
+                    lastBot.appendChild(pre);
+                    codeEl = code;
+                }
+                codeEl.textContent = currentRaw;
+            } else {
+                lastBot.innerHTML = renderMarkdown(currentRaw);
+            }
+
+            container.scrollTop = container.scrollHeight;
         }
 
         function getOrCreateTypingIndicator(container) {
@@ -1541,32 +1738,28 @@
                 addMessage(text, false);
             });
 
-            socket.on('stream_chunk', (chunk) => {
-                hideTypingIndicator();
-                // Update Dashboard Chat
-                let lastBot = chatMessages.querySelector('.message.bot:last-child');
-                if (!lastBot || lastBot.dataset.complete === 'true') {
-                    lastBot = addMessageToContainer(chatMessages, '', false);
-                    lastBot.dataset.complete = 'false';
+        socket.on('stream_chunk', (chunk) => {
+            hideTypingIndicator();
+            if (typeof chunk === 'string' && chunk.startsWith(SHELL_STREAM_END_MARKER)) {
+                finalizeStream();
+                return;
+            }
+            let streamType = null;
+            if (typeof chunk === 'string' && chunk.startsWith(SHELL_STREAM_MARKER)) {
+                streamType = 'shell';
+                chunk = chunk.slice(SHELL_STREAM_MARKER.length);
+                if (chunk.startsWith('\n')) {
+                    chunk = chunk.slice(1);
                 }
-                const currentRaw = (lastBot.dataset.raw || '') + chunk;
-                lastBot.dataset.raw = currentRaw;
-                lastBot.innerHTML = renderMarkdown(currentRaw);
-                chatMessages.scrollTop = chatMessages.scrollHeight;
+                activeStreamType = streamType;
+            }
 
-                // Update Full Chat
-                let lastBotFull = chatMessagesFull.querySelector('.message.bot:last-child');
-                if (!lastBotFull || lastBotFull.dataset.complete === 'true') {
-                    lastBotFull = addMessageToContainer(chatMessagesFull, '', false);
-                    lastBotFull.dataset.complete = 'false';
-                }
-                const currentRawFull = (lastBotFull.dataset.raw || '') + chunk;
-                lastBotFull.dataset.raw = currentRawFull;
-                lastBotFull.innerHTML = renderMarkdown(currentRawFull);
-                chatMessagesFull.scrollTop = chatMessagesFull.scrollHeight;
+            const effectiveType = streamType || activeStreamType;
+            applyStreamChunk(chatMessages, chunk, effectiveType);
+            applyStreamChunk(chatMessagesFull, chunk, effectiveType);
 
-                persistStreamChunk(chunk);
-            });
+            persistStreamChunk(chunk, effectiveType);
+        });
 
             // Handle settings data from server
             socket.on('settings_data', handleSettingsData);
@@ -1596,11 +1789,27 @@
             }
         }
 
-        function addMessageToContainer(container, text, isUser, markComplete = false) {
+        function addMessageToContainer(container, text, isUser, markComplete = false, streamType = null, collapsed = false) {
             const div = document.createElement('div');
-            div.className = `message ${isUser ? 'user' : 'bot'}`;
+            const roleClass = isUser ? 'user' : 'bot';
+            const shellStream = !isUser && streamType === 'shell';
+            div.className = `message ${roleClass}${shellStream ? ' shell-stream' : ''}`;
             if (isUser) {
                 div.textContent = text;
+            } else if (shellStream) {
+                div.dataset.raw = String(text || '');
+                div.dataset.streamType = 'shell';
+                div.dataset.collapsed = collapsed ? 'true' : 'false';
+                div.dataset.complete = markComplete ? 'true' : 'false';
+                ensureShellHeader(div);
+                const pre = document.createElement('pre');
+                pre.className = 'shell-stream';
+                const code = document.createElement('code');
+                code.textContent = div.dataset.raw;
+                pre.appendChild(code);
+                div.appendChild(pre);
+                updateShellStatus(div, markComplete ? 'Completed' : 'Streaming...');
+                setShellCollapsed(div, collapsed);
             } else {
                 div.dataset.raw = String(text || '');
                 div.innerHTML = renderMarkdown(text);
