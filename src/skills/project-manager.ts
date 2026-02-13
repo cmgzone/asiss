@@ -165,6 +165,24 @@ AGENT TEAM ACTIONS:
         this.data = this.load();
     }
 
+    private loadConfig(): any {
+        const configPath = path.join(process.cwd(), 'config.json');
+        if (fs.existsSync(configPath)) {
+            try {
+                return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+            } catch {
+                return {};
+            }
+        }
+        return {};
+    }
+
+    private shouldAutoRunAgents(): boolean {
+        const config = this.loadConfig();
+        const value = config?.agent?.autoRunAgents;
+        return typeof value === 'boolean' ? value : true;
+    }
+
     private normalizeAction(action: unknown, params: any): string {
         const a = typeof action === 'string' ? action.trim() : '';
         if (!a) return '';
@@ -359,7 +377,17 @@ AGENT TEAM ACTIONS:
                     // Also queue the task for the agent
                     agentSwarm.assignTask(params.agentId, `Complete task: ${task.title}\n${task.description || ''}`);
                     this.save();
-                    return { success: true, message: `Task assigned to agent "${agent.name}"` };
+                    const autoRun = this.shouldAutoRunAgents();
+                    let results: any[] | undefined;
+                    if (autoRun) {
+                        results = await agentSwarm.runAgent(params.agentId);
+                    }
+                    return {
+                        success: true,
+                        message: `Task assigned to agent "${agent.name}"`,
+                        autoRun,
+                        results
+                    };
                 }
 
                 // ===== MILESTONES =====
@@ -439,7 +467,18 @@ AGENT TEAM ACTIONS:
                     const agent = agentSwarm.getAgent(params.agentId);
                     if (!agent) return { error: 'Agent not found' };
                     const task = agentSwarm.assignTask(params.agentId, params.taskDescription);
-                    return { success: true, message: `Task assigned to ${agent.name}`, task };
+                    const autoRun = this.shouldAutoRunAgents();
+                    let results: any[] | undefined;
+                    if (autoRun) {
+                        results = await agentSwarm.runAgent(params.agentId);
+                    }
+                    return {
+                        success: true,
+                        message: `Task assigned to ${agent.name}`,
+                        task,
+                        autoRun,
+                        results
+                    };
                 }
 
                 case 'agent_run': {

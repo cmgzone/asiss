@@ -548,13 +548,17 @@ export class AgentRunner {
       typeof config?.agent?.maxTurns === "number"
         ? config.agent.maxTurns
         : (typeof config?.maxTurns === "number" ? config.maxTurns : undefined);
-    const maxTurns = Number.isFinite(configuredMaxTurnsRaw)
-      ? Math.min(50, Math.max(1, Math.floor(configuredMaxTurnsRaw)))
-      : this.defaultMaxTurns;
+    const hasConfiguredMaxTurns = Number.isFinite(configuredMaxTurnsRaw);
+    const unlimitedTurns = hasConfiguredMaxTurns && Number(configuredMaxTurnsRaw) <= 0;
+    const maxTurns = unlimitedTurns
+      ? Number.POSITIVE_INFINITY
+      : (hasConfiguredMaxTurns
+        ? Math.min(50, Math.max(1, Math.floor(Number(configuredMaxTurnsRaw))))
+        : this.defaultMaxTurns);
 
     const autoContinueCfg = agentConfig.autoContinue;
-    const autoContinueEnabled = autoContinueCfg === true
-      || (typeof autoContinueCfg === "object" && autoContinueCfg.enabled !== false);
+    const autoContinueEnabled = !unlimitedTurns && (autoContinueCfg === true
+      || (typeof autoContinueCfg === "object" && autoContinueCfg.enabled !== false));
     const autoContinueMax = typeof autoContinueCfg === "number"
       ? Math.max(0, Math.floor(autoContinueCfg))
       : (typeof autoContinueCfg?.maxBatches === "number"

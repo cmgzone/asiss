@@ -27,12 +27,13 @@
     "reportOnCompletion": true
   },
   "agent": {
-    "maxTurns": 15,
+    "maxTurns": 0,
     "autoContinue": {
       "enabled": true,
       "maxBatches": 3,
       "notify": true
     },
+    "autoRunAgents": true,
     "autoCompact": {
       "enabled": true,
       "minMessages": 80,
