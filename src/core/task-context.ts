@@ -29,7 +29,8 @@ export class TaskContext {
         if (fs.existsSync(this.filePath)) {
             try {
                 const raw = fs.readFileSync(this.filePath, 'utf-8');
-                this.data = JSON.parse(raw);
+                const parsed = JSON.parse(raw);
+                this.data = this.normalizeData(parsed);
                 if (this.data.currentTask) {
                     console.log(`[TaskContext] Loaded active task: "${this.data.currentTask.goal}"`);
                 }
@@ -38,6 +39,26 @@ export class TaskContext {
                 this.data = { currentTask: null, recentTasks: [] };
             }
         }
+    }
+
+    private normalizeEntry(entry: any): TaskContextEntry {
+        const context = Array.isArray(entry?.context) ? entry.context.map((v: any) => String(v)) : [];
+        return {
+            goal: typeof entry?.goal === 'string' ? entry.goal : '',
+            status: entry?.status === 'paused' || entry?.status === 'completed' ? entry.status : 'in-progress',
+            context,
+            lastActivity: Number.isFinite(entry?.lastActivity) ? entry.lastActivity : Date.now(),
+            sessionId: typeof entry?.sessionId === 'string' ? entry.sessionId : 'unknown',
+            startedAt: Number.isFinite(entry?.startedAt) ? entry.startedAt : Date.now()
+        };
+    }
+
+    private normalizeData(data: any): TaskContextData {
+        const currentTask = data?.currentTask ? this.normalizeEntry(data.currentTask) : null;
+        const recentTasks = Array.isArray(data?.recentTasks)
+            ? data.recentTasks.map((entry: any) => this.normalizeEntry(entry))
+            : [];
+        return { currentTask, recentTasks };
     }
 
     private save() {
@@ -147,9 +168,10 @@ export class TaskContext {
         prompt += `You were working on: **${task.goal}**\n`;
         prompt += `Status: ${task.status} (last activity: ${minutesAgo} minutes ago)\n`;
 
-        if (task.context.length > 0) {
+        const contextItems = Array.isArray(task.context) ? task.context : [];
+        if (contextItems.length > 0) {
             prompt += `\nContext points:\n`;
-            task.context.forEach((ctx, i) => {
+            contextItems.forEach((ctx, i) => {
                 prompt += `${i + 1}. ${ctx}\n`;
             });
         }
