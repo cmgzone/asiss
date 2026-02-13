@@ -9,40 +9,25 @@
     <script src="/socket.io/socket.io.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js"></script>
-    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
     <style>
         :root {
-            --bg-primary: #09090b;
-            --bg-secondary: #0f1116;
-            /* Richer dark */
-            --bg-card: rgba(22, 24, 33, 0.7);
-            --bg-card-hover: rgba(30, 32, 45, 0.8);
-
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: #1a1a24;
+            --bg-card-hover: #22222e;
             --accent-primary: #6366f1;
             --accent-secondary: #8b5cf6;
-            --accent-gradient: linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #d946ef 100%);
-            --accent-glow: 0 0 20px rgba(99, 102, 241, 0.3);
-
-            --text-primary: #f8fafc;
+            --accent-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%);
+            --text-primary: #f1f5f9;
             --text-secondary: #94a3b8;
             --text-muted: #64748b;
-
             --border-color: rgba(255, 255, 255, 0.08);
-            --border-hover: rgba(255, 255, 255, 0.15);
-
-            --success: #10b981;
+            --success: #22c55e;
             --warning: #f59e0b;
             --danger: #ef4444;
             --info: #3b82f6;
-
             --glass: rgba(255, 255, 255, 0.03);
-            --glass-border: rgba(255, 255, 255, 0.05);
-            --backdrop-blur: blur(12px);
-
-            --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-            --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
-            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4);
-            --shadow-glow: 0 0 15px rgba(99, 102, 241, 0.15);
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
         }
 
         * {
@@ -152,13 +137,12 @@
 
         .nav-section-title {
             font-size: 0.7rem;
-            font-weight: 700;
+            font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.12em;
+            letter-spacing: 0.1em;
             color: var(--text-muted);
-            margin-bottom: 12px;
-            padding: 0 16px;
-            opacity: 0.8;
+            margin-bottom: 8px;
+            padding: 0 12px;
         }
 
         .nav-item {
@@ -166,45 +150,36 @@
             align-items: center;
             gap: 12px;
             padding: 12px 16px;
-            border-radius: 12px;
+            border-radius: 10px;
             color: var(--text-secondary);
             cursor: pointer;
-            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            transition: all 0.2s;
             margin-bottom: 4px;
-            border: 1px solid transparent;
-            font-weight: 500;
         }
 
         .nav-item:hover {
             background: var(--glass);
             color: var(--text-primary);
-            border-color: var(--glass-border);
         }
 
         .nav-item.active {
             background: var(--accent-gradient);
             color: white;
-            box-shadow: var(--accent-glow);
-            border-color: transparent;
         }
 
         .nav-item-icon {
-            font-size: 1.25rem;
+            font-size: 1.2rem;
             width: 24px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            text-align: center;
         }
 
         .nav-item-badge {
             margin-left: auto;
-            background: rgba(239, 68, 68, 0.2);
-            color: #fca5a5;
-            border: 1px solid rgba(239, 68, 68, 0.3);
+            background: var(--danger);
+            color: white;
             font-size: 0.7rem;
             padding: 2px 8px;
-            border-radius: 8px;
-            font-weight: 600;
+            border-radius: 10px;
         }
 
         /* Main Content */
@@ -266,12 +241,11 @@
             display: flex;
             align-items: center;
             gap: 8px;
-            padding: 6px 12px;
-            background: rgba(16, 185, 129, 0.1);
-            border: 1px solid rgba(16, 185, 129, 0.2);
+            padding: 8px 16px;
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.3);
             border-radius: 20px;
-            font-size: 0.8rem;
-            font-weight: 500;
+            font-size: 0.85rem;
             color: var(--success);
         }
 
@@ -344,35 +318,16 @@
 
         .stat-card {
             background: var(--bg-card);
-            backdrop-filter: var(--backdrop-blur);
             border: 1px solid var(--border-color);
-            border-radius: 20px;
+            border-radius: 16px;
             padding: 24px;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .stat-card::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(135deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%);
-            opacity: 0;
-            transition: opacity 0.3s;
+            transition: all 0.3s;
         }
 
         .stat-card:hover {
+            background: var(--bg-card-hover);
             transform: translateY(-4px);
-            border-color: var(--border-hover);
-            box-shadow: var(--shadow-lg), var(--shadow-glow);
-        }
-
-        .stat-card:hover::before {
-            opacity: 1;
+            box-shadow: var(--shadow);
         }
 
         .stat-card-header {
@@ -443,16 +398,9 @@
 
         .card {
             background: var(--bg-card);
-            backdrop-filter: var(--backdrop-blur);
             border: 1px solid var(--border-color);
-            border-radius: 24px;
+            border-radius: 16px;
             overflow: hidden;
-            box-shadow: var(--shadow-md);
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
-        }
-
-        .card:hover {
-            border-color: var(--border-hover);
         }
 
         .card-header {
@@ -461,20 +409,11 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            background: rgba(255, 255, 255, 0.02);
         }
 
         .card-title {
             font-size: 1.1rem;
             font-weight: 600;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .card-title i {
-            color: var(--accent-secondary);
-            font-size: 1.25rem;
         }
 
         .card-body {
@@ -485,27 +424,24 @@
         .chat-section {
             display: flex;
             flex-direction: column;
-            height: 600px;
+            height: 500px;
         }
 
         .chat-messages {
             flex: 1;
             overflow-y: auto;
-            padding: 24px;
+            padding: 20px;
             display: flex;
             flex-direction: column;
-            gap: 20px;
-            background: linear-gradient(to bottom, rgba(0, 0, 0, 0.2), transparent);
+            gap: 16px;
         }
 
         .message {
             max-width: 80%;
-            padding: 16px 20px;
-            border-radius: 20px;
-            line-height: 1.6;
+            padding: 14px 18px;
+            border-radius: 16px;
+            line-height: 1.5;
             font-size: 0.95rem;
-            position: relative;
-            box-shadow: var(--shadow-sm);
         }
 
         .message.user {
@@ -513,41 +449,13 @@
             background: var(--accent-gradient);
             color: white;
             border-bottom-right-radius: 4px;
-            box-shadow: var(--accent-glow);
         }
 
         .message.bot {
             align-self: flex-start;
-            background: rgba(30, 41, 59, 0.6);
-            backdrop-filter: blur(8px);
+            background: var(--bg-secondary);
             border: 1px solid var(--border-color);
             border-bottom-left-radius: 4px;
-        }
-
-        .chat-input-area {
-            padding: 24px;
-            border-top: 1px solid var(--border-color);
-            display: flex;
-            gap: 16px;
-            background: rgba(0, 0, 0, 0.2);
-        }
-
-        .chat-input {
-            flex: 1;
-            background: rgba(9, 9, 11, 0.6);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 16px 20px;
-            color: var(--text-primary);
-            font-size: 1rem;
-            outline: none;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-
-        .chat-input:focus {
-            border-color: var(--accent-primary);
-            background: rgba(9, 9, 11, 0.9);
-            box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
         }
 
         .message.bot pre {
@@ -682,6 +590,30 @@
 
         .message.bot.debug-block.debug-collapsed .debug-body {
             display: none;
+        }
+
+        .chat-input-area {
+            padding: 20px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 12px;
+        }
+
+        .chat-input {
+            flex: 1;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 14px 18px;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .chat-input:focus {
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
         }
 
         .chat-input::placeholder {
@@ -1058,14 +990,10 @@
         }
 
         @keyframes typingPulse {
-
-            0%,
-            80%,
-            100% {
+            0%, 80%, 100% {
                 opacity: 0.3;
                 transform: translateY(0);
             }
-
             40% {
                 opacity: 1;
                 transform: translateY(-2px);
@@ -1164,7 +1092,7 @@
     <!-- Login Overlay -->
     <div id="login-overlay">
         <div class="login-card">
-            <div class="login-logo"><i class="ri-robot-2-fill"></i> Gitu</div>
+            <div class="login-logo">🤖 Gitu</div>
             <div class="login-subtitle">Your AI Business Assistant</div>
             <input type="text" id="login-username" class="login-input" placeholder="Username">
             <input type="password" id="login-password" class="login-input" placeholder="Password">
@@ -1177,8 +1105,8 @@
     <div id="settings-modal">
         <div class="settings-card">
             <div class="settings-header">
-                <h3 class="settings-title"><i class="ri-settings-4-line"></i> Settings</h3>
-                <button class="settings-close" id="settings-close"><i class="ri-close-line"></i></button>
+                <h3 class="settings-title">⚙️ Settings</h3>
+                <button class="settings-close" id="settings-close">&times;</button>
             </div>
             <div class="settings-body">
                 <div class="settings-section">
@@ -1201,17 +1129,12 @@
                     <div class="settings-row">
                         <label class="settings-label">Enabled Channels</label>
                         <div class="settings-checkbox-group">
-                            <label class="settings-checkbox"><input type="checkbox" id="channel-console"> Console
-                                (CLI)</label>
-                            <label class="settings-checkbox"><input type="checkbox" id="channel-web"> Web Interface
-                                (Chat)</label>
-                            <label class="settings-checkbox"><input type="checkbox" id="channel-telegram">
-                                Telegram</label>
-                            <label class="settings-checkbox"><input type="checkbox" id="channel-discord">
-                                Discord</label>
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-console"> Console (CLI)</label>
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-web"> Web Interface (Chat)</label>
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-telegram"> Telegram</label>
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-discord"> Discord</label>
                             <label class="settings-checkbox"><input type="checkbox" id="channel-slack"> Slack</label>
-                            <label class="settings-checkbox"><input type="checkbox" id="channel-whatsapp">
-                                WhatsApp</label>
+                            <label class="settings-checkbox"><input type="checkbox" id="channel-whatsapp"> WhatsApp</label>
                         </div>
                         <div class="settings-hint">Channel changes require a restart.</div>
                     </div>
@@ -1274,8 +1197,8 @@
     <div id="add-model-modal">
         <div class="settings-card">
             <div class="settings-header">
-                <h3 class="settings-title"><i class="ri-add-circle-line"></i> Add Custom Model</h3>
-                <button class="settings-close" id="add-model-close"><i class="ri-close-line"></i></button>
+                <h3 class="settings-title">➕ Add Custom Model</h3>
+                <button class="settings-close" id="add-model-close">&times;</button>
             </div>
             <div class="settings-body">
                 <div class="settings-section">
@@ -1322,7 +1245,7 @@
         <aside class="sidebar">
             <div class="sidebar-header">
                 <div class="logo">
-                    <div class="logo-icon"><i class="ri-robot-2-fill"></i></div>
+                    <div class="logo-icon">🤖</div>
                     <span>Gitu</span>
                 </div>
             </div>
@@ -1330,38 +1253,38 @@
                 <div class="nav-section">
                     <div class="nav-section-title">Main</div>
                     <div class="nav-item active" data-view="dashboard">
-                        <span class="nav-item-icon"><i class="ri-dashboard-3-line"></i></span>
+                        <span class="nav-item-icon">📊</span>
                         <span>Dashboard</span>
                     </div>
                     <div class="nav-item" data-view="chat">
-                        <span class="nav-item-icon"><i class="ri-chat-3-line"></i></span>
+                        <span class="nav-item-icon">💬</span>
                         <span>Chat</span>
                     </div>
                 </div>
                 <div class="nav-section">
                     <div class="nav-section-title">Business</div>
                     <div class="nav-item" data-view="projects">
-                        <span class="nav-item-icon"><i class="ri-folder-5-line"></i></span>
+                        <span class="nav-item-icon">📋</span>
                         <span>Projects</span>
                         <span class="nav-item-badge" id="project-count">0</span>
                     </div>
                     <div class="nav-item" data-view="agents">
-                        <span class="nav-item-icon"><i class="ri-team-line"></i></span>
+                        <span class="nav-item-icon">🤖</span>
                         <span>Agent Team</span>
                     </div>
                     <div class="nav-item" data-view="finances">
-                        <span class="nav-item-icon"><i class="ri-money-dollar-circle-line"></i></span>
+                        <span class="nav-item-icon">💰</span>
                         <span>Finances</span>
                     </div>
                     <div class="nav-item" data-view="contacts">
-                        <span class="nav-item-icon"><i class="ri-contacts-book-line"></i></span>
+                        <span class="nav-item-icon">👥</span>
                         <span>Contacts</span>
                     </div>
                 </div>
                 <div class="nav-section">
                     <div class="nav-section-title">System</div>
                     <div class="nav-item" id="nav-settings">
-                        <span class="nav-item-icon"><i class="ri-settings-4-line"></i></span>
+                        <span class="nav-item-icon">⚙️</span>
                         <span>Settings</span>
                     </div>
                 </div>
@@ -1394,7 +1317,7 @@
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-card-header">
-                            <div class="stat-icon purple"><i class="ri-folder-5-fill"></i></div>
+                            <div class="stat-icon purple">📋</div>
                             <span class="stat-change positive">+2</span>
                         </div>
                         <div class="stat-value" id="stat-projects">0</div>
@@ -1402,14 +1325,14 @@
                     </div>
                     <div class="stat-card">
                         <div class="stat-card-header">
-                            <div class="stat-icon blue"><i class="ri-robot-2-fill"></i></div>
+                            <div class="stat-icon blue">🤖</div>
                         </div>
                         <div class="stat-value" id="stat-agents">0</div>
                         <div class="stat-label">AI Agents</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-card-header">
-                            <div class="stat-icon green"><i class="ri-money-dollar-circle-fill"></i></div>
+                            <div class="stat-icon green">💰</div>
                             <span class="stat-change positive">+12%</span>
                         </div>
                         <div class="stat-value" id="stat-income">$0</div>
@@ -1417,7 +1340,7 @@
                     </div>
                     <div class="stat-card">
                         <div class="stat-card-header">
-                            <div class="stat-icon orange"><i class="ri-checkbox-circle-fill"></i></div>
+                            <div class="stat-icon orange">✅</div>
                         </div>
                         <div class="stat-value" id="stat-tasks">0</div>
                         <div class="stat-label">Tasks Done</div>
@@ -1429,8 +1352,8 @@
                     <!-- Chat Card -->
                     <div class="card chat-section">
                         <div class="card-header">
-                            <h3 class="card-title"><i class="ri-question-answer-line"></i> Chat with Gitu</h3>
-                            <button class="btn btn-ghost" id="voice-toggle"><i class="ri-mic-line"></i> Voice</button>
+                            <h3 class="card-title">💬 Chat with Gitu</h3>
+                            <button class="btn btn-ghost" id="voice-toggle">🎤 Voice</button>
                         </div>
                         <div class="chat-messages" id="chat-messages">
                             <div class="message bot">Hello! I'm Gitu, your AI business assistant. How can I help you
@@ -1452,19 +1375,19 @@
                             <div class="card-body">
                                 <div class="quick-actions">
                                     <div class="quick-action" data-action="project">
-                                        <div class="quick-action-icon"><i class="ri-file-list-3-line"></i></div>
+                                        <div class="quick-action-icon">📋</div>
                                         <div class="quick-action-label">New Project</div>
                                     </div>
                                     <div class="quick-action" data-action="agent">
-                                        <div class="quick-action-icon"><i class="ri-robot-line"></i></div>
+                                        <div class="quick-action-icon">🤖</div>
                                         <div class="quick-action-label">Create Agent</div>
                                     </div>
                                     <div class="quick-action" data-action="invoice">
-                                        <div class="quick-action-icon"><i class="ri-file-text-line"></i></div>
+                                        <div class="quick-action-icon">📄</div>
                                         <div class="quick-action-label">New Invoice</div>
                                     </div>
                                     <div class="quick-action" data-action="income">
-                                        <div class="quick-action-icon"><i class="ri-hand-coin-line"></i></div>
+                                        <div class="quick-action-icon">💵</div>
                                         <div class="quick-action-label">Log Income</div>
                                     </div>
                                 </div>
@@ -1491,7 +1414,7 @@
             <div class="dashboard" id="view-chat" style="display: none;">
                 <div class="card chat-section" style="height: calc(100vh - 150px);">
                     <div class="card-header">
-                        <h3 class="card-title"><i class="ri-question-answer-line"></i> Chat with Gitu</h3>
+                        <h3 class="card-title">💬 Chat with Gitu</h3>
                     </div>
                     <div class="chat-messages" id="chat-messages-full"></div>
                     <div class="chat-input-area">
@@ -1505,7 +1428,7 @@
             <div class="dashboard" id="view-projects" style="display: none;">
                 <div class="card">
                     <div class="card-header">
-                        <h3 class="card-title"><i class="ri-folder-open-line"></i> Active Projects</h3>
+                        <h3 class="card-title">📂 Active Projects</h3>
                         <button class="btn btn-primary"
                             onclick="document.getElementById('chat-input').value='Create a new project named '; document.getElementById('chat-input').focus();">
                             + New Project
@@ -1523,7 +1446,7 @@
             <div class="dashboard" id="view-agents" style="display: none;">
                 <div class="card">
                     <div class="card-header">
-                        <h3 class="card-title"><i class="ri-team-line"></i> Agent Team</h3>
+                        <h3 class="card-title">🤖 Agent Team</h3>
                         <button class="btn btn-primary"
                             onclick="document.getElementById('chat-input').value='Create a new agent named '; document.getElementById('chat-input').focus();">
                             + New Agent
@@ -1880,7 +1803,7 @@
                     initSocket(data.token);
                     loginOverlay.style.display = 'none';
                     app.style.display = 'flex';
-                    document.getElementById('user-display').innerHTML = `<i class="ri-user-3-line"></i> ${username}`;
+                    document.getElementById('user-display').textContent = `👤 ${username}`;
                     loadDashboardData();
                 } else {
                     loginError.textContent = data.error || 'Login failed';
@@ -1900,7 +1823,7 @@
             initSocket(savedToken);
             loginOverlay.style.display = 'none';
             app.style.display = 'flex';
-            document.getElementById('user-display').innerHTML = `<i class="ri-user-3-line"></i> ${savedUsername}`;
+            document.getElementById('user-display').textContent = `👤 ${savedUsername}`;
             loadDashboardData();
         }
 
@@ -1916,28 +1839,28 @@
                 addMessage(text, false);
             });
 
-            socket.on('stream_chunk', (chunk) => {
-                hideTypingIndicator();
-                if (typeof chunk === 'string' && chunk.startsWith(SHELL_STREAM_END_MARKER)) {
-                    finalizeStream();
-                    return;
+        socket.on('stream_chunk', (chunk) => {
+            hideTypingIndicator();
+            if (typeof chunk === 'string' && chunk.startsWith(SHELL_STREAM_END_MARKER)) {
+                finalizeStream();
+                return;
+            }
+            let streamType = null;
+            if (typeof chunk === 'string' && chunk.startsWith(SHELL_STREAM_MARKER)) {
+                streamType = 'shell';
+                chunk = chunk.slice(SHELL_STREAM_MARKER.length);
+                if (chunk.startsWith('\n')) {
+                    chunk = chunk.slice(1);
                 }
-                let streamType = null;
-                if (typeof chunk === 'string' && chunk.startsWith(SHELL_STREAM_MARKER)) {
-                    streamType = 'shell';
-                    chunk = chunk.slice(SHELL_STREAM_MARKER.length);
-                    if (chunk.startsWith('\n')) {
-                        chunk = chunk.slice(1);
-                    }
-                    activeStreamType = streamType;
-                }
+                activeStreamType = streamType;
+            }
 
-                const effectiveType = streamType || activeStreamType;
-                applyStreamChunk(chatMessages, chunk, effectiveType);
-                applyStreamChunk(chatMessagesFull, chunk, effectiveType);
+            const effectiveType = streamType || activeStreamType;
+            applyStreamChunk(chatMessages, chunk, effectiveType);
+            applyStreamChunk(chatMessagesFull, chunk, effectiveType);
 
-                persistStreamChunk(chunk, effectiveType);
-            });
+            persistStreamChunk(chunk, effectiveType);
+        });
 
             // Handle settings data from server
             socket.on('settings_data', handleSettingsData);
@@ -2257,7 +2180,7 @@
 
                 const addOption = document.createElement('option');
                 addOption.value = '__add_new__';
-                addOption.textContent = '+ Add Custom Model...';
+                addOption.textContent = '➕ Add Custom Model...';
                 select.appendChild(addOption);
 
             } catch (e) {
@@ -2340,7 +2263,7 @@
                 ? '<p style="color: var(--text-muted); text-align: center;">No agents yet. Create one!</p>'
                 : agents.map(agent => `
                     <div class="agent-item">
-                        <div class="agent-avatar"><i class="ri-robot-2-line"></i></div>
+                        <div class="agent-avatar">🤖</div>
                         <div class="agent-info">
                             <div class="agent-name">${agent.name}</div>
                             <div class="agent-role">${agent.role}</div>

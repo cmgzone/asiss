@@ -35,6 +35,10 @@ export class SerperSkill implements Skill {
 
     async execute(args: any): Promise<any> {
         if (!this.apiKey) {
+            this.apiKey = process.env.SERPER_API_KEY || '';
+        }
+
+        if (!this.apiKey) {
             return { error: 'Configuration Error: SERPER_API_KEY is missing. Please add it to your .env file.' };
         }
 
