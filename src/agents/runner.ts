@@ -36,6 +36,7 @@ import { MemorySkill } from '../skills/memory';
 import { PlanModeSkill } from '../skills/plan-mode';
 import { planModeManager } from '../core/plan-mode';
 import { DeepResearchSkill } from '../skills/deep-research';
+import { SendTelegramSkill } from '../skills/send-telegram';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -108,6 +109,7 @@ export class AgentRunner {
     SkillRegistry.register(new MemorySkill(this.memory));
     SkillRegistry.register(new PlanModeSkill());
     SkillRegistry.register(new DeepResearchSkill());
+    SkillRegistry.register(new SendTelegramSkill());
 
     // Load custom models
     for (const config of modelManager.listModels()) {
@@ -296,8 +298,8 @@ export class AgentRunner {
     const lastTimestamp = candidates[candidates.length - 1].timestamp;
 
     const truncate = (value: string, max: number) => {
-            if (value.length <= max) return value;
-            return value.slice(0, max) + `\n... (truncated ${value.length - max} chars)`;
+      if (value.length <= max) return value;
+      return value.slice(0, max) + `\n... (truncated ${value.length - max} chars)`;
     };
 
     let body = '';
@@ -575,7 +577,7 @@ export class AgentRunner {
     let stoppedByStepLimit = true;
     let autoContinueCount = 0;
     let continuationBatch = 0;
-    for (;;) {
+    for (; ;) {
       stoppedByStepLimit = true;
       for (let i = 0; i < maxTurns; i++) {
         // Smart Context Construction
@@ -740,13 +742,13 @@ ${context ? `\nSystem Context: ${context}` : ''}
             if (result.success) {
               this.memory.add(sessionId, {
                 role: "system",
-                content: `Tool '${result.call.name}' Output: ${result.output}` ,
+                content: `Tool '${result.call.name}' Output: ${result.output}`,
                 timestamp: Date.now()
               });
             } else {
               this.memory.add(sessionId, {
                 role: "system",
-                content: `Tool '${result.call.name}' Error: ${result.error}` ,
+                content: `Tool '${result.call.name}' Error: ${result.error}`,
                 timestamp: Date.now()
               });
             }
