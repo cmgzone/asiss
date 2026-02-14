@@ -628,7 +628,7 @@ export class AgentRunner {
         }).join('\n');
 
         // Dynamic Identity Injection
-        const agentName = config.name || "Gitubot";
+        const agentName = config.name || "Gitu";
         let systemPrompt = this.baseSystemPrompt.replace("{{AGENT_NAME}}", agentName);
         systemPrompt += this.buildWorkspacePrompt(msg.channel);
 
