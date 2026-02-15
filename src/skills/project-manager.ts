@@ -183,6 +183,16 @@ AGENT TEAM ACTIONS:
         return typeof value === 'boolean' ? value : true;
     }
 
+    private decorateAgentResults(agentId: string, results: any[]): any[] {
+        const agent = agentSwarm.getAgent(agentId);
+        const agentName = agent?.name;
+        return results.map(r => ({
+            ...r,
+            agentId,
+            agentName
+        }));
+    }
+
     private normalizeAction(action: unknown, params: any): string {
         const a = typeof action === 'string' ? action.trim() : '';
         if (!a) return '';
@@ -380,7 +390,8 @@ AGENT TEAM ACTIONS:
                     const autoRun = this.shouldAutoRunAgents();
                     let results: any[] | undefined;
                     if (autoRun) {
-                        results = await agentSwarm.runAgent(params.agentId);
+                        const raw = await agentSwarm.runAgent(params.agentId);
+                        results = this.decorateAgentResults(params.agentId, raw);
                     }
                     return {
                         success: true,
@@ -470,7 +481,8 @@ AGENT TEAM ACTIONS:
                     const autoRun = this.shouldAutoRunAgents();
                     let results: any[] | undefined;
                     if (autoRun) {
-                        results = await agentSwarm.runAgent(params.agentId);
+                        const raw = await agentSwarm.runAgent(params.agentId);
+                        results = this.decorateAgentResults(params.agentId, raw);
                     }
                     return {
                         success: true,
@@ -482,7 +494,8 @@ AGENT TEAM ACTIONS:
                 }
 
                 case 'agent_run': {
-                    const results = await agentSwarm.runAgent(params.agentId);
+                    const raw = await agentSwarm.runAgent(params.agentId);
+                    const results = this.decorateAgentResults(params.agentId, raw);
                     return {
                         success: true,
                         message: `Agent completed ${results.length} tasks`,
@@ -493,13 +506,18 @@ AGENT TEAM ACTIONS:
                 case 'agent_run_all': {
                     const resultsMap = await agentSwarm.runAllAgents();
                     const summary: { agentId: string; taskCount: number }[] = [];
+                    const resultsByAgent: { agentId: string; agentName?: string; results: any[] }[] = [];
                     resultsMap.forEach((results, agentId) => {
-                        summary.push({ agentId, taskCount: results.length });
+                        const agent = agentSwarm.getAgent(agentId);
+                        const decorated = this.decorateAgentResults(agentId, results);
+                        summary.push({ agentId, taskCount: decorated.length });
+                        resultsByAgent.push({ agentId, agentName: agent?.name, results: decorated });
                     });
                     return {
                         success: true,
                         message: `Parallel execution complete`,
-                        summary
+                        summary,
+                        resultsByAgent
                     };
                 }
 

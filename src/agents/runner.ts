@@ -775,6 +775,62 @@ ${context ? `\nSystem Context: ${context}` : ''}
             return value;
           };
 
+          const formatAgentResults = (agentLabel: string, results: any[]) => {
+            if (!Array.isArray(results) || results.length === 0) return "";
+            const label = agentLabel ? ` (${agentLabel})` : "";
+            const blocks = results.map((r: any) => {
+              const status = r?.success === false ? "failed" : "success";
+              const taskId = r?.taskId ? `Task ${r.taskId}` : "Task";
+              const output = normalizeOutput(r?.output);
+              if (output) {
+                return `${taskId} (${status}):\n${output}`;
+              }
+              return `${taskId} (${status}): _No output_`;
+            });
+            return [`🧠 Agent results${label}:`, ...blocks].join("\n\n");
+          };
+
+          const buildAgentResultMessages = (toolResults: any[]) => {
+            const messages: string[] = [];
+            for (const result of toolResults) {
+              if (!result?.success) continue;
+              if (result.call?.name !== "project_manager") continue;
+              const payload = parseJson(String(result.output));
+              if (!payload) continue;
+
+              const resultsByAgent = Array.isArray(payload.resultsByAgent) ? payload.resultsByAgent : null;
+              if (resultsByAgent && resultsByAgent.length > 0) {
+                const sections = resultsByAgent.map((entry: any) => {
+                  const results = Array.isArray(entry?.results) ? entry.results : [];
+                  if (results.length === 0) return "";
+                  const labelParts: string[] = [];
+                  if (entry?.agentName) labelParts.push(String(entry.agentName));
+                  if (entry?.agentId) labelParts.push(String(entry.agentId));
+                  const agentLabel = labelParts.join(" • ");
+                  return formatAgentResults(agentLabel, results);
+                }).filter(Boolean);
+                if (sections.length > 0) {
+                  messages.push(sections.join("\n\n"));
+                }
+                continue;
+              }
+
+              const results = Array.isArray(payload.results) ? payload.results : [];
+              if (results.length === 0) continue;
+
+              const agentId = String(result.call?.arguments?.agentId || payload.agentId || "").trim();
+              let agentLabel = "";
+              if (agentId) {
+                const agent = agentSwarm.getAgent(agentId);
+                agentLabel = agent?.name ? `${agent.name} • ${agentId}` : agentId;
+              }
+
+              const message = formatAgentResults(agentLabel, results);
+              if (message) messages.push(message);
+            }
+            return messages;
+          };
+
           const formatShellResult = (result: any) => {
             const args = result.call?.arguments || {};
             const command = typeof args.command === "string" ? args.command : "";
@@ -843,6 +899,8 @@ ${context ? `\nSystem Context: ${context}` : ''}
             return `❌ ${result.call.name}\n${String(result.error || "Unknown error")}`;
           };
 
+          const agentResultMessages = buildAgentResultMessages(results);
+
           let toolOutputText = results.map((r) => {
             const formatted = formatToolResult(r);
             return ensureClosedCodeFences(formatted);
@@ -850,6 +908,11 @@ ${context ? `\nSystem Context: ${context}` : ''}
 
           toolOutputText = ensureClosedCodeFences(toolOutputText);
           await this.gateway.sendResponse(sessionId, `${DEBUG_PREFIX}\n${toolOutputText}`);
+          for (const message of agentResultMessages) {
+            if (message && message.trim()) {
+              await this.gateway.sendResponse(sessionId, message);
+            }
+          }
 
           // Continue loop to let model interpret results
         } else {
