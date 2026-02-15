@@ -37,8 +37,33 @@ export class WebChannel implements ChannelAdapter {
     this.startTime = Date.now();
     this.auth = new AuthManager();
 
-    // Serve static frontend files
-    this.app.use(express.static(path.join(__dirname, 'public')));
+    // Serve static frontend files (robust path resolution for ts-node/dist/docker)
+    const resolvePublicDir = () => {
+      const candidates = [
+        path.join(__dirname, 'public'),
+        path.join(process.cwd(), 'src', 'channels', 'web', 'public'),
+        path.join(process.cwd(), 'dist', 'channels', 'web', 'public'),
+        path.join(process.cwd(), 'channels', 'web', 'public')
+      ];
+      for (const candidate of candidates) {
+        try {
+          if (fs.existsSync(candidate)) return candidate;
+        } catch {
+          // ignore
+        }
+      }
+      return '';
+    };
+
+    const publicDir = resolvePublicDir();
+    if (publicDir) {
+      this.app.use(express.static(publicDir));
+      this.app.get('/', (_req, res) => {
+        res.sendFile(path.join(publicDir, 'index.html'));
+      });
+    } else {
+      console.warn('[WebChannel] Public UI directory not found; / will return 404.');
+    }
     this.app.use('/artifacts', express.static(path.join(process.cwd(), 'artifacts')));
     this.app.use(express.json());
 
