@@ -1546,7 +1546,7 @@
         let activeStreamIndex = null;
         let activeStreamType = null;
         let streamFinalizeTimer = null;
-        const CHAT_HISTORY_LIMIT = 200;
+        const CHAT_HISTORY_LIMIT = 0; // 0 = unlimited
         const SHELL_STREAM_MARKER = '__SHELL_STREAM__';
         const SHELL_STREAM_END_MARKER = '__SHELL_STREAM_END__';
         const DEBUG_PREFIX = '__DEBUG__';
@@ -1567,8 +1567,15 @@
         }
 
         function saveChatHistory(history) {
-            const trimmed = history.slice(-CHAT_HISTORY_LIMIT);
-            localStorage.setItem(getChatStorageKey(), JSON.stringify(trimmed));
+            const trimmed = CHAT_HISTORY_LIMIT > 0 ? history.slice(-CHAT_HISTORY_LIMIT) : history;
+            try {
+                localStorage.setItem(getChatStorageKey(), JSON.stringify(trimmed));
+            } catch (err) {
+                if (CHAT_HISTORY_LIMIT === 0) {
+                    const fallback = history.slice(-500);
+                    localStorage.setItem(getChatStorageKey(), JSON.stringify(fallback));
+                }
+            }
         }
 
         function persistMessage(text, isUser) {
