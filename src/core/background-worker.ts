@@ -36,11 +36,13 @@ export interface BackgroundGoal {
 
 export interface BackgroundWorkerConfig {
     enabled: boolean;
+    alwaysOn: boolean;           // Run even when user is active
     maxConcurrentGoals: number;
     idleThresholdMs: number;      // How long user must be idle before starting work
     checkIntervalMs: number;      // How often to check for work
     respectDND: boolean;          // Pause non-urgent work during quiet hours
     reportOnCompletion: boolean;  // Send message when goal completes
+    reportIntervalMs: number;     // Periodic status updates (0 disables)
 }
 
 type GoalExecutor = (goal: BackgroundGoal, progressCallback: (percent: number, note: string) => void) => Promise<string>;
@@ -55,17 +57,21 @@ export class BackgroundWorker {
     private executor: GoalExecutor | null = null;
     private lastUserActivityAt: Map<string, number> = new Map();
     private onComplete: ((goal: BackgroundGoal) => Promise<void>) | null = null;
+    private onReport: ((sessionId: string, message: string) => Promise<void>) | null = null;
+    private lastReportAt: Map<string, number> = new Map();
 
     constructor() {
         this.goalsPath = path.join(process.cwd(), 'background_goals.json');
         this.configPath = path.join(process.cwd(), 'config.json');
         this.config = {
             enabled: false,
+            alwaysOn: false,
             maxConcurrentGoals: 1,
             idleThresholdMs: 5 * 60 * 1000,  // 5 minutes
             checkIntervalMs: 60 * 1000,       // 1 minute
             respectDND: true,
-            reportOnCompletion: true
+            reportOnCompletion: true,
+            reportIntervalMs: 0
         };
         this.load();
     }
@@ -113,6 +119,13 @@ export class BackgroundWorker {
      */
     public setOnComplete(callback: (goal: BackgroundGoal) => Promise<void>) {
         this.onComplete = callback;
+    }
+
+    /**
+     * Set periodic report callback
+     */
+    public setOnReport(callback: (sessionId: string, message: string) => Promise<void>) {
+        this.onReport = callback;
     }
 
     /**
@@ -242,6 +255,8 @@ export class BackgroundWorker {
      * Main tick - check if we should work on goals
      */
     private async tick() {
+        await this.maybeReport();
+
         // Check DND
         if (this.config.respectDND && dndManager.isQuietHours()) {
             // Only process urgent goals during quiet hours
@@ -265,7 +280,7 @@ export class BackgroundWorker {
             if (this.activeGoals.has(goal.id)) continue;
 
             // Check if user is idle for this session
-            if (!this.isUserIdle(goal.sessionId)) {
+            if (!this.config.alwaysOn && !this.isUserIdle(goal.sessionId)) {
                 continue;
             }
 
@@ -326,6 +341,69 @@ export class BackgroundWorker {
         } finally {
             this.activeGoals.delete(goal.id);
             this.save();
+        }
+    }
+
+    private buildSessionReport(sessionId: string): string {
+        const pending = this.getPendingGoals(sessionId);
+        const active = this.getActiveGoals().filter(g => g.sessionId === sessionId);
+        if (pending.length === 0 && active.length === 0) return '';
+
+        const lines: string[] = [];
+        lines.push('Background status update:');
+        lines.push(`Active: ${active.length}, Pending: ${pending.length}`);
+
+        if (active.length > 0) {
+            lines.push('');
+            lines.push('Active goals:');
+            active.slice(0, 3).forEach((g, i) => {
+                lines.push(`${i + 1}. ${g.title} (${g.progress}%)`);
+            });
+            if (active.length > 3) {
+                lines.push(`...and ${active.length - 3} more active`);
+            }
+        }
+
+        if (pending.length > 0) {
+            lines.push('');
+            lines.push('Pending goals:');
+            pending.slice(0, 3).forEach((g, i) => {
+                lines.push(`${i + 1}. ${g.title} [${g.priority}]`);
+            });
+            if (pending.length > 3) {
+                lines.push(`...and ${pending.length - 3} more pending`);
+            }
+        }
+
+        return lines.join('\n');
+    }
+
+    private async maybeReport() {
+        if (!this.onReport) return;
+        if (!this.config.reportIntervalMs || this.config.reportIntervalMs <= 0) return;
+
+        const now = Date.now();
+        const sessions = new Set<string>();
+        for (const goal of Object.values(this.goals)) {
+            if (goal.status === 'pending' || goal.status === 'in-progress') {
+                sessions.add(goal.sessionId);
+            }
+        }
+
+        for (const sessionId of sessions) {
+            const lastReport = this.lastReportAt.get(sessionId) || 0;
+            if (now - lastReport < this.config.reportIntervalMs) continue;
+
+            const message = this.buildSessionReport(sessionId);
+            if (!message) continue;
+
+            if (this.config.respectDND && dndManager.isQuietHours()) {
+                dndManager.queueNotification(sessionId, message, 'normal');
+            } else {
+                await this.onReport(sessionId, message);
+            }
+
+            this.lastReportAt.set(sessionId, now);
         }
     }
 

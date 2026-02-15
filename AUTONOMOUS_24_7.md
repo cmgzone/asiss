@@ -37,6 +37,8 @@ Queue tasks for Gitu to work on while you're away:
 - Goals run automatically when you've been idle for 5 minutes
 - Progress is tracked and saved
 - You get notified when tasks complete
+- Optional: set `backgroundWorker.alwaysOn: true` to run even while you are active
+- Optional: set `backgroundWorker.reportIntervalMs` to send periodic status updates
 
 ### 2. Do Not Disturb (Quiet Hours)
 Gitu respects your sleep:
@@ -99,9 +101,11 @@ All settings in `config.json`:
 | `dnd.quietHoursEnd` | number | 8 | Quiet hours end (0-23) |
 | `dnd.allowUrgent` | boolean | true | Allow urgent through DND |
 | `backgroundWorker.enabled` | boolean | false | Enable background goals |
+| `backgroundWorker.alwaysOn` | boolean | false | Run goals even when user is active |
 | `backgroundWorker.maxConcurrentGoals` | number | 1 | Max parallel goals |
 | `backgroundWorker.idleThresholdMs` | number | 300000 | Idle time before starting work |
 | `backgroundWorker.respectDND` | boolean | true | Pause during quiet hours |
+| `backgroundWorker.reportIntervalMs` | number | 0 | Periodic status updates (ms); 0 disables |
 
 ## PM2 Management
 

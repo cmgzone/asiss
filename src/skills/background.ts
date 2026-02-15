@@ -10,7 +10,7 @@ import { dndManager } from '../core/dnd';
 
 export class BackgroundGoalsSkill {
     name = 'background_goals';
-    description = 'Manage background tasks that run autonomously when you are idle. Use this to queue up work for the assistant to do while you are away.';
+    description = 'Manage background tasks that run autonomously when you are idle (or always-on if configured). Use this to queue up work for the assistant to do while you are away.';
     inputSchema = {
         type: 'object',
         properties: {

@@ -20,11 +20,13 @@
   },
   "backgroundWorker": {
     "enabled": true,
+    "alwaysOn": true,
     "maxConcurrentGoals": 1,
     "idleThresholdMs": 300000,
     "checkIntervalMs": 60000,
     "respectDND": true,
-    "reportOnCompletion": true
+    "reportOnCompletion": true,
+    "reportIntervalMs": 900000
   },
   "agent": {
     "maxTurns": 0,

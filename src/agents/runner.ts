@@ -483,6 +483,9 @@ export class AgentRunner {
     backgroundWorker.setOnComplete(async (goal) => {
       await this.gateway.sendResponse(goal.sessionId, `✅ **Background task completed:** ${goal.title}\n\n${goal.result || 'Done'}`);
     });
+    backgroundWorker.setOnReport(async (sessionId, message) => {
+      await this.gateway.sendResponse(sessionId, message);
+    });
     backgroundWorker.start();
   }
 
