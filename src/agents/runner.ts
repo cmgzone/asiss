@@ -190,6 +190,32 @@ export class AgentRunner {
     }
   }
 
+  private buildTimePrompt() {
+    const now = new Date();
+    const iso = now.toISOString();
+    const local = now.toLocaleString();
+    const dateLabel = new Intl.DateTimeFormat('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    }).format(now);
+    const offsetMinutes = now.getTimezoneOffset();
+    const abs = Math.abs(offsetMinutes);
+    const offsetHours = String(Math.floor(abs / 60)).padStart(2, '0');
+    const offsetMins = String(abs % 60).padStart(2, '0');
+    const sign = offsetMinutes <= 0 ? '+' : '-';
+    const utcOffset = `UTC${sign}${offsetHours}:${offsetMins}`;
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local';
+    return [
+      'Current date/time (authoritative):',
+      `- Today: ${dateLabel}`,
+      `- Local: ${local}`,
+      `- ISO: ${iso}`,
+      `- Timezone: ${timeZone} (${utcOffset})`
+    ].join('\n');
+  }
+
   private formatDateKey(d: Date) {
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -631,6 +657,7 @@ export class AgentRunner {
         const agentName = config.name || "Gitu";
         let systemPrompt = this.baseSystemPrompt.replace("{{AGENT_NAME}}", agentName);
         systemPrompt += this.buildWorkspacePrompt(msg.channel);
+        systemPrompt += `\n\n${this.buildTimePrompt()}`;
 
         // User Context Injection
         const lastUserMsg = [...allMemories].reverse().find(m => m.role === "user");
@@ -1434,6 +1461,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
 
     let systemPrompt = this.baseSystemPrompt;
     systemPrompt += this.buildWorkspacePrompt(msg.channel);
+    systemPrompt += `\n\n${this.buildTimePrompt()}`;
     const username = msg.metadata?.username || 'User';
     systemPrompt += `\n\nYou are speaking with ${username}.`;
 
