@@ -35,6 +35,24 @@
       "recentMessages": 12
     }
   },
+  "learning": {
+    "enabled": true,
+    "mode": "strong",
+    "selfReview": {
+      "enabled": true,
+      "maxPerHour": 10
+    },
+    "external": {
+      "enabled": true,
+      "intervalMs": 1800000,
+      "maxTopics": 2,
+      "maxSources": 4,
+      "maxCharsPerSource": 4000,
+      "recentMessages": 12
+    },
+    "report": true,
+    "summaryMaxEntries": 200
+  },
   "agent": {
     "maxTurns": 0,
     "autoContinue": {

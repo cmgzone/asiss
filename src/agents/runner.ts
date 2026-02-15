@@ -3,6 +3,7 @@ import { ModelProvider, ModelRegistry } from '../core/models';
 import { SkillRegistry } from '../core/skills';
 import { Memory, MemoryManager } from '../core/memory';
 import { McpManager } from '../core/mcp';
+import { LearningManager } from '../core/learning-manager';
 import { MockProvider } from './mock-provider';
 import { OpenRouterProvider } from './openrouter-provider';
 import { NvidiaProvider } from './nvidia-provider';
@@ -58,6 +59,7 @@ export class AgentRunner {
   private gateway: IGateway;
   private baseSystemPrompt: string;
   private memory: MemoryManager;
+  private learning: LearningManager;
   private mcpManager: McpManager;
   private scheduler: SchedulerManager;
   private defaultMaxTurns: number = 15;
@@ -74,6 +76,11 @@ export class AgentRunner {
   constructor(gateway: IGateway) {
     this.gateway = gateway;
     this.memory = new MemoryManager();
+    this.learning = new LearningManager(
+      () => this.getModel(),
+      this.memory,
+      async (sessionId, message) => this.gateway.sendResponse(sessionId, message)
+    );
     this.mcpManager = new McpManager();
     this.scheduler = new SchedulerManager(async (job) => {
       const scheduledMsg: Message = {
@@ -236,6 +243,8 @@ export class AgentRunner {
     if (this.isMainSessionChannel(channel)) {
       const memory = this.readTextFileIfExists(path.join(root, 'MEMORY.md')).trim();
       if (memory) parts.push(`MEMORY.md:\n${memory}`);
+      const learning = this.readTextFileIfExists(path.join(root, 'LEARNING.md')).trim();
+      if (learning) parts.push(`LEARNING.md:\n${learning}`);
 
       const now = new Date();
       const todayKey = this.formatDateKey(now);
@@ -470,6 +479,11 @@ export class AgentRunner {
         console.log('[Heartbeat] ⏰ It is the top of the hour!');
       }
       await this.proactiveTick();
+      try {
+        await this.learning.tick();
+      } catch (e) {
+        console.error('[Learning] Tick failed:', e);
+      }
     }, this.heartbeatMs);
 
     // Start background worker with goal executor
@@ -574,6 +588,7 @@ export class AgentRunner {
 
     // Track user activity for background worker idle detection
     backgroundWorker.recordActivity(sessionId);
+    this.learning.recordActivity(sessionId);
 
     // Flush any queued DND notifications when user becomes active
     const pendingNotifications = dndManager.flushQueue(sessionId);
@@ -1050,6 +1065,9 @@ ${context ? `\nSystem Context: ${context}` : ''}
               sessionId,
               'Automation paused without a final message. Send "continue" to keep going, or describe the next step you want.'
             );
+          }
+          if (text) {
+            void this.learning.recordInteraction(sessionId, msg.content, text);
           }
           stoppedByStepLimit = false;
           break;
