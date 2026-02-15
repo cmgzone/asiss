@@ -754,11 +754,6 @@ ${context ? `\nSystem Context: ${context}` : ''}
             }
           }
 
-          const truncate = (value: string, max: number) => {
-            if (value.length <= max) return value;
-            return value.slice(0, max) + `\n... (truncated ${value.length - max} chars)`;
-          };
-
           const normalizeOutput = (value: any) => {
             if (value === null || value === undefined) return "";
             return String(value).replace(/\r\n/g, "\n").trimEnd();
@@ -848,14 +843,12 @@ ${context ? `\nSystem Context: ${context}` : ''}
             return `❌ ${result.call.name}\n${String(result.error || "Unknown error")}`;
           };
 
-          const maxPerTool = 1500;
-          const maxTotal = 3500;
           let toolOutputText = results.map((r) => {
             const formatted = formatToolResult(r);
-            return ensureClosedCodeFences(truncate(formatted, maxPerTool));
+            return ensureClosedCodeFences(formatted);
           }).join("\n\n");
 
-          toolOutputText = ensureClosedCodeFences(truncate(toolOutputText, maxTotal));
+          toolOutputText = ensureClosedCodeFences(toolOutputText);
           await this.gateway.sendResponse(sessionId, `${DEBUG_PREFIX}\n${toolOutputText}`);
 
           // Continue loop to let model interpret results
