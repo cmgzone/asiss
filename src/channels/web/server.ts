@@ -434,7 +434,8 @@ export class WebChannel implements ChannelAdapter {
             const fsArgs = config.mcpServers.filesystem.args;
             // Ensure we replace the last arg which is the path
             if (config.filesystemMode === 'full') {
-              fsArgs[fsArgs.length - 1] = 'c:/';
+              const platformRoot = path.parse(process.cwd()).root || '/';
+              fsArgs[fsArgs.length - 1] = platformRoot;
             } else {
               fsArgs[fsArgs.length - 1] = './';
             }

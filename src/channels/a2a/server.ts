@@ -189,7 +189,7 @@ export class A2AChannel implements ChannelAdapter {
     });
 
     // REST-style endpoints (compatibility with non-JSON-RPC clients)
-    this.app.post('/v1/message:send', async (req, res) => {
+    this.app.post('/v1/message\\:send', async (req, res) => {
       if (!this.isAuthorized(req)) {
         res.status(401).json({ error: 'Auth required' });
         return;
@@ -202,7 +202,7 @@ export class A2AChannel implements ChannelAdapter {
       }
     });
 
-    this.app.post('/v1/message:stream', async (_req, res) => {
+    this.app.post('/v1/message\\:stream', async (_req, res) => {
       res.status(501).json({ error: 'Streaming is not supported' });
     });
 
@@ -227,7 +227,7 @@ export class A2AChannel implements ChannelAdapter {
       }
     });
 
-    this.app.post('/v1/tasks/:id:cancel', (req, res) => {
+    this.app.post('/v1/tasks/:id\\:cancel', (req, res) => {
       if (!this.isAuthorized(req)) {
         res.status(401).json({ error: 'Auth required' });
         return;

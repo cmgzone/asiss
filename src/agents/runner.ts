@@ -185,6 +185,20 @@ export class AgentRunner {
       if (typeof config.proactive.everyMs === 'number') this.proactiveEveryMs = config.proactive.everyMs;
     }
 
+    if (config.mcpServers && config.mcpServers.filesystem && Array.isArray(config.mcpServers.filesystem.args)) {
+      const fsArgs = config.mcpServers.filesystem.args;
+      const lastArg = fsArgs[fsArgs.length - 1];
+      const looksLikeWindowsDrive = typeof lastArg === 'string' && /^[a-zA-Z]:[\\/]/.test(lastArg);
+      if (looksLikeWindowsDrive && process.platform !== 'win32') {
+        const platformRoot = path.parse(process.cwd()).root || '/';
+        if (config.filesystemMode === 'full') {
+          fsArgs[fsArgs.length - 1] = platformRoot;
+        } else if (config.filesystemMode === 'project') {
+          fsArgs[fsArgs.length - 1] = './';
+        }
+      }
+    }
+
     // Connect MCP Servers
     if (config.mcpServers) {
       for (const [name, serverConfig] of Object.entries(config.mcpServers)) {

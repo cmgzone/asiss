@@ -4,6 +4,7 @@ import { elevatedManager } from '../core/elevated';
 import { thinkingManager } from '../core/thinking';
 import { planModeManager } from '../core/plan-mode';
 import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
 import fs from 'fs';
 import { scratchpad } from '../core/scratchpad';
 import { stripShellStreamMarker } from '../core/stream-markers';
@@ -78,7 +79,8 @@ export class Gateway {
           if (config.mcpServers && config.mcpServers.filesystem) {
             const fsArgs = config.mcpServers.filesystem.args;
             if (mode === 'full') {
-              fsArgs[fsArgs.length - 1] = 'c:/';
+              const platformRoot = path.parse(process.cwd()).root || '/';
+              fsArgs[fsArgs.length - 1] = platformRoot;
             } else {
               fsArgs[fsArgs.length - 1] = './';
             }
