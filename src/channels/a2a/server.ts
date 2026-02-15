@@ -233,7 +233,9 @@ export class A2AChannel implements ChannelAdapter {
         return;
       }
       try {
-        const task = this.handleTaskCancel({ id: req.params.id });
+        const raw = (req.params as any).id ?? (req.params as any)['id:cancel'];
+        const id = String(raw || '').replace(/:cancel$/i, '');
+        const task = this.handleTaskCancel({ id });
         res.json({ task });
       } catch (err: any) {
         res.status(404).json({ error: err.message || 'Task not found' });
