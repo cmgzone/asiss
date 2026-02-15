@@ -61,6 +61,43 @@
     "requireSignature": true,
     "autoEnableOnInstall": false
   },
+  "filesystemMode": "full",
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "c:/"
+      ]
+    }
+  },
+  "tools": {
+    "elevated": {
+      "enabled": true,
+      "default": "full",
+      "allowFrom": {
+        "console": [
+          "*"
+        ],
+        "web": [
+          "*"
+        ],
+        "telegram": [
+          "*"
+        ],
+        "whatsapp": [
+          "*"
+        ],
+        "discord": [
+          "*"
+        ],
+        "slack": [
+          "*"
+        ]
+      }
+    }
+  },
   "trustedActions": {
     "enabled": true,
     "allow": [
