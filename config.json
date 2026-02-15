@@ -52,7 +52,27 @@
       "recentMessages": 12
     },
     "report": true,
-    "summaryMaxEntries": 200
+    "summaryMaxEntries": 200,
+    "autoGoals": {
+      "enabled": true,
+      "includeSelfReview": true,
+      "includeExternal": true,
+      "maxPerEntry": 2,
+      "priority": "normal"
+    },
+    "autoUpdate": {
+      "enabled": true,
+      "target": "USER.md",
+      "maxPerEntry": 2,
+      "maxPerDay": 5
+    },
+    "dailySummary": {
+      "enabled": true,
+      "hourLocal": 20,
+      "minuteLocal": 0,
+      "includeRecommendations": true,
+      "includeGoals": true
+    }
   },
   "marketplace": {
     "enabled": true,

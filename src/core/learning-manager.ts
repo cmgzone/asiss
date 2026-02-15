@@ -4,6 +4,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { MemoryManager } from './memory';
 import { ModelProvider } from './models';
 import { WebFetchSkill, WebSearchSkill } from '../skills/web';
+import { backgroundWorker, GoalPriority } from './background-worker';
+import { dndManager } from './dnd';
 
 type LearningEntryType = 'self_review' | 'external';
 
@@ -14,6 +16,7 @@ export interface LearningEntry {
   title: string;
   summary: string;
   improvements?: string;
+  recommendations?: string;
   sources?: Array<{ title: string; url: string }>;
   createdAt: number;
 }
@@ -35,11 +38,35 @@ interface LearningConfig {
   };
   report: boolean;
   summaryMaxEntries: number;
+  autoGoals: {
+    enabled: boolean;
+    includeSelfReview: boolean;
+    includeExternal: boolean;
+    maxPerEntry: number;
+    priority: GoalPriority;
+  };
+  autoUpdate: {
+    enabled: boolean;
+    target: 'USER.md' | 'AGENTS.md';
+    maxPerEntry: number;
+    maxPerDay: number;
+  };
+  dailySummary: {
+    enabled: boolean;
+    hourLocal: number;
+    minuteLocal: number;
+    includeRecommendations: boolean;
+    includeGoals: boolean;
+  };
 }
 
 interface LearningState {
   lastExternalAt: Record<string, number>;
   lastReviewAt: Record<string, number>;
+  lastSummaryAt: Record<string, string>;
+  autoGoalsForEntry: Record<string, boolean>;
+  autoUpdatesForEntry: Record<string, boolean>;
+  autoUpdatesPerDay: Record<string, number>;
 }
 
 interface ReviewTask {
@@ -63,7 +90,14 @@ export class LearningManager {
   private summaryPath = path.join(process.cwd(), 'LEARNING.md');
 
   private config: LearningConfig;
-  private state: LearningState = { lastExternalAt: {}, lastReviewAt: {} };
+  private state: LearningState = {
+    lastExternalAt: {},
+    lastReviewAt: {},
+    lastSummaryAt: {},
+    autoGoalsForEntry: {},
+    autoUpdatesForEntry: {},
+    autoUpdatesPerDay: {}
+  };
   private entries: LearningEntry[] = [];
   private pendingReviews: ReviewTask[] = [];
   private runningReview = false;
@@ -115,6 +149,7 @@ export class LearningManager {
     if (!this.config.enabled) return;
     await this.processNextReview();
     await this.processExternalLearning();
+    await this.maybeSendDailySummary();
   }
 
   private getDefaultConfig(): LearningConfig {
@@ -134,7 +169,27 @@ export class LearningManager {
         recentMessages: 12
       },
       report: false,
-      summaryMaxEntries: 200
+      summaryMaxEntries: 200,
+      autoGoals: {
+        enabled: false,
+        includeSelfReview: true,
+        includeExternal: true,
+        maxPerEntry: 2,
+        priority: 'normal'
+      },
+      autoUpdate: {
+        enabled: false,
+        target: 'USER.md',
+        maxPerEntry: 2,
+        maxPerDay: 5
+      },
+      dailySummary: {
+        enabled: false,
+        hourLocal: 20,
+        minuteLocal: 0,
+        includeRecommendations: true,
+        includeGoals: true
+      }
     };
   }
 
@@ -149,7 +204,10 @@ export class LearningManager {
             ...config,
             ...raw.learning,
             selfReview: { ...config.selfReview, ...(raw.learning.selfReview || {}) },
-            external: { ...config.external, ...(raw.learning.external || {}) }
+            external: { ...config.external, ...(raw.learning.external || {}) },
+            autoGoals: { ...config.autoGoals, ...(raw.learning.autoGoals || {}) },
+            autoUpdate: { ...config.autoUpdate, ...(raw.learning.autoUpdate || {}) },
+            dailySummary: { ...config.dailySummary, ...(raw.learning.dailySummary || {}) }
           };
         }
       } catch {
@@ -169,10 +227,21 @@ export class LearningManager {
       const parsed = JSON.parse(fs.readFileSync(this.statePath, 'utf-8'));
       this.state = {
         lastExternalAt: parsed?.lastExternalAt || {},
-        lastReviewAt: parsed?.lastReviewAt || {}
+        lastReviewAt: parsed?.lastReviewAt || {},
+        lastSummaryAt: parsed?.lastSummaryAt || {},
+        autoGoalsForEntry: parsed?.autoGoalsForEntry || {},
+        autoUpdatesForEntry: parsed?.autoUpdatesForEntry || {},
+        autoUpdatesPerDay: parsed?.autoUpdatesPerDay || {}
       };
     } catch {
-      this.state = { lastExternalAt: {}, lastReviewAt: {} };
+      this.state = {
+        lastExternalAt: {},
+        lastReviewAt: {},
+        lastSummaryAt: {},
+        autoGoalsForEntry: {},
+        autoUpdatesForEntry: {},
+        autoUpdatesPerDay: {}
+      };
     }
   }
 
@@ -211,6 +280,8 @@ export class LearningManager {
     }
     this.saveEntries();
     this.writeSummary();
+    this.handleAutoGoals(entry);
+    this.handleAutoUpdate(entry);
   }
 
   private writeSummary() {
@@ -231,6 +302,11 @@ export class LearningManager {
         lines.push('');
         lines.push('Improvements:');
         lines.push(entry.improvements.trim());
+      }
+      if (entry.recommendations) {
+        lines.push('');
+        lines.push('Recommendations:');
+        lines.push(entry.recommendations.trim());
       }
       if (entry.sources && entry.sources.length > 0) {
         lines.push('');
@@ -314,7 +390,7 @@ export class LearningManager {
 
       if (this.config.report && this.report) {
         const note = improvements[0] ? `Learning update saved: ${improvements[0]}` : 'Learning update saved.';
-        await this.report(task.sessionId, note);
+        await this.sendReport(task.sessionId, note, 'normal');
       }
     } finally {
       this.runningReview = false;
@@ -344,7 +420,7 @@ export class LearningManager {
         if (entry) {
           this.appendEntry(entry);
           if (this.config.report && this.report) {
-            await this.report(sessionId, `Learning update saved: ${entry.title}`);
+            await this.sendReport(sessionId, `Learning update saved: ${entry.title}`, 'normal');
           }
         }
       }
@@ -441,7 +517,8 @@ export class LearningManager {
 
     const prompt = [
       `Create a short learning note for: ${topic.query}`,
-      'Return JSON: {"title":"","summary":["- ..."],"improvements":["- ..."]}',
+      'Return JSON: {"title":"","summary":["- ..."],"improvements":["- ..."],"recommendations":["- ..."]}',
+      'Recommendations should be actionable next steps.',
       'Keep it concise and actionable.',
       '',
       'Sources:',
@@ -456,9 +533,11 @@ export class LearningManager {
     const title = typeof payload.title === 'string' && payload.title.trim() ? payload.title.trim() : topic.query;
     const summaryLines = Array.isArray(payload.summary) ? payload.summary.filter(Boolean) : [];
     const improvementsLines = Array.isArray(payload.improvements) ? payload.improvements.filter(Boolean) : [];
+    const recommendationsLines = Array.isArray(payload.recommendations) ? payload.recommendations.filter(Boolean) : [];
 
     const summary = summaryLines.length ? summaryLines.join('\n') : '';
     const improvements = improvementsLines.length ? improvementsLines.join('\n') : '';
+    const recommendations = recommendationsLines.length ? recommendationsLines.join('\n') : '';
 
     return {
       id: uuidv4(),
@@ -467,9 +546,195 @@ export class LearningManager {
       title: this.redactSecrets(title),
       summary: this.redactSecrets(summary),
       improvements: this.redactSecrets(improvements),
+      recommendations: this.redactSecrets(recommendations),
       sources: sources.map(s => ({ title: s.title, url: s.url })),
       createdAt: Date.now()
     };
+  }
+
+  private extractActionLines(entry: LearningEntry): string[] {
+    const raw = entry.recommendations || entry.improvements || '';
+    if (!raw) return [];
+    return raw
+      .split('\n')
+      .map(line => line.replace(/^[-*•\s]+/, '').trim())
+      .filter(Boolean);
+  }
+
+  private handleAutoGoals(entry: LearningEntry) {
+    if (!this.config.autoGoals?.enabled) return;
+    if (this.state.autoGoalsForEntry[entry.id]) return;
+    if (entry.type === 'self_review' && !this.config.autoGoals.includeSelfReview) return;
+    if (entry.type === 'external' && !this.config.autoGoals.includeExternal) return;
+
+    const lines = this.extractActionLines(entry);
+    if (lines.length === 0) {
+      this.state.autoGoalsForEntry[entry.id] = true;
+      this.saveState();
+      return;
+    }
+
+    const maxPerEntry = Math.max(1, Math.floor(this.config.autoGoals.maxPerEntry || 1));
+    const goals = lines.slice(0, maxPerEntry);
+    goals.forEach((line) => {
+      const title = line.length > 80 ? `${line.slice(0, 77)}...` : line;
+      const descriptionParts = [
+        `From learning: ${entry.title}`,
+        entry.summary ? `Summary:\n${entry.summary}` : '',
+        `Action:\n${line}`
+      ].filter(Boolean);
+      backgroundWorker.addGoal({
+        title,
+        description: descriptionParts.join('\n\n'),
+        sessionId: entry.sessionId,
+        priority: this.config.autoGoals.priority || 'normal',
+        tags: ['learning', entry.type]
+      });
+    });
+
+    this.state.autoGoalsForEntry[entry.id] = true;
+    this.saveState();
+  }
+
+  private handleAutoUpdate(entry: LearningEntry) {
+    if (!this.config.autoUpdate?.enabled) return;
+    if (this.state.autoUpdatesForEntry[entry.id]) return;
+
+    const todayKey = this.getLocalDateKey();
+    const countToday = this.state.autoUpdatesPerDay[todayKey] || 0;
+    if (countToday >= this.config.autoUpdate.maxPerDay) return;
+
+    const lines = this.extractActionLines(entry);
+    if (lines.length === 0) {
+      this.state.autoUpdatesForEntry[entry.id] = true;
+      this.saveState();
+      return;
+    }
+
+    const maxPerEntry = Math.max(1, Math.floor(this.config.autoUpdate.maxPerEntry || 1));
+    const selected = lines.slice(0, maxPerEntry);
+    const target = this.config.autoUpdate.target === 'AGENTS.md' ? 'AGENTS.md' : 'USER.md';
+    const sectionTitle = target === 'AGENTS.md' ? 'Auto-Learned Behavior' : 'Auto-Learned Preferences';
+    const inserted = this.upsertSectionLines(target, sectionTitle, selected);
+
+    if (inserted > 0) {
+      this.state.autoUpdatesPerDay[todayKey] = countToday + inserted;
+    }
+    this.state.autoUpdatesForEntry[entry.id] = true;
+    this.saveState();
+  }
+
+  private upsertSectionLines(fileName: string, sectionTitle: string, lines: string[]): number {
+    const filePath = path.join(process.cwd(), fileName);
+    if (!fs.existsSync(filePath)) return 0;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const normalizedLines = lines.map(l => l.trim()).filter(Boolean);
+    if (normalizedLines.length === 0) return 0;
+
+    const sectionHeader = `## ${sectionTitle}`;
+    const hasSection = raw.includes(sectionHeader);
+    const lineSet = new Set<string>();
+    let output = raw;
+
+    if (hasSection) {
+      const parts = raw.split(sectionHeader);
+      const before = parts[0];
+      const after = parts.slice(1).join(sectionHeader);
+      const nextHeaderIndex = after.indexOf('\n## ');
+      const sectionBody = nextHeaderIndex >= 0 ? after.slice(0, nextHeaderIndex) : after;
+      sectionBody.split('\n').forEach((line) => {
+        const cleaned = line.replace(/^[-*•\s]+/, '').trim().toLowerCase();
+        if (cleaned) lineSet.add(cleaned);
+      });
+
+      const toInsert = normalizedLines.filter(l => !lineSet.has(l.toLowerCase()));
+      if (toInsert.length === 0) return 0;
+
+      const insertBlock = toInsert.map(l => `- ${l}`).join('\n');
+      const newSectionBody = sectionBody.trimEnd() + '\n' + insertBlock + '\n';
+      const rebuilt = before + sectionHeader + newSectionBody + (nextHeaderIndex >= 0 ? after.slice(nextHeaderIndex) : '');
+      output = rebuilt;
+    } else {
+      const insertBlock = normalizedLines.map(l => `- ${l}`).join('\n');
+      output = raw.trimEnd() + `\n\n${sectionHeader}\n${insertBlock}\n`;
+    }
+
+    fs.writeFileSync(filePath, output);
+    return normalizedLines.length;
+  }
+
+  private async maybeSendDailySummary() {
+    if (!this.config.dailySummary?.enabled || !this.report) return;
+    const sessionId = this.getMostRecentSessionId();
+    if (!sessionId) return;
+
+    const now = new Date();
+    const hour = now.getHours();
+    const minute = now.getMinutes();
+    const targetHour = Math.min(23, Math.max(0, this.config.dailySummary.hourLocal));
+    const targetMinute = Math.min(59, Math.max(0, this.config.dailySummary.minuteLocal));
+    if (hour < targetHour || (hour === targetHour && minute < targetMinute)) return;
+
+    const todayKey = this.getLocalDateKey();
+    if (this.state.lastSummaryAt[sessionId] === todayKey) return;
+
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const entriesToday = this.entries.filter(e => e.createdAt >= startOfDay.getTime());
+    if (entriesToday.length === 0) return;
+
+    const lines: string[] = [];
+    lines.push(`Daily learning summary (${todayKey}):`);
+    entriesToday.slice(-5).forEach((entry, idx) => {
+      const summaryLine = entry.summary ? entry.summary.split('\n')[0]?.trim() : '';
+      lines.push(`${idx + 1}. ${entry.title}${summaryLine ? ` — ${summaryLine.replace(/^[-*•\s]+/, '')}` : ''}`);
+    });
+
+    if (this.config.dailySummary.includeRecommendations) {
+      const recLines: string[] = [];
+      entriesToday.forEach((entry) => {
+        const actions = this.extractActionLines(entry);
+        actions.slice(0, 2).forEach((action) => {
+          recLines.push(action);
+        });
+      });
+      if (recLines.length > 0) {
+        lines.push('');
+        lines.push('Recommended actions:');
+        recLines.slice(0, 6).forEach((action) => lines.push(`- ${action}`));
+      }
+    }
+
+    if (this.config.dailySummary.includeGoals) {
+      const pending = backgroundWorker.getPendingGoals(sessionId).filter(g => g.tags?.includes('learning'));
+      const active = backgroundWorker.getActiveGoals().filter(g => g.sessionId === sessionId && g.tags?.includes('learning'));
+      const total = pending.length + active.length;
+      if (total > 0) {
+        lines.push('');
+        lines.push(`Learning goals queued: ${total} (active ${active.length}, pending ${pending.length})`);
+      }
+    }
+
+    await this.sendReport(sessionId, lines.join('\n'), 'normal');
+    this.state.lastSummaryAt[sessionId] = todayKey;
+    this.saveState();
+  }
+
+  private async sendReport(sessionId: string, message: string, priority: 'low' | 'normal' | 'high' | 'urgent') {
+    if (!this.report) return;
+    if (dndManager.shouldNotify(priority)) {
+      await this.report(sessionId, message);
+    } else {
+      dndManager.queueNotification(sessionId, message, priority);
+    }
+  }
+
+  private getLocalDateKey(): string {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
   }
 
   private safeJsonParse(raw: string) {
