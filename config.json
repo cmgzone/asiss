@@ -26,7 +26,14 @@
     "checkIntervalMs": 60000,
     "respectDND": true,
     "reportOnCompletion": true,
-    "reportIntervalMs": 900000
+    "reportIntervalMs": 900000,
+    "autoGenerate": {
+      "enabled": true,
+      "intervalMs": 1800000,
+      "maxPending": 3,
+      "maxGoalsPerRun": 2,
+      "recentMessages": 12
+    }
   },
   "agent": {
     "maxTurns": 0,

@@ -486,6 +486,77 @@ export class AgentRunner {
     backgroundWorker.setOnReport(async (sessionId, message) => {
       await this.gateway.sendResponse(sessionId, message);
     });
+    backgroundWorker.setAutoGoalGenerator(async (sessionId) => {
+      const config = this.loadConfig();
+      const autoCfg = config?.backgroundWorker?.autoGenerate || {};
+      const maxGoalsPerRun = typeof autoCfg.maxGoalsPerRun === 'number' ? autoCfg.maxGoalsPerRun : 2;
+      const recentMessages = typeof autoCfg.recentMessages === 'number' ? autoCfg.recentMessages : 12;
+
+      const memories = this.memory.get(sessionId) || [];
+      const recent = memories.filter(m => m.role === 'user' || m.role === 'assistant').slice(-recentMessages);
+      if (recent.length === 0) return [];
+
+      const userText = recent.filter(m => m.role === 'user').map(m => m.content).join('\n');
+      const hasActionSignal = /\b(please|can you|could you|need to|todo|task|fix|create|build|deploy|research|write|summarize|review|update|add|remove|enable|disable)\b/i.test(userText);
+      if (!hasActionSignal) return [];
+
+      const history = recent.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n');
+
+      const systemPrompt = [
+        'You are a goal extraction assistant.',
+        'Only propose goals that are explicitly requested by the user in the conversation.',
+        'Do not invent new tasks or add speculative work.',
+        'If nothing is clearly requested, respond with NO_GOALS.'
+      ].join(' ');
+
+      const prompt = [
+        'Extract up to the requested number of background goals.',
+        `Return JSON only in the format: {"goals":[{"title":"","description":"","priority":"normal","estimatedMinutes":30,"tags":["auto"]}]}`,
+        `Max goals: ${maxGoalsPerRun}.`,
+        'Keep titles under 80 chars and descriptions under 400 chars.',
+        '',
+        'Conversation:',
+        history
+      ].join('\n');
+
+      const model = this.getModel();
+      const response = await model.generate(prompt, systemPrompt, []);
+      const text = (response.content || '').trim();
+      if (!text || /NO_GOALS/i.test(text)) return [];
+
+      const parseJson = (raw: string) => {
+        try {
+          return JSON.parse(raw);
+        } catch {
+          const start = raw.indexOf('{');
+          const end = raw.lastIndexOf('}');
+          if (start >= 0 && end > start) {
+            try {
+              return JSON.parse(raw.slice(start, end + 1));
+            } catch {
+              return null;
+            }
+          }
+          return null;
+        }
+      };
+
+      const payload = parseJson(text);
+      const goals = Array.isArray(payload?.goals) ? payload.goals : [];
+      const normalizePriority = (value: unknown) => {
+        const v = String(value || '').toLowerCase();
+        return v === 'low' || v === 'normal' || v === 'high' || v === 'urgent' ? v : undefined;
+      };
+      const clip = (value: string, max: number) => value.length > max ? value.slice(0, max).trim() : value.trim();
+
+      return goals.slice(0, maxGoalsPerRun).map((g: any) => ({
+        title: clip(String(g?.title || ''), 80),
+        description: clip(String(g?.description || ''), 400),
+        priority: normalizePriority(g?.priority),
+        estimatedMinutes: typeof g?.estimatedMinutes === 'number' ? g.estimatedMinutes : undefined,
+        tags: Array.isArray(g?.tags) ? g.tags : undefined
+      })).filter((g: any) => g.title && g.description);
+    });
     backgroundWorker.start();
   }
 

@@ -39,6 +39,7 @@ Queue tasks for Gitu to work on while you're away:
 - You get notified when tasks complete
 - Optional: set `backgroundWorker.alwaysOn: true` to run even while you are active
 - Optional: set `backgroundWorker.reportIntervalMs` to send periodic status updates
+- Optional: set `backgroundWorker.autoGenerate.enabled: true` to auto-create goals from recent conversation
 
 ### 2. Do Not Disturb (Quiet Hours)
 Gitu respects your sleep:
@@ -106,6 +107,11 @@ All settings in `config.json`:
 | `backgroundWorker.idleThresholdMs` | number | 300000 | Idle time before starting work |
 | `backgroundWorker.respectDND` | boolean | true | Pause during quiet hours |
 | `backgroundWorker.reportIntervalMs` | number | 0 | Periodic status updates (ms); 0 disables |
+| `backgroundWorker.autoGenerate.enabled` | boolean | false | Auto-create goals from recent conversation |
+| `backgroundWorker.autoGenerate.intervalMs` | number | 1800000 | Minimum time between auto goal generation |
+| `backgroundWorker.autoGenerate.maxPending` | number | 3 | Max pending goals before auto generation pauses |
+| `backgroundWorker.autoGenerate.maxGoalsPerRun` | number | 2 | Max goals created per auto-generation pass |
+| `backgroundWorker.autoGenerate.recentMessages` | number | 12 | Recent messages scanned for explicit user requests |
 
 ## PM2 Management
 
