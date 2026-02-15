@@ -50,6 +50,7 @@ const DEBUG_PREFIX = '__DEBUG__';
 interface IGateway {
   sendResponse(sessionId: string, text: string): Promise<void>;
   sendStreamChunk(sessionId: string, chunk: string): Promise<void>;
+  sendMedia(sessionId: string, media: { type: 'image' | 'file'; path?: string; url?: string; caption?: string; filename?: string }): Promise<void>;
   listSessionIds(): string[];
 }
 
@@ -932,6 +933,28 @@ ${context ? `\nSystem Context: ${context}` : ''}
             return messages;
           };
 
+          const buildMediaRequests = (toolResults: any[]) => {
+            const media: { type: 'image' | 'file'; path?: string; url?: string; caption?: string }[] = [];
+            for (const result of toolResults) {
+              if (!result?.success) continue;
+              if (result.call?.name !== "playwright") continue;
+              const payload = parseJson(String(result.output));
+              if (!payload) continue;
+              const filePath = typeof payload.filePath === "string" ? payload.filePath : "";
+              if (!filePath) continue;
+              const url = typeof payload.url === "string" ? payload.url : "";
+              const captionLines = ["📸 Screenshot"];
+              if (url) captionLines.push(url);
+              const caption = captionLines.join("\n");
+              if (fs.existsSync(filePath)) {
+                media.push({ type: "image", path: filePath, url, caption });
+              } else if (url) {
+                media.push({ type: "image", url, caption });
+              }
+            }
+            return media;
+          };
+
           const formatShellResult = (result: any) => {
             const args = result.call?.arguments || {};
             const command = typeof args.command === "string" ? args.command : "";
@@ -1001,6 +1024,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
           };
 
           const agentResultMessages = buildAgentResultMessages(results);
+          const mediaRequests = buildMediaRequests(results);
 
           let toolOutputText = results.map((r) => {
             const formatted = formatToolResult(r);
@@ -1009,6 +1033,9 @@ ${context ? `\nSystem Context: ${context}` : ''}
 
           toolOutputText = ensureClosedCodeFences(toolOutputText);
           await this.gateway.sendResponse(sessionId, `${DEBUG_PREFIX}\n${toolOutputText}`);
+          for (const media of mediaRequests) {
+            await this.gateway.sendMedia(sessionId, media);
+          }
           for (const message of agentResultMessages) {
             if (message && message.trim()) {
               await this.gateway.sendResponse(sessionId, message);

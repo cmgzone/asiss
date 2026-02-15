@@ -1,4 +1,4 @@
-import { ChannelAdapter, Message, Session } from '../core/types';
+import { ChannelAdapter, Message, Session, MediaPayload } from '../core/types';
 import { AgentRunner } from '../agents/runner';
 import { elevatedManager } from '../core/elevated';
 import { thinkingManager } from '../core/thinking';
@@ -187,6 +187,27 @@ export class Gateway {
       if (channel) {
         channel.send(session.userId, text);
       }
+    }
+  }
+
+  async sendMedia(sessionId: string, media: MediaPayload) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const channel = this.channels.get(session.channel);
+    if (channel?.sendMedia) {
+      channel.sendMedia(session.userId, media);
+      return;
+    }
+
+    const caption = media.caption ? media.caption.trim() : '';
+    if (media.url) {
+      await this.sendResponse(sessionId, caption ? `${caption}\n${media.url}` : media.url);
+      return;
+    }
+    if (media.path) {
+      await this.sendResponse(sessionId, caption ? `${caption}\n${media.path}` : media.path);
+    } else if (caption) {
+      await this.sendResponse(sessionId, caption);
     }
   }
 

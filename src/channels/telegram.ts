@@ -1,7 +1,8 @@
-import { ChannelAdapter, Message } from '../core/types';
+import { ChannelAdapter, Message, MediaPayload } from '../core/types';
 import { Telegraf } from 'telegraf';
 import { v4 as uuidv4 } from 'uuid';
 import { stripShellStreamMarker } from '../core/stream-markers';
+import fs from 'fs';
 
 export class TelegramChannel implements ChannelAdapter {
   name = 'telegram';
@@ -83,6 +84,41 @@ export class TelegramChannel implements ChannelAdapter {
       await this.bot.telegram.sendMessage(chatId, text);
     } catch (err) {
       console.error(`[TelegramChannel] Failed to send message to ${userId}:`, err);
+    }
+  }
+
+  async sendMedia(userId: string, media: MediaPayload) {
+    const chatId: any = /^\d+$/.test(userId) ? Number(userId) : userId;
+    const caption = media.caption ? media.caption.slice(0, 1000) : undefined;
+    try {
+      if (media.type === 'image') {
+        if (media.path && fs.existsSync(media.path)) {
+          await this.bot.telegram.sendPhoto(chatId, { source: media.path }, { caption });
+          return;
+        }
+        if (media.url) {
+          await this.bot.telegram.sendPhoto(chatId, media.url, { caption });
+          return;
+        }
+      }
+      if (media.type === 'file') {
+        if (media.path && fs.existsSync(media.path)) {
+          await this.bot.telegram.sendDocument(chatId, { source: media.path }, { caption });
+          return;
+        }
+        if (media.url) {
+          await this.bot.telegram.sendDocument(chatId, media.url, { caption });
+          return;
+        }
+      }
+      if (caption) {
+        await this.send(userId, caption);
+      }
+    } catch (err) {
+      console.error(`[TelegramChannel] Failed to send media to ${userId}:`, err);
+      if (caption) {
+        await this.send(userId, caption);
+      }
     }
   }
 
