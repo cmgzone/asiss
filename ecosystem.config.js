@@ -19,9 +19,7 @@
 module.exports = {
     apps: [{
         name: 'gitu',
-        script: 'src/index.ts',
-        interpreter: 'node',
-        interpreter_args: '-r ts-node/register',
+        script: 'dist/index.js',
 
         // Restart Policies
         autorestart: true,
@@ -41,7 +39,6 @@ module.exports = {
         // Environment
         env: {
             NODE_ENV: 'production',
-            TS_NODE_TRANSPILE_ONLY: 'true'
         },
         env_development: {
             NODE_ENV: 'development',
