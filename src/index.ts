@@ -5,9 +5,9 @@ import { DiscordChannel } from './channels/discord';
 import { SlackChannel } from './channels/slack';
 import { WhatsAppChannel } from './channels/whatsapp';
 import { WebChannel } from './channels/web/server';
+import { A2AChannel } from './channels/a2a/server';
 import fs from 'fs';
 import dotenv from 'dotenv';
-import path from 'path';
 
 // Load environment variables
 dotenv.config();
@@ -44,6 +44,33 @@ async function main() {
   // Register Web Channel
   if (config.channels.includes('Web Interface (Chat)')) {
       gateway.registerChannel(new WebChannel(3000));
+  }
+
+  // Register A2A Channel (Agent-to-Agent)
+  const a2aConfig = typeof (config as any).a2a === 'object' ? (config as any).a2a : {};
+  const a2aEnabled = Boolean(a2aConfig?.enabled) || config.channels.includes('A2A');
+  if (a2aEnabled) {
+      const authTokenEnv = typeof a2aConfig?.authTokenEnv === 'string' ? a2aConfig.authTokenEnv : 'A2A_AUTH_TOKEN';
+      const authToken = process.env[authTokenEnv] || a2aConfig?.authToken;
+      gateway.registerChannel(new A2AChannel({
+          enabled: true,
+          port: typeof a2aConfig?.port === 'number' ? a2aConfig.port : undefined,
+          rpcPath: typeof a2aConfig?.rpcPath === 'string' ? a2aConfig.rpcPath : undefined,
+          baseUrl: typeof a2aConfig?.baseUrl === 'string' ? a2aConfig.baseUrl : undefined,
+          protocolVersion: typeof a2aConfig?.protocolVersion === 'string' ? a2aConfig.protocolVersion : undefined,
+          name: typeof a2aConfig?.name === 'string' ? a2aConfig.name : undefined,
+          description: typeof a2aConfig?.description === 'string' ? a2aConfig.description : undefined,
+          provider: typeof a2aConfig?.provider === 'object' ? a2aConfig.provider : undefined,
+          documentationUrl: typeof a2aConfig?.documentationUrl === 'string' ? a2aConfig.documentationUrl : undefined,
+          iconUrl: typeof a2aConfig?.iconUrl === 'string' ? a2aConfig.iconUrl : undefined,
+          capabilities: typeof a2aConfig?.capabilities === 'object' ? a2aConfig.capabilities : undefined,
+          defaultInputModes: Array.isArray(a2aConfig?.defaultInputModes) ? a2aConfig.defaultInputModes : undefined,
+          defaultOutputModes: Array.isArray(a2aConfig?.defaultOutputModes) ? a2aConfig.defaultOutputModes : undefined,
+          skills: Array.isArray(a2aConfig?.skills) ? a2aConfig.skills : undefined,
+          authToken,
+          maxHistory: typeof a2aConfig?.maxHistory === 'number' ? a2aConfig.maxHistory : undefined,
+          blockingTimeoutMs: typeof a2aConfig?.blockingTimeoutMs === 'number' ? a2aConfig.blockingTimeoutMs : undefined
+      }));
   }
 
   // Register Telegram Channel

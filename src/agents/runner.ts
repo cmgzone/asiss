@@ -45,6 +45,7 @@ import { AgentProfilesSkill } from '../skills/agent-profiles';
 import { SkillMarketplaceManager } from '../core/skill-marketplace';
 import { MarketplaceSkill } from '../skills/marketplace';
 import { TrustedActionsSkill } from '../skills/trusted-actions';
+import { A2AClientSkill } from '../skills/a2a';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -132,6 +133,7 @@ export class AgentRunner {
     SkillRegistry.register(new AgentProfilesSkill());
     SkillRegistry.register(new MarketplaceSkill(this.marketplace));
     SkillRegistry.register(new TrustedActionsSkill());
+    SkillRegistry.register(new A2AClientSkill());
 
     // Load marketplace-installed skills (allowlist enforced by marketplace manager)
     for (const skill of this.marketplace.loadEnabledSkills()) {

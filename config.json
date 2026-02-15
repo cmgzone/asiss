@@ -1,7 +1,8 @@
 {
   "channels": [
     "Console (CLI)",
-    "Web Interface (Chat)"
+    "Web Interface (Chat)",
+    "A2A"
   ],
   "model": "OpenRouter",
   "aiModel": "mistralai/mistral-7b-instruct:free",
@@ -122,5 +123,16 @@
       "maxChars": 18000,
       "perMessageMaxChars": 1200
     }
+  },
+  "a2a": {
+    "enabled": true,
+    "port": 3210,
+    "rpcPath": "/a2a",
+    "protocolVersion": "0.3.0",
+    "authTokenEnv": "A2A_AUTH_TOKEN",
+    "protectAgentCard": false,
+    "maxHistory": 50,
+    "blockingTimeoutMs": 60000,
+    "peers": []
   }
 }
