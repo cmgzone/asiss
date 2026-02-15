@@ -14,6 +14,7 @@ import { ModelRegistry } from '../../core/models';
 import { GenericOpenAIProvider } from '../../agents/openai-provider';
 import { whatsappEvents, WhatsAppStatusPayload } from '../../core/whatsapp-events';
 import QRCode from 'qrcode';
+import { MediaPayload } from '../../core/types';
 
 export class WebChannel implements ChannelAdapter {
   name = 'web';
@@ -37,8 +38,8 @@ export class WebChannel implements ChannelAdapter {
     this.auth = new AuthManager();
 
     // Serve static frontend files
-    // Serve static frontend files
     this.app.use(express.static(path.join(__dirname, 'public')));
+    this.app.use('/artifacts', express.static(path.join(process.cwd(), 'artifacts')));
     this.app.use(express.json());
 
     const sendWhatsAppState = (socket: any) => {
@@ -541,6 +542,18 @@ export class WebChannel implements ChannelAdapter {
   send(userId: string, text: string) {
     // userId maps to a socket.io room joined by the authenticated user
     this.io.to(userId).emit('message', text);
+  }
+
+  sendMedia(userId: string, media: MediaPayload) {
+    const payload = { ...media } as MediaPayload;
+    if (payload.path && (!payload.url || payload.url.trim() === '')) {
+      const rel = path.relative(process.cwd(), payload.path);
+      const normalized = rel.split(path.sep).join('/');
+      if (normalized.startsWith('artifacts/')) {
+        payload.url = `/artifacts/${normalized.slice('artifacts/'.length)}`;
+      }
+    }
+    this.io.to(userId).emit('media', payload);
   }
 
   // New method for streaming

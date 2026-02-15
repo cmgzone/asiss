@@ -432,6 +432,40 @@
             color: inherit;
         }
 
+        .media-card {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .media-image {
+            width: 100%;
+            max-height: 480px;
+            object-fit: contain;
+            border-radius: 16px;
+            border: 1px solid var(--border-color);
+            background: rgba(0, 0, 0, 0.35);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .media-caption {
+            font-size: 0.95rem;
+            color: var(--text-muted);
+        }
+
+        .media-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--text-primary);
+            text-decoration: none;
+            font-size: 0.95rem;
+        }
+
+        .media-link:hover {
+            text-decoration: underline;
+        }
+
         /* Chat Input Area */
         .chat-input-area {
             flex-shrink: 0;
@@ -1342,7 +1376,7 @@
 
         function persistMessage(text, isUser) {
             const history = loadChatHistory();
-            history.push({ text, isUser, timestamp: Date.now(), streaming: false });
+            history.push({ kind: 'text', text, isUser, timestamp: Date.now(), streaming: false });
             saveChatHistory(history);
             if (!isUser) {
                 activeStreamIndex = null;
@@ -1353,7 +1387,7 @@
             const history = loadChatHistory();
             if (activeStreamIndex === null || !history[activeStreamIndex]) {
                 const shouldCollapse = streamType === 'shell';
-                history.push({ text: '', isUser: false, timestamp: Date.now(), streaming: true, streamType: streamType, collapsed: shouldCollapse });
+                history.push({ kind: 'text', text: '', isUser: false, timestamp: Date.now(), streaming: true, streamType: streamType, collapsed: shouldCollapse });
                 activeStreamIndex = history.length - 1;
             }
             if (streamType && !history[activeStreamIndex].streamType) {
@@ -1367,6 +1401,15 @@
             history[activeStreamIndex].streaming = true;
             saveChatHistory(history);
             scheduleStreamFinalize();
+        }
+
+        function persistMedia(media, isUser) {
+            const history = loadChatHistory();
+            history.push({ kind: 'media', media: media, isUser: Boolean(isUser), timestamp: Date.now(), streaming: false });
+            saveChatHistory(history);
+            if (!isUser) {
+                activeStreamIndex = null;
+            }
         }
 
         function scheduleStreamFinalize() {
@@ -1413,6 +1456,11 @@
             chatMessages.innerHTML = '';
             chatMessagesFull.innerHTML = '';
             history.forEach(item => {
+                if (item.kind === 'media' && item.media) {
+                    addMediaToContainer(chatMessages, item.media, item.isUser, true);
+                    addMediaToContainer(chatMessagesFull, item.media, item.isUser, true);
+                    return;
+                }
                 addMessageToContainer(chatMessages, item.text, item.isUser, true, item.streamType || null, Boolean(item.collapsed));
                 addMessageToContainer(chatMessagesFull, item.text, item.isUser, true, item.streamType || null, Boolean(item.collapsed));
             });
@@ -1685,6 +1733,13 @@
                 addMessage(text, false);
             });
 
+            socket.on('media', (payload) => {
+                hideTypingIndicator();
+                finalizeStream();
+                if (!payload) return;
+                addMedia(payload, false);
+            });
+
             socket.on('stream_chunk', (chunk) => {
                 hideTypingIndicator();
                 if (typeof chunk === 'string' && chunk.startsWith(SHELL_STREAM_END_MARKER)) {
@@ -1736,6 +1791,14 @@
             }
         }
 
+        function addMedia(media, isUser, skipPersist = false) {
+            addMediaToContainer(chatMessages, media, isUser, true);
+            addMediaToContainer(chatMessagesFull, media, isUser, true);
+            if (!skipPersist) {
+                persistMedia(media, isUser);
+            }
+        }
+
         function addMessageToContainer(container, text, isUser, markComplete = false, streamType = null, collapsed = false) {
             const div = document.createElement('div');
             const roleClass = isUser ? 'user' : 'bot';
@@ -1775,6 +1838,66 @@
                 div.innerHTML = renderMarkdown(text);
                 div.dataset.complete = markComplete ? 'true' : 'false';
             }
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+            return div;
+        }
+
+        function addMediaToContainer(container, media, isUser, markComplete = false) {
+            const div = document.createElement('div');
+            const roleClass = isUser ? 'user' : 'bot';
+            div.className = `message ${roleClass}`;
+            div.dataset.media = 'true';
+            div.dataset.complete = markComplete ? 'true' : 'false';
+
+            const card = document.createElement('div');
+            card.className = 'media-card';
+
+            const captionText = media?.caption ? String(media.caption) : '';
+
+            if (media?.type === 'image') {
+                if (media?.url) {
+                    const link = document.createElement('a');
+                    link.href = media.url;
+                    link.target = '_blank';
+                    link.rel = 'noopener';
+                    const img = document.createElement('img');
+                    img.className = 'media-image';
+                    img.src = media.url;
+                    img.alt = captionText || 'Screenshot';
+                    link.appendChild(img);
+                    card.appendChild(link);
+                } else {
+                    const missing = document.createElement('div');
+                    missing.className = 'media-caption';
+                    missing.textContent = 'Image unavailable';
+                    card.appendChild(missing);
+                }
+            } else if (media?.type === 'file') {
+                if (media?.url) {
+                    const fileLink = document.createElement('a');
+                    fileLink.href = media.url;
+                    fileLink.target = '_blank';
+                    fileLink.rel = 'noopener';
+                    fileLink.className = 'media-link';
+                    fileLink.innerHTML = `<i class="ri-file-3-line"></i>${escapeHtml(media.filename || 'Download file')}`;
+                    card.appendChild(fileLink);
+                } else if (media?.filename) {
+                    const fileLabel = document.createElement('div');
+                    fileLabel.className = 'media-caption';
+                    fileLabel.textContent = media.filename;
+                    card.appendChild(fileLabel);
+                }
+            }
+
+            if (captionText) {
+                const caption = document.createElement('div');
+                caption.className = 'media-caption';
+                caption.innerHTML = renderMarkdown(captionText);
+                card.appendChild(caption);
+            }
+
+            div.appendChild(card);
             container.appendChild(div);
             container.scrollTop = container.scrollHeight;
             return div;
