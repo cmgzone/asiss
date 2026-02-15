@@ -152,7 +152,9 @@ AGENT TEAM ACTIONS:
             role: { type: "string" },
             specialization: { type: "string" },
             taskDescription: { type: "string" },
-            count: { type: "number" }
+            count: { type: "number" },
+            modelId: { type: "string" },
+            profileId: { type: "string" }
         },
         required: ["action"]
     };
@@ -457,7 +459,9 @@ AGENT TEAM ACTIONS:
                     const agent = agentSwarm.createAgent(
                         params.name || params.agentName || 'Agent',
                         params.role || 'general',
-                        params.specialization || 'various tasks'
+                        params.specialization || 'various tasks',
+                        params.modelId,
+                        params.profileId
                     );
                     return { success: true, message: `Agent "${agent.name}" created`, agent };
                 }

@@ -38,6 +38,13 @@ import { PlanModeSkill } from '../skills/plan-mode';
 import { planModeManager } from '../core/plan-mode';
 import { DeepResearchSkill } from '../skills/deep-research';
 import { SendTelegramSkill } from '../skills/send-telegram';
+import { SendEmailSkill } from '../skills/send-email';
+import { WebhookSkill } from '../skills/webhook';
+import { agentProfileManager } from '../core/agent-profiles';
+import { AgentProfilesSkill } from '../skills/agent-profiles';
+import { SkillMarketplaceManager } from '../core/skill-marketplace';
+import { MarketplaceSkill } from '../skills/marketplace';
+import { TrustedActionsSkill } from '../skills/trusted-actions';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -60,6 +67,7 @@ export class AgentRunner {
   private baseSystemPrompt: string;
   private memory: MemoryManager;
   private learning: LearningManager;
+  private marketplace: SkillMarketplaceManager;
   private mcpManager: McpManager;
   private scheduler: SchedulerManager;
   private defaultMaxTurns: number = 15;
@@ -81,6 +89,7 @@ export class AgentRunner {
       this.memory,
       async (sessionId, message) => this.gateway.sendResponse(sessionId, message)
     );
+    this.marketplace = new SkillMarketplaceManager();
     this.mcpManager = new McpManager();
     this.scheduler = new SchedulerManager(async (job) => {
       const scheduledMsg: Message = {
@@ -118,6 +127,16 @@ export class AgentRunner {
     SkillRegistry.register(new PlanModeSkill());
     SkillRegistry.register(new DeepResearchSkill());
     SkillRegistry.register(new SendTelegramSkill());
+    SkillRegistry.register(new SendEmailSkill());
+    SkillRegistry.register(new WebhookSkill());
+    SkillRegistry.register(new AgentProfilesSkill());
+    SkillRegistry.register(new MarketplaceSkill(this.marketplace));
+    SkillRegistry.register(new TrustedActionsSkill());
+
+    // Load marketplace-installed skills (allowlist enforced by marketplace manager)
+    for (const skill of this.marketplace.loadEnabledSkills()) {
+      SkillRegistry.register(skill);
+    }
 
     // Load custom models
     for (const config of modelManager.listModels()) {
@@ -136,7 +155,10 @@ export class AgentRunner {
 
     // Wire up agent swarm executor
     agentSwarm.setExecutor(async (agentId: string, prompt: string) => {
-      const model = this.getModel();
+      const agent = agentSwarm.getAgent(agentId);
+      const profile = agent?.profileId ? agentProfileManager.get(agent.profileId) : undefined;
+      const modelId = agent?.modelId || profile?.modelId;
+      const model = this.getModelById(modelId);
       const response = await model.generate(prompt, this.baseSystemPrompt);
       return response.content || '';
     });
@@ -461,6 +483,14 @@ export class AgentRunner {
     // Fallback to mock
     console.log('[AgentRunner] No specific model selected, falling back to Mock');
     return ModelRegistry.get('mock')!;
+  }
+
+  private getModelById(modelId?: string): ModelProvider {
+    if (modelId) {
+      const provider = ModelRegistry.get(modelId);
+      if (provider) return provider;
+    }
+    return this.getModel();
   }
 
   startLoop() {
@@ -1393,7 +1423,8 @@ ${context ? `\nSystem Context: ${context}` : ''}
           customAgentManager.addMessage(sessionId, agent.id, 'user', userMessage);
 
           // Generate response
-          const model = this.getModel();
+          const profile = agent.profileId ? agentProfileManager.get(agent.profileId) : undefined;
+          const model = this.getModelById(agent.model || profile?.modelId);
           await this.gateway.sendResponse(sessionId, `💭 *${agent.displayName} is thinking...*`);
 
           try {

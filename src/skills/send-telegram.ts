@@ -1,5 +1,6 @@
 import { Skill } from '../core/skills';
 import { Telegraf } from 'telegraf';
+import { trustedActions } from '../core/trusted-actions';
 
 export class SendTelegramSkill implements Skill {
     name = 'send_telegram';
@@ -19,8 +20,16 @@ export class SendTelegramSkill implements Skill {
 
     async execute(params: any): Promise<any> {
         const { message } = params;
+        const sessionId = params?.__sessionId;
         if (!message || typeof message !== 'string' || !message.trim()) {
             return { success: false, error: 'Message text is required.' };
+        }
+
+        if (!trustedActions.isAllowed('send_telegram')) {
+            return {
+                success: false,
+                error: 'Trusted action "send_telegram" is not allowed. Enable it in config.json trustedActions.allow.',
+            };
         }
 
         const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -45,6 +54,12 @@ export class SendTelegramSkill implements Skill {
             const bot = new Telegraf(botToken);
             const numericChatId = /^\d+$/.test(chatId) ? Number(chatId) : chatId;
             await bot.telegram.sendMessage(numericChatId, message.trim());
+            trustedActions.logRequest({
+                action: 'send_telegram',
+                sessionId,
+                payload: { chatId: numericChatId, message: message.trim() },
+                createdAt: Date.now()
+            });
             return {
                 success: true,
                 message: `Message sent to Telegram (chat ${chatId}).`,

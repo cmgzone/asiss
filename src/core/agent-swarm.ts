@@ -9,6 +9,8 @@ export interface SwarmAgent {
     specialization: string;
     status: 'idle' | 'working' | 'completed' | 'error';
     parentId?: string; // For replicated agents
+    modelId?: string;
+    profileId?: string;
     assignedTasks: string[];
     completedTasks: string[];
     results: AgentResult[];
@@ -69,13 +71,15 @@ export class AgentSwarm {
 
     // ===== AGENT CRUD =====
 
-    createAgent(name: string, role: string, specialization: string): SwarmAgent {
+    createAgent(name: string, role: string, specialization: string, modelId?: string, profileId?: string): SwarmAgent {
         const agent: SwarmAgent = {
             id: uuidv4().slice(0, 8),
             name,
             role,
             specialization,
             status: 'idle',
+            modelId,
+            profileId,
             assignedTasks: [],
             completedTasks: [],
             results: [],
@@ -109,6 +113,14 @@ export class AgentSwarm {
         return false;
     }
 
+    updateAgent(id: string, updates: Partial<SwarmAgent>): boolean {
+        const agent = this.getAgent(id);
+        if (!agent) return false;
+        Object.assign(agent, updates);
+        this.save();
+        return true;
+    }
+
     // ===== AGENT REPLICATION =====
 
     replicateAgent(agentId: string, count: number): SwarmAgent[] {
@@ -124,6 +136,8 @@ export class AgentSwarm {
                 specialization: parent.specialization,
                 status: 'idle',
                 parentId: parent.id,
+                modelId: parent.modelId,
+                profileId: parent.profileId,
                 assignedTasks: [],
                 completedTasks: [],
                 results: [],

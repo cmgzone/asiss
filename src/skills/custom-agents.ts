@@ -32,6 +32,10 @@ export class CustomAgentsSkill {
                 type: 'string',
                 description: 'The system prompt / personality for the agent'
             },
+            model: {
+                type: 'string',
+                description: 'Optional model id to use for this agent'
+            },
             template: {
                 type: 'string',
                 description: 'Template name (for create_from_template): researcher, coder, writer, analyst, planner'
@@ -40,6 +44,10 @@ export class CustomAgentsSkill {
                 type: 'array',
                 items: { type: 'string' },
                 description: 'List of skills the agent can use'
+            },
+            profileId: {
+                type: 'string',
+                description: 'Optional profile ID or name to attach'
             },
             triggers: {
                 type: 'array',
@@ -60,8 +68,10 @@ export class CustomAgentsSkill {
         displayName?: string;
         description?: string;
         persona?: string;
+        model?: string;
         template?: string;
         skills?: string[];
+        profileId?: string;
         triggers?: string[];
         agentId?: string;
         __sessionId?: string;
@@ -79,7 +89,9 @@ export class CustomAgentsSkill {
                     description: args.description,
                     persona: args.persona,
                     skills: args.skills,
-                    triggers: args.triggers
+                    triggers: args.triggers,
+                    profileId: args.profileId,
+                    model: args.model
                 });
                 return {
                     success: true,
@@ -163,6 +175,8 @@ export class CustomAgentsSkill {
                 if (args.persona) updates.persona = args.persona;
                 if (args.skills) updates.skills = args.skills;
                 if (args.triggers) updates.triggers = args.triggers;
+                if (args.profileId) updates.profileId = args.profileId;
+                if (args.model) updates.model = args.model;
 
                 const success = customAgentManager.updateAgent(args.agentId || args.name!, updates);
                 return {
@@ -196,6 +210,7 @@ export class CustomAgentsSkill {
             description: agent.description,
             skills: agent.skills,
             triggers: agent.triggers,
+            profileId: agent.profileId,
             enabled: agent.enabled
         };
     }
@@ -206,6 +221,7 @@ export class CustomAgentsSkill {
             persona: agent.persona,
             model: agent.model,
             temperature: agent.temperature,
+            profileId: agent.profileId,
             createdAt: agent.createdAt,
             updatedAt: agent.updatedAt
         };

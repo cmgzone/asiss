@@ -18,6 +18,7 @@ export interface CustomAgentConfig {
     skills: string[];          // List of skill names this agent can use
     temperature?: number;      // AI temperature (0-2)
     model?: string;            // Override model for this agent
+    profileId?: string;        // Optional agent profile reference
     triggers: string[];        // Keywords/phrases that activate this agent
     enabled: boolean;
     createdAt: string;
@@ -178,6 +179,7 @@ export class CustomAgentManager {
             let description = '';
             let triggers: string[] = [];
             let skills: string[] = [];
+            let profileId: string | undefined;
 
             if (content.startsWith('---')) {
                 const endFrontmatter = content.indexOf('---', 3);
@@ -198,6 +200,9 @@ export class CustomAgentManager {
                         if (key.trim() === 'skills') {
                             skills = value.split(',').map(s => s.trim()).filter(Boolean);
                         }
+                        if (key.trim() === 'profileId') {
+                            profileId = value.trim() || undefined;
+                        }
                     }
                 }
             }
@@ -213,6 +218,7 @@ export class CustomAgentManager {
                     persona,
                     skills,
                     triggers,
+                    profileId,
                     enabled: true,
                     createdAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString(),
@@ -248,6 +254,7 @@ export class CustomAgentManager {
         triggers?: string[];
         temperature?: number;
         model?: string;
+        profileId?: string;
     }): CustomAgentConfig {
         const agent: CustomAgentConfig = {
             id: uuidv4().slice(0, 8),
@@ -259,6 +266,7 @@ export class CustomAgentManager {
             triggers: config.triggers || [],
             temperature: config.temperature,
             model: config.model,
+            profileId: config.profileId,
             enabled: true,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -382,6 +390,7 @@ displayName: ${agent.displayName}
 description: ${agent.description}
 triggers: ${agent.triggers.join(', ')}
 skills: ${agent.skills.join(', ')}
+profileId: ${agent.profileId || ''}
 ---
 
 ${agent.persona}

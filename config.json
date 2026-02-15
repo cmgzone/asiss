@@ -53,6 +53,22 @@
     "report": true,
     "summaryMaxEntries": 200
   },
+  "marketplace": {
+    "enabled": true,
+    "manifestUrl": "",
+    "publicKey": "",
+    "allowList": [],
+    "requireSignature": true,
+    "autoEnableOnInstall": false
+  },
+  "trustedActions": {
+    "enabled": true,
+    "allow": [
+      "send_telegram"
+    ],
+    "allowAll": false,
+    "log": true
+  },
   "agent": {
     "maxTurns": 0,
     "autoContinue": {
