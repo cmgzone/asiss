@@ -1,5 +1,6 @@
 import { Skill } from '../core/skills';
 import { Telegraf } from 'telegraf';
+import fs from 'fs';
 import { trustedActions } from '../core/trusted-actions';
 
 export class SendTelegramSkill implements Skill {
@@ -14,15 +15,30 @@ export class SendTelegramSkill implements Skill {
                 description:
                     'The message text to send to the user on Telegram. Supports plain text and basic markdown.',
             },
+            imagePath: {
+                type: 'string',
+                description: 'Local image file path to send as a photo.'
+            },
+            imageUrl: {
+                type: 'string',
+                description: 'Image URL to send as a photo.'
+            },
+            caption: {
+                type: 'string',
+                description: 'Optional caption for the image.'
+            }
         },
-        required: ['message'],
+        required: [],
     };
 
     async execute(params: any): Promise<any> {
-        const { message } = params;
+        const { message, imagePath, imageUrl, caption } = params;
         const sessionId = params?.__sessionId;
-        if (!message || typeof message !== 'string' || !message.trim()) {
-            return { success: false, error: 'Message text is required.' };
+        const text = typeof message === 'string' ? message.trim() : '';
+        const hasImagePath = typeof imagePath === 'string' && imagePath.trim().length > 0;
+        const hasImageUrl = typeof imageUrl === 'string' && imageUrl.trim().length > 0;
+        if (!text && !hasImagePath && !hasImageUrl) {
+            return { success: false, error: 'Provide message or imagePath/imageUrl.' };
         }
 
         if (!trustedActions.isAllowed('send_telegram')) {
@@ -53,13 +69,42 @@ export class SendTelegramSkill implements Skill {
         try {
             const bot = new Telegraf(botToken);
             const numericChatId = /^\d+$/.test(chatId) ? Number(chatId) : chatId;
-            await bot.telegram.sendMessage(numericChatId, message.trim());
-            trustedActions.logRequest({
-                action: 'send_telegram',
-                sessionId,
-                payload: { chatId: numericChatId, message: message.trim() },
-                createdAt: Date.now()
-            });
+            if (hasImagePath || hasImageUrl) {
+                const cap = typeof caption === 'string' && caption.trim() ? caption.trim() : (text || undefined);
+                if (hasImagePath) {
+                    const filePath = imagePath.trim();
+                    if (!fs.existsSync(filePath)) {
+                        return { success: false, error: `Image not found at ${filePath}` };
+                    }
+                    await bot.telegram.sendPhoto(numericChatId, { source: filePath }, cap ? { caption: cap } : undefined);
+                    trustedActions.logRequest({
+                        action: 'send_telegram',
+                        sessionId,
+                        payload: { chatId: numericChatId, imagePath: filePath, caption: cap },
+                        createdAt: Date.now()
+                    });
+                } else if (hasImageUrl) {
+                    const url = imageUrl.trim();
+                    await bot.telegram.sendPhoto(numericChatId, url, cap ? { caption: cap } : undefined);
+                    trustedActions.logRequest({
+                        action: 'send_telegram',
+                        sessionId,
+                        payload: { chatId: numericChatId, imageUrl: url, caption: cap },
+                        createdAt: Date.now()
+                    });
+                }
+                if (text && !cap) {
+                    await bot.telegram.sendMessage(numericChatId, text);
+                }
+            } else if (text) {
+                await bot.telegram.sendMessage(numericChatId, text);
+                trustedActions.logRequest({
+                    action: 'send_telegram',
+                    sessionId,
+                    payload: { chatId: numericChatId, message: text },
+                    createdAt: Date.now()
+                });
+            }
             return {
                 success: true,
                 message: `Message sent to Telegram (chat ${chatId}).`,
