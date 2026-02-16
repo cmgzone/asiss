@@ -9,9 +9,33 @@
   "createdAt": "2026-02-08T09:51:26.432Z",
   "proactive": {
     "enabled": true,
+    "maxSuggestionsPerDay": 5,
     "idleMs": 300000,
     "minGapMs": 600000,
     "everyMs": 60000
+  },
+  "guardrails": {
+    "enabled": true
+  },
+  "costTracker": {
+    "alertThresholdUsd": 10.0
+  },
+  "modelRouter": {
+    "enabled": false,
+    "rules": [
+      {
+        "level": "simple",
+        "modelId": "gpt-4o-mini"
+      },
+      {
+        "level": "medium",
+        "modelId": "gpt-4o"
+      },
+      {
+        "level": "complex",
+        "modelId": "claude-3-5-sonnet"
+      }
+    ]
   },
   "dnd": {
     "enabled": true,

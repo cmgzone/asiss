@@ -15,6 +15,10 @@ import { GenericOpenAIProvider } from '../../agents/openai-provider';
 import { whatsappEvents, WhatsAppStatusPayload } from '../../core/whatsapp-events';
 import QRCode from 'qrcode';
 import { MediaPayload } from '../../core/types';
+import { analyticsTracker } from '../../core/analytics-tracker';
+import { agentSwarm } from '../../core/agent-swarm';
+import { costTracker } from '../../core/cost-tracker';
+import { proactiveEngine } from '../../core/proactive-engine';
 
 export class WebChannel implements ChannelAdapter {
   name = 'web';
@@ -346,6 +350,202 @@ export class WebChannel implements ChannelAdapter {
 
       res.json({ success: true, id });
       console.log(`[WebChannel] Added new model: ${name}`);
+    });
+
+    // ===== ANALYTICS API =====
+
+    this.app.get('/api/analytics/overview', (_req, res) => {
+      try {
+        res.json(analyticsTracker.getOverview());
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    this.app.get('/api/analytics/daily', (req, res) => {
+      try {
+        const days = Math.min(30, Math.max(1, parseInt(String(req.query.days)) || 7));
+        res.json({ daily: analyticsTracker.getDailyStats(days) });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    this.app.get('/api/analytics/agents', (_req, res) => {
+      try {
+        res.json({ agents: analyticsTracker.getAgentPerformance() });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    this.app.get('/api/analytics/goals', (_req, res) => {
+      try {
+        res.json(analyticsTracker.getGoalStats());
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    // ===== ANALYTICS API =====
+
+    this.app.get('/api/analytics/summary', (_req, res) => {
+      try {
+        const overview = analyticsTracker.getOverview();
+        const daily = analyticsTracker.getDailyStats(14);
+
+        // Build dailyMessages for the chart
+        const dailyMessages = daily.map(d => ({ date: d.date, count: d.messages + d.tasks }));
+
+        // Build topSkills from tool_call events
+        const skillMap: Record<string, number> = {};
+        const allEvents = (analyticsTracker as any).data?.events || [];
+        for (const e of allEvents) {
+          if (e.type === 'tool_call' && e.metadata?.toolName) {
+            const name = e.metadata.toolName;
+            skillMap[name] = (skillMap[name] || 0) + 1;
+          }
+        }
+        const topSkills = Object.entries(skillMap)
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 10);
+
+        // Recent events (last 30)
+        const recentEvents = allEvents
+          .slice(-30)
+          .reverse()
+          .map((e: any) => ({
+            type: e.type,
+            description: e.metadata?.toolName
+              ? `Tool: ${e.metadata.toolName}`
+              : e.type === 'message' ? 'User message'
+                : e.type.replace(/_/g, ' '),
+            timestamp: new Date(e.timestamp).toISOString()
+          }));
+
+        res.json({
+          totalMessages: overview.totalMessages,
+          totalToolCalls: overview.totalToolCalls,
+          avgResponseTime: overview.avgDurationMs,
+          totalErrors: overview.totalFailures,
+          dailyMessages,
+          topSkills,
+          recentEvents
+        });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    // ===== COLLABORATION API =====
+
+    this.app.get('/api/collaboration/messages', (req, res) => {
+      try {
+        const agentId = req.query.agentId as string | undefined;
+        const limit = Math.min(100, parseInt(String(req.query.limit)) || 50);
+        const messages = agentSwarm.getMessages(agentId, limit);
+        res.json({ messages });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    this.app.get('/api/collaboration/sessions', (_req, res) => {
+      try {
+        const sessions = agentSwarm.getCollaborations(20);
+        res.json({ sessions });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    this.app.get('/api/collaboration/sessions/:id', (req, res) => {
+      try {
+        const session = agentSwarm.getCollaboration(req.params.id);
+        if (!session) return res.status(404).json({ error: 'Session not found' });
+        res.json(session);
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    this.app.post('/api/collaboration/start', express.json(), async (req, res) => {
+      try {
+        const { agentNames, goal } = req.body;
+        if (!agentNames || !goal) return res.status(400).json({ error: 'agentNames and goal required' });
+        const names = String(agentNames).split(',').map((s: string) => s.trim()).filter(Boolean);
+        if (names.length < 2) return res.status(400).json({ error: 'Need at least 2 agents' });
+        const session = await agentSwarm.collaborate(names, goal);
+        res.json(session);
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    // ===== CONFIG API =====
+
+    this.app.get('/api/config', (_req, res) => {
+      try {
+        const configPath = path.join(process.cwd(), 'config.json');
+        if (fs.existsSync(configPath)) {
+          const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+          res.json(raw);
+        } else {
+          res.json({});
+        }
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    this.app.post('/api/config', express.json(), (req, res) => {
+      try {
+        const configPath = path.join(process.cwd(), 'config.json');
+        const current = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
+        const updated = { ...current, ...req.body };
+        fs.writeFileSync(configPath, JSON.stringify(updated, null, 2));
+
+        // Reload managers that might need it
+        // (Most reload on next usage or usage interval, but some might need explicit reload signals if implemented)
+
+        res.json({ success: true, config: updated });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    // ===== COST TRACKING API =====
+
+    this.app.get('/api/analytics/costs', (_req, res) => {
+      try {
+        const days = parseInt(String((_req as any).query?.days)) || 14;
+        res.json(costTracker.getSummary(days));
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    // ===== PROACTIVE ENGINE API =====
+
+    this.app.get('/api/proactive/suggestions', async (_req, res) => {
+      try {
+        const suggestions = await proactiveEngine.generateSuggestions();
+        res.json({ suggestions, all: proactiveEngine.getSuggestions() });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+    this.app.post('/api/proactive/dismiss', express.json(), (req, res) => {
+      try {
+        const { id } = req.body;
+        if (!id) return res.status(400).json({ error: 'id required' });
+        const dismissed = proactiveEngine.dismiss(id);
+        res.json({ dismissed });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
     });
 
     // Heartbeat Endpoint

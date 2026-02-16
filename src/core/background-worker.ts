@@ -496,9 +496,12 @@ export class BackgroundWorker {
             return;
         }
 
+        // Include ALL goals (pending, in-progress, completed, failed) to prevent
+        // re-creating tasks that were already executed. Without this, the LLM
+        // re-suggests completed goals because the user's request is still in the
+        // conversation history, causing an infinite execute-same-output loop.
         const existingTitles = new Set(
             Object.values(this.goals)
-                .filter(g => g.status === 'pending' || g.status === 'in-progress')
                 .map(g => this.normalizeTitle(g.title))
         );
 

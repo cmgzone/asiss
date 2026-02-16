@@ -36,6 +36,29 @@ export interface AgentTask {
 interface SwarmData {
     agents: SwarmAgent[];
     tasks: AgentTask[];
+    messages: AgentMessage[];
+    collaborations: CollaborationSession[];
+}
+
+export interface AgentMessage {
+    id: string;
+    fromAgentId: string;
+    fromAgentName: string;
+    toAgentId: string | 'all';  // 'all' for broadcasts
+    content: string;
+    timestamp: string;
+    collaborationId?: string;
+}
+
+export interface CollaborationSession {
+    id: string;
+    goal: string;
+    agentIds: string[];
+    status: 'active' | 'completed' | 'failed';
+    messages: AgentMessage[];
+    result?: string;
+    startedAt: string;
+    completedAt?: string;
 }
 
 export class AgentSwarm {
@@ -54,10 +77,16 @@ export class AgentSwarm {
     }
 
     private load(): SwarmData {
-        const empty: SwarmData = { agents: [], tasks: [] };
+        const empty: SwarmData = { agents: [], tasks: [], messages: [], collaborations: [] };
         if (fs.existsSync(this.filePath)) {
             try {
-                return JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
+                const raw = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
+                return {
+                    agents: Array.isArray(raw.agents) ? raw.agents : [],
+                    tasks: Array.isArray(raw.tasks) ? raw.tasks : [],
+                    messages: Array.isArray(raw.messages) ? raw.messages : [],
+                    collaborations: Array.isArray(raw.collaborations) ? raw.collaborations : []
+                };
             } catch {
                 return empty;
             }
@@ -285,6 +314,140 @@ export class AgentSwarm {
             pendingTasks: this.data.tasks.filter(t => t.agentId === agentId && t.status === 'pending'),
             completedTasks: this.data.tasks.filter(t => t.agentId === agentId && t.status === 'completed')
         };
+    }
+
+    // ===== INTER-AGENT MESSAGING =====
+
+    sendMessage(fromAgentId: string, toAgentId: string | 'all', content: string, collaborationId?: string): AgentMessage | null {
+        const from = this.getAgent(fromAgentId);
+        if (!from) return null;
+
+        const message: AgentMessage = {
+            id: uuidv4().slice(0, 8),
+            fromAgentId,
+            fromAgentName: from.name,
+            toAgentId,
+            content,
+            timestamp: new Date().toISOString(),
+            collaborationId
+        };
+
+        this.data.messages.push(message);
+        // Cap messages at 500
+        if (this.data.messages.length > 500) {
+            this.data.messages = this.data.messages.slice(-500);
+        }
+        this.save();
+        return message;
+    }
+
+    broadcast(fromAgentId: string, content: string): AgentMessage | null {
+        return this.sendMessage(fromAgentId, 'all', content);
+    }
+
+    getMessages(agentId?: string, limit: number = 50): AgentMessage[] {
+        let messages = this.data.messages;
+        if (agentId) {
+            messages = messages.filter(m =>
+                m.fromAgentId === agentId || m.toAgentId === agentId || m.toAgentId === 'all'
+            );
+        }
+        return messages.slice(-limit);
+    }
+
+    // ===== COLLABORATION =====
+
+    async collaborate(agentIds: string[], goal: string): Promise<CollaborationSession> {
+        const session: CollaborationSession = {
+            id: uuidv4().slice(0, 8),
+            goal,
+            agentIds,
+            status: 'active',
+            messages: [],
+            startedAt: new Date().toISOString()
+        };
+        this.data.collaborations.push(session);
+        this.save();
+
+        if (!this.executeCallback) {
+            session.status = 'failed';
+            session.result = 'No executor callback set';
+            this.save();
+            return session;
+        }
+
+        console.log(`[Swarm] Collaboration started: ${goal} with ${agentIds.length} agents`);
+
+        const validAgents = agentIds.map(id => this.getAgent(id) || this.getAgentByName(id)).filter(Boolean) as SwarmAgent[];
+        if (validAgents.length === 0) {
+            session.status = 'failed';
+            session.result = 'No valid agents found';
+            this.save();
+            return session;
+        }
+
+        let conversationContext = `**Collaboration Goal:** ${goal}\n\n`;
+
+        try {
+            // Each agent takes a turn, seeing previous agents' contributions
+            for (const agent of validAgents) {
+                agent.status = 'working';
+                this.save();
+
+                const prompt = `You are ${agent.name}, a ${agent.role} specializing in ${agent.specialization}.\n\nYou are in a collaboration session with other agents.\n\n${conversationContext}\nIt is now YOUR turn. Contribute your expertise to the goal. Build on what others have said. Be concise and focused.`;
+
+                console.log(`[Swarm] ${agent.name} contributing to collaboration...`);
+                const output = await this.executeCallback(agent.id, prompt);
+
+                // Record the message
+                const msg: AgentMessage = {
+                    id: uuidv4().slice(0, 8),
+                    fromAgentId: agent.id,
+                    fromAgentName: agent.name,
+                    toAgentId: 'all',
+                    content: output,
+                    timestamp: new Date().toISOString(),
+                    collaborationId: session.id
+                };
+                session.messages.push(msg);
+                this.data.messages.push(msg);
+
+                conversationContext += `**${agent.name}** (${agent.role}):\n${output}\n\n`;
+                agent.status = 'completed';
+                this.save();
+            }
+
+            // Final synthesis: ask the first agent to summarize
+            const lead = validAgents[0];
+            const synthPrompt = `You are ${lead.name}. You led a collaboration session.\n\n${conversationContext}\n\nNow synthesize all contributions into a clear, actionable summary. Highlight key decisions and next steps.`;
+
+            const synthesis = await this.executeCallback(lead.id, synthPrompt);
+            session.result = synthesis;
+            session.status = 'completed';
+            session.completedAt = new Date().toISOString();
+
+            console.log(`[Swarm] Collaboration completed: ${session.id}`);
+        } catch (err: any) {
+            session.status = 'failed';
+            session.result = err.message || 'Collaboration failed';
+            session.completedAt = new Date().toISOString();
+            console.error(`[Swarm] Collaboration failed:`, err);
+        }
+
+        // Cap collaborations at 50
+        if (this.data.collaborations.length > 50) {
+            this.data.collaborations = this.data.collaborations.slice(-50);
+        }
+        this.save();
+        return session;
+    }
+
+    getCollaborations(limit: number = 10): CollaborationSession[] {
+        return this.data.collaborations.slice(-limit).reverse();
+    }
+
+    getCollaboration(id: string): CollaborationSession | undefined {
+        return this.data.collaborations.find(c => c.id === id);
     }
 }
 

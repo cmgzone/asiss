@@ -46,6 +46,13 @@ import { SkillMarketplaceManager } from '../core/skill-marketplace';
 import { MarketplaceSkill } from '../skills/marketplace';
 import { TrustedActionsSkill } from '../skills/trusted-actions';
 import { A2AClientSkill } from '../skills/a2a';
+import { analyticsTracker } from '../core/analytics-tracker';
+import { withModelRetry } from '../core/retry-handler';
+import { guardrailManager } from '../core/guardrails';
+import { costTracker } from '../core/cost-tracker';
+import { modelRouter } from '../core/model-router';
+import { chainOfThought } from '../core/chain-of-thought';
+import { proactiveEngine } from '../core/proactive-engine';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -541,7 +548,16 @@ export class AgentRunner {
       progressCallback(100, 'Goal completed');
       return response.content || 'Task completed';
     });
+
+    // Wire analytics for background goals
+    const origOnComplete = backgroundWorker;
     backgroundWorker.setOnComplete(async (goal) => {
+      const duration = goal.completedAt && goal.startedAt ? goal.completedAt - goal.startedAt : undefined;
+      if (goal.status === 'completed') {
+        analyticsTracker.recordGoalComplete(goal.sessionId, goal.title, duration);
+      } else {
+        analyticsTracker.recordGoalFailed(goal.sessionId, goal.title);
+      }
       await this.gateway.sendResponse(goal.sessionId, `✅ **Background task completed:** ${goal.title}\n\n${goal.result || 'Done'}`);
     });
     backgroundWorker.setOnReport(async (sessionId, message) => {
@@ -666,6 +682,13 @@ export class AgentRunner {
       return;
     }
 
+    // 0. Guardrails — Input Validation
+    const inputCheck = guardrailManager.validateInput(msg.content);
+    if (!inputCheck.allowed) {
+      await this.gateway.sendResponse(sessionId, `⚠️ **Input blocked**: ${inputCheck.reason}`);
+      return;
+    }
+
     // 1. Add User Message to Memory
     this.memory.add(sessionId, {
       role: 'user',
@@ -673,6 +696,9 @@ export class AgentRunner {
       timestamp: Date.now(),
       metadata: msg.metadata
     });
+
+    // Track message for analytics
+    analyticsTracker.recordMessage(sessionId);
 
     // 2. Fetch Tools (MCP + Native Skills)
     let allTools: any[] = [];
@@ -824,34 +850,46 @@ ${context ? `\nSystem Context: ${context}` : ''}
           ? `${enhancedSystemPrompt}\n\n${planPrompt}`
           : enhancedSystemPrompt;
 
-        // Call Model (Dynamic Selection)
-        const currentModel = this.getModel();
+        // Call Model (Dynamic Selection w/ Model Router)
+        const routedModelId = modelRouter.isEnabled() ? modelRouter.selectModelId(msg.content) : null;
+        const currentModel = routedModelId ? this.getModelById(routedModelId) : this.getModel();
 
-        // STREAMING LOGIC
+        // STREAMING LOGIC (wrapped with retry handler)
         let response;
         if (currentModel.generateStream) {
           let streamedAnyChunk = false;
-          response = await currentModel.generateStream(prompt, finalSystemPrompt, allTools, (chunk) => {
+          response = await withModelRetry(() => currentModel.generateStream!(prompt, finalSystemPrompt, allTools, (chunk) => {
             if (!chunk) return;
             streamedAnyChunk = true;
             void this.gateway.sendStreamChunk(sessionId, chunk);
-          });
+          }), 'StreamGenerate');
           if (!streamedAnyChunk && response?.content) {
             await this.gateway.sendResponse(sessionId, response.content);
           }
         } else {
-          // Fallback for non-streaming models
-          response = await currentModel.generate(prompt, finalSystemPrompt, allTools);
+          // Fallback for non-streaming models (with retry)
+          response = await withModelRetry(
+            () => currentModel.generate(prompt, finalSystemPrompt, allTools),
+            'Generate'
+          );
           if (!currentModel.generateStream) {
             await this.gateway.sendResponse(sessionId, response.content || "");
           }
         }
 
-        // Handle Content (Save to Memory)
+        // Track cost
+        try {
+          const modelName = (currentModel as any).modelName || (currentModel as any).model || 'unknown';
+          costTracker.recordFromText(modelName, sessionId, prompt, response.content || '');
+        } catch { /* ignore cost tracking errors */ }
+
+        // Handle Content (Save to Memory) — sanitize output via guardrails
         if (response.content) {
+          const sanitized = guardrailManager.sanitizeOutput(response.content);
+          const cleanContent = sanitized.sanitized || response.content;
           this.memory.add(sessionId, {
             role: "assistant",
-            content: response.content,
+            content: cleanContent,
             timestamp: Date.now()
           });
         }
@@ -861,6 +899,11 @@ ${context ? `\nSystem Context: ${context}` : ''}
           console.log(`[AgentRunner] Executing ${response.toolCalls.length} tools in parallel...`);
           await this.gateway.sendResponse(sessionId, `${DEBUG_PREFIX} 🛠️ Executing ${response.toolCalls.length} tools...`);
           executedAnyTools = true;
+
+          // Track tool calls for analytics
+          for (const call of response.toolCalls) {
+            analyticsTracker.recordToolCall(sessionId, call.name);
+          }
 
           // Map each tool call to a Promise
           const toolPromises = response.toolCalls.map(async (call) => {

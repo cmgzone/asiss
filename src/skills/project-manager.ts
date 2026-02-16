@@ -92,7 +92,9 @@ AGENT TEAM ACTIONS:
 - agent_run (agentId) - execute agent's tasks
 - agent_run_all - run all agents in parallel
 - agent_replicate (agentId, count) - clone agent for parallel work
-- agent_status (agentId?)`;
+- agent_status (agentId?)
+- agent_collaborate (agentNames: comma-separated, goal) - multi-agent collaboration
+- agent_messages (agentId?) - view inter-agent messages`;
 
     private static readonly actionEnum = [
         'project_create',
@@ -117,7 +119,9 @@ AGENT TEAM ACTIONS:
         'agent_run',
         'agent_run_all',
         'agent_replicate',
-        'agent_status'
+        'agent_status',
+        'agent_collaborate',
+        'agent_messages'
     ] as const;
 
     inputSchema = {
@@ -154,7 +158,9 @@ AGENT TEAM ACTIONS:
             taskDescription: { type: "string" },
             count: { type: "number" },
             modelId: { type: "string" },
-            profileId: { type: "string" }
+            profileId: { type: "string" },
+            agentNames: { type: "string", description: "Comma-separated agent names or IDs for collaboration" },
+            goal: { type: "string", description: "The collaboration goal" }
         },
         required: ["action"]
     };
@@ -540,6 +546,33 @@ AGENT TEAM ACTIONS:
                         return status;
                     }
                     return agentSwarm.getStatus();
+                }
+
+                case 'agent_collaborate': {
+                    const agentNames = String(params.agentNames || params.agentName || '').split(',').map((s: string) => s.trim()).filter(Boolean);
+                    const goal = params.goal || params.taskDescription || params.description || '';
+                    if (agentNames.length < 2) return { error: 'Provide at least 2 comma-separated agent names for collaboration' };
+                    if (!goal) return { error: 'Provide a goal for the collaboration' };
+
+                    const session = await agentSwarm.collaborate(agentNames, goal);
+                    return {
+                        success: session.status === 'completed',
+                        collaborationId: session.id,
+                        status: session.status,
+                        goal: session.goal,
+                        participants: session.agentIds,
+                        messageCount: session.messages.length,
+                        result: session.result,
+                        messages: session.messages.map(m => ({
+                            from: m.fromAgentName,
+                            content: m.content.slice(0, 500)
+                        }))
+                    };
+                }
+
+                case 'agent_messages': {
+                    const messages = agentSwarm.getMessages(params.agentId, 30);
+                    return { messages };
                 }
 
                 default:
