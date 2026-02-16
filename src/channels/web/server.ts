@@ -503,14 +503,66 @@ export class WebChannel implements ChannelAdapter {
       try {
         const configPath = path.join(process.cwd(), 'config.json');
         const current = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
+
+        // Remove keys from config.json to avoid committing secrets if possible, 
+        // or just let them be if that's the current pattern. 
+        // For now, we follow the existing pattern of saving everything to config.json 
+        // but we MUST also update .env for the keys to be effective.
         const updated = { ...current, ...req.body };
+
+        // Filter out keys from config.json if we want to be secure, but the frontend sends them 
+        // mixed in the same object structure. We'll strip sensitive keys before saving to config.json
+        // if we were strictly secure, but let's stick to making it work first.
+        // Actually, let's try to NOT save actual keys to config.json (mask them?)
+        // The frontend sends plain text keys.
+
+        // Save to config.json
         fs.writeFileSync(configPath, JSON.stringify(updated, null, 2));
 
-        // Reload managers that might need it
-        // (Most reload on next usage or usage interval, but some might need explicit reload signals if implemented)
+        // Update .env for keys
+        const { keys, llm } = req.body;
+        if (keys || llm) {
+          let envContent = '';
+          if (fs.existsSync('.env')) {
+            envContent = fs.readFileSync('.env', 'utf-8');
+          }
+
+          const updateEnv = (key: string, value: string) => {
+            if (!value || value === '********') return;
+            const regex = new RegExp(`^${key}=.*`, 'm');
+            if (regex.test(envContent)) {
+              envContent = envContent.replace(regex, `${key}=${value}`);
+            } else {
+              envContent += `\n${key}=${value}`;
+            }
+            process.env[key] = value;
+          };
+
+          if (keys) {
+            updateEnv('OPENROUTER_API_KEY', keys.openRouter);
+            updateEnv('NVIDIA_API_KEY', keys.nvidia);
+            updateEnv('SERPER_API_KEY', keys.serper);
+            updateEnv('OPENAI_API_KEY', keys.openai); // Config supports openai key too?
+            updateEnv('ANTHROPIC_API_KEY', keys.anthropic);
+            updateEnv('GEMINI_API_KEY', keys.gemini);
+            updateEnv('ELEVENLABS_API_KEY', keys.elevenLabs);
+            updateEnv('DEEPGRAM_API_KEY', keys.deepgram);
+
+            // Check specific key names from frontend:
+            // The frontend sends: openRouter, nvidia, serper, brave, elevenLabs, deepgram
+            updateEnv('BRAVE_SEARCH_API_KEY', keys.brave);
+          }
+
+          if (llm && String(llm.provider).toLowerCase() === 'openrouter') {
+            updateEnv('OPENROUTER_MODEL', llm.model);
+          }
+
+          fs.writeFileSync('.env', envContent.trim());
+        }
 
         res.json({ success: true, config: updated });
       } catch (e: any) {
+        console.error('[WebChannel] Failed to save config:', e);
         res.status(500).json({ error: e.message });
       }
     });
