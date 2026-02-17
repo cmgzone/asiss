@@ -946,9 +946,24 @@ ${context ? `\nSystem Context: ${context}` : ''}
           // Process results
           for (const result of results) {
             if (result.success) {
+              // Clean up tool output for memory — remove internal fields and truncate large outputs
+              let outputForMemory = String(result.output);
+              try {
+                const parsed = JSON.parse(outputForMemory);
+                if (parsed && typeof parsed === 'object') {
+                  delete parsed._synthesisInstructions;
+                  outputForMemory = JSON.stringify(parsed);
+                }
+              } catch { /* not JSON, keep as is */ }
+
+              // Truncate very large outputs to prevent context overflow
+              if (outputForMemory.length > 8000) {
+                outputForMemory = outputForMemory.slice(0, 8000) + '\n... [truncated for context]';
+              }
+
               this.memory.add(sessionId, {
                 role: "system",
-                content: `Tool '${result.call.name}' Output: ${result.output}`,
+                content: `Tool '${result.call.name}' Output: ${outputForMemory}`,
                 timestamp: Date.now()
               });
             } else {
@@ -1116,13 +1131,48 @@ ${context ? `\nSystem Context: ${context}` : ''}
             return [lines.join("\n"), meta].filter(Boolean).join("\n");
           };
 
+          const SEARCH_TOOL_NAMES = ['serper_search', 'brave_search', 'web_search', 'deep_research'];
+
+          const formatSearchResultCompact = (result: any) => {
+            try {
+              const payload = parseJson(String(result.output));
+              if (!payload) return String(result.output).slice(0, 300);
+
+              // Remove internal synthesis instructions from display
+              delete payload._synthesisInstructions;
+
+              // Build compact summary
+              const items = payload.results || payload.sources || [];
+              const count = items.length;
+              const query = payload.query || '';
+              const titles = items.slice(0, 3).map((r: any) => r.title || r.url || '').filter(Boolean);
+
+              let summary = `Found ${count} results`;
+              if (query) summary += ` for "${query}"`;
+              if (titles.length > 0) summary += `:\n${titles.map((t: string) => `  • ${t}`).join('\n')}`;
+              if (count > 3) summary += `\n  ... and ${count - 3} more`;
+              if (payload.answerBox?.answer) summary += `\nDirect answer: ${String(payload.answerBox.answer).slice(0, 200)}`;
+              return summary;
+            } catch {
+              return String(result.output).slice(0, 300);
+            }
+          };
+
           const formatToolResult = (result: any) => {
             if (result.call?.name === "shell") {
               const rendered = formatShellResult(result);
               return `${result.success ? "✅" : "❌"} shell\n${rendered}`;
             }
+            // Compact display for search tools — don't dump raw JSON to user
+            if (result.success && SEARCH_TOOL_NAMES.includes(result.call?.name)) {
+              const compact = formatSearchResultCompact(result);
+              return `✅ ${result.call.name}\n${compact}`;
+            }
             if (result.success) {
-              return `✅ ${result.call.name}\n${String(result.output)}`;
+              const output = String(result.output);
+              // Truncate very large tool outputs in debug display
+              const displayed = output.length > 1500 ? output.slice(0, 1500) + '\n... [truncated]' : output;
+              return `✅ ${result.call.name}\n${displayed}`;
             }
             return `❌ ${result.call.name}\n${String(result.error || "Unknown error")}`;
           };
@@ -1145,6 +1195,18 @@ ${context ? `\nSystem Context: ${context}` : ''}
               await this.gateway.sendResponse(sessionId, message);
             }
           }
+
+          // After search tools, inject a synthesis instruction into memory 
+          // to ensure the model writes a proper report on the next iteration
+          const hasSearchResults = results.some(r => r.success && SEARCH_TOOL_NAMES.includes(r.call?.name));
+          if (hasSearchResults) {
+            this.memory.add(sessionId, {
+              role: "system",
+              content: "IMPORTANT: You have received search results above. You MUST now write a comprehensive, professional research report based on those results. Include sections: Executive Summary, Key Findings (with data and citations [1][2]), Detailed Analysis, and Sources. Do NOT just list links — synthesize the information into an analytical report.",
+              timestamp: Date.now()
+            });
+          }
+
 
           // Continue loop to let model interpret results
         } else {
