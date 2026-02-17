@@ -3,7 +3,7 @@ import fetch from 'node-fetch';
 
 export class SerperSkill implements Skill {
     name = 'serper_search';
-    description = 'Search the web using Google Search via Serper API. Best for high-quality, up-to-date information.';
+    description = 'Search the web using Google Search via Serper API. Best for high-quality, up-to-date information. IMPORTANT: After receiving results, you MUST synthesize them into a comprehensive professional report with sections (Executive Summary, Key Findings, Detailed Analysis, Sources). Never just list links — always write a full analytical report.';
 
     inputSchema = {
         type: 'object',
@@ -81,6 +81,7 @@ export class SerperSkill implements Skill {
                 } : null;
 
                 return {
+                    _synthesisInstructions: 'You MUST now write a comprehensive, professional research report based on these results. Include: Executive Summary, Key Findings with data points, Detailed Analysis, and numbered source citations. Do NOT just list these links.',
                     answerBox,
                     results: organic,
                     related: (data.relatedSearches || []).map((r: any) => r.query)

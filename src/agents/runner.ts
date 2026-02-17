@@ -1615,7 +1615,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
     await this.gateway.sendResponse(sessionId, `ðŸ” Deep research started for: **${query}**`);
 
     const skill = new DeepResearchSkill();
-    const data = await skill.execute({ query, maxSources: 5, maxImages: 4, maxFetchChars: 6000 });
+    const data = await skill.execute({ query, maxSources: 6, maxImages: 4, maxFetchChars: 8000 });
     if (data?.error) {
       await this.gateway.sendResponse(sessionId, `âŒ Deep research failed: ${data.error}`);
       return true;
@@ -1641,7 +1641,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
       const title = s.title || 'Untitled';
       const url = s.url || '';
       const snippet = s.snippet ? `Snippet: ${s.snippet}` : '';
-      const extract = s.content ? `Extract:\n${truncate(String(s.content), 1200)}` : '';
+      const extract = s.content ? `Extract:\n${truncate(String(s.content), 2500)}` : '';
       return `[${idx}] ${title}\nURL: ${url}${snippet ? `\n${snippet}` : ''}${extract ? `\n${extract}` : ''}`;
     }).join('\n\n');
 
@@ -1660,13 +1660,38 @@ ${context ? `\nSystem Context: ${context}` : ''}
       : '';
 
     const researchInstructions = [
-      'You are in deep research mode.',
-      'Use only the provided sources and images.',
-      'Include citations like [1], [2] for factual statements.',
-      'Provide sections: Executive Summary, Key Findings, Details, Images, Sources.',
-      'In Images, list each image with caption and URL on its own line.',
-      'Keep the output clean and readable for chat apps.'
-    ].join(' ');
+      'You are producing a PROFESSIONAL RESEARCH REPORT. This is NOT a link dump.',
+      '',
+      'STRICT FORMAT REQUIREMENTS:',
+      '## 📋 Executive Summary',
+      'Write a 3-5 sentence overview of the key findings about the topic.',
+      '',
+      '## 🔍 Key Findings',
+      'List 4-8 specific, data-driven findings. Each should include concrete facts, numbers, or statistics from the sources.',
+      'Cite sources inline like [1], [2].',
+      '',
+      '## 📊 Detailed Analysis',
+      'Write 3-5 paragraphs analyzing the topic in depth. Cross-reference multiple sources.',
+      'Include specific quotes, data points, comparisons, and expert opinions when available.',
+      'Organize by sub-topics if appropriate.',
+      '',
+      '## 💡 Recommendations / Takeaways',
+      'Provide 3-5 actionable recommendations or key takeaways based on the research.',
+      '',
+      '## 🖼️ Relevant Images',
+      'If images were found, display each with a descriptive caption.',
+      '',
+      '## 📚 Sources',
+      'List all sources numbered [1] through [N] with title and URL.',
+      '',
+      'RULES:',
+      '- Use ONLY information from the provided sources. Do not fabricate data.',
+      '- Every factual claim MUST have a source citation [N].',
+      '- Write in a professional, analytical tone.',
+      '- Use markdown formatting for readability (bold key terms, bullet points, etc.).',
+      '- The report should be comprehensive — at least 500 words.',
+      '- NEVER just list links. Always synthesize and analyze.'
+    ].join('\n');
 
     let systemPrompt = this.baseSystemPrompt;
     systemPrompt += this.buildWorkspacePrompt(msg.channel);

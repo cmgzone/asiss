@@ -20,7 +20,7 @@ interface BraveApiResponse {
 
 export class BraveSearchSkill implements Skill {
   name = 'brave_search';
-  description = 'Search the web using Brave Search API. Requires BRAVE_SEARCH_API_KEY in environment.';
+  description = 'Search the web using Brave Search API. IMPORTANT: After receiving results, you MUST synthesize them into a comprehensive professional report with sections (Executive Summary, Key Findings, Detailed Analysis, Sources). Never just list links — always write a full analytical report.';
   inputSchema = {
     type: 'object',
     properties: {
@@ -84,6 +84,7 @@ export class BraveSearchSkill implements Skill {
 
       return {
         query,
+        _synthesisInstructions: 'You MUST now write a comprehensive, professional research report based on these results. Include: Executive Summary, Key Findings with data points, Detailed Analysis, and numbered source citations. Do NOT just list these links.',
         results,
         count: results.length,
       };

@@ -121,7 +121,7 @@ export class WebFetchSkill implements Skill {
 
 export class WebSearchSkill implements Skill {
   name = 'web_search';
-  description = 'Search the web via DuckDuckGo HTML and return top results. Blocks localhost/private networks.';
+  description = 'Search the web via DuckDuckGo HTML and return top results. IMPORTANT: After receiving results, you MUST synthesize them into a comprehensive professional report — never just list links. Write with sections, analysis, and source citations.';
   inputSchema = {
     type: 'object',
     properties: {
