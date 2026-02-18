@@ -21,7 +21,7 @@ export class TelegramChannel implements ChannelAdapter {
 
   constructor(token: string) {
     this.bot = new Telegraf(token);
-    
+
     this.bot.on('text', (ctx) => {
       if (this.handler) {
         // Map Telegram message to our internal Message format
@@ -46,7 +46,7 @@ export class TelegramChannel implements ChannelAdapter {
 
     // Handle errors to prevent crash
     this.bot.catch((err) => {
-        console.error('[TelegramChannel] Error:', err);
+      console.error('[TelegramChannel] Error:', err);
     });
   }
 
@@ -71,7 +71,7 @@ export class TelegramChannel implements ChannelAdapter {
         }
       })();
       this.isStarted = true;
-      
+
       // Enable graceful stop
       process.once('SIGINT', () => this.bot.stop('SIGINT'));
       process.once('SIGTERM', () => this.bot.stop('SIGTERM'));
@@ -79,12 +79,57 @@ export class TelegramChannel implements ChannelAdapter {
   }
 
   async send(userId: string, text: string) {
+    const chatId: any = /^\d+$/.test(userId) ? Number(userId) : userId;
+
+    // Send typing action
     try {
-      const chatId: any = /^\d+$/.test(userId) ? Number(userId) : userId;
-      await this.bot.telegram.sendMessage(chatId, text);
-    } catch (err) {
+      await this.bot.telegram.sendChatAction(chatId, 'typing');
+    } catch { }
+
+    const maxLen = 4096;
+    try {
+      if (text.length <= maxLen) {
+        await this.bot.telegram.sendMessage(chatId, text, { parse_mode: undefined }); // 'Markdown' can be flaky if chars aren't perfect
+      } else {
+        // Split long messages
+        const chunks = this.splitMessage(text, maxLen);
+        for (const chunk of chunks) {
+          await this.bot.telegram.sendMessage(chatId, chunk);
+        }
+      }
+    } catch (err: any) {
       console.error(`[TelegramChannel] Failed to send message to ${userId}:`, err);
+      // Fallback: try sending without markdown if it failed
+      try {
+        if (text.length <= maxLen) {
+          await this.bot.telegram.sendMessage(chatId, text);
+        }
+      } catch (e) {
+        console.error('[TelegramChannel] Fallback failed:', e);
+      }
     }
+  }
+
+  private splitMessage(text: string, maxLen: number): string[] {
+    const chunks: string[] = [];
+    let current = '';
+    const lines = text.split('\n');
+
+    for (const line of lines) {
+      if ((current.length + line.length + 1) > maxLen) {
+        if (current) chunks.push(current);
+        current = line;
+        // If a single line is too long, force split it
+        while (current.length > maxLen) {
+          chunks.push(current.slice(0, maxLen));
+          current = current.slice(maxLen);
+        }
+      } else {
+        current = current ? `${current}\n${line}` : line;
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks;
   }
 
   async sendMedia(userId: string, media: MediaPayload) {
@@ -147,52 +192,77 @@ export class TelegramChannel implements ChannelAdapter {
     }, 900);
   }
 
-  private normalizeTelegramText(text: string) {
-    const trimmed = (text || '').trim();
-    if (!trimmed) return '';
-    const maxLen = 4096;
-    if (trimmed.length <= maxLen) return trimmed;
-    const tailLen = 3800;
-    return `…\n${trimmed.slice(trimmed.length - tailLen)}`;
-  }
-
   private async flushStream(userId: string) {
     const state = this.streamByUserId.get(userId);
     if (!state) return;
     state.timer = null;
 
-    const text = this.normalizeTelegramText(state.buffer);
-    if (!text) return;
-
-    if (state.lastSentText === text) return;
+    if (!state.buffer) return;
 
     const chatId: any = /^\d+$/.test(userId) ? Number(userId) : userId;
+    const MAX_MSG_LEN = 4000; // Leave margin for safety
+
     try {
-      if (state.messageId) {
-        await this.bot.telegram.editMessageText(chatId, state.messageId, undefined, text, {
-          link_preview_options: { is_disabled: true }
-        });
+      // If buffer fits in one message, just edit/send it
+      if (state.buffer.length <= MAX_MSG_LEN) {
+        if (state.lastSentText === state.buffer) return;
+
+        if (state.messageId) {
+          await this.bot.telegram.editMessageText(chatId, state.messageId, undefined, state.buffer, {
+            link_preview_options: { is_disabled: true }
+          });
+        } else {
+          try {
+            const sent = await this.bot.telegram.sendMessage(chatId, state.buffer, {
+              link_preview_options: { is_disabled: true }
+            });
+            state.messageId = sent.message_id;
+          } catch (e) {
+            // Retry without options if failed
+            const sent = await this.bot.telegram.sendMessage(chatId, state.buffer);
+            state.messageId = sent.message_id;
+          }
+        }
+        state.lastSentText = state.buffer;
       } else {
-        const sent = await this.bot.telegram.sendMessage(chatId, text, {
-          link_preview_options: { is_disabled: true }
-        });
-        state.messageId = sent.message_id;
+        // Buffer overflow!
+        // 1. Finalize the current message with the first N chars
+        const chunk = state.buffer.slice(0, MAX_MSG_LEN);
+        const remainder = state.buffer.slice(MAX_MSG_LEN);
+
+        if (state.messageId) {
+          await this.bot.telegram.editMessageText(chatId, state.messageId, undefined, chunk, {
+            link_preview_options: { is_disabled: true }
+          });
+        } else {
+          const sent = await this.bot.telegram.sendMessage(chatId, chunk, {
+            link_preview_options: { is_disabled: true }
+          });
+          // We don't save this ID because we are done with it instantly
+        }
+
+        // 2. Start a new message for the remainder
+        // We effectively "reset" the stream state for the new tail
+        state.buffer = remainder;
+        state.lastSentText = '';
+        state.messageId = undefined; // Force a new send next time (or immediately)
+
+        // Recursively flush the remainder (it might trigger another send immediately)
+        // Check recursion depth/stack? 
+        // Just calling flushStream again is safe since we updated state.buffer
+        // But to avoid async recursion issues, let's just trigger it via timer or direct call
+        // Direct call:
+        await this.flushStream(userId);
       }
-      state.lastSentText = text;
     } catch (e: any) {
+      console.error(`[TelegramChannel] Stream flush failed for ${userId}:`, e);
+      // Logic to recover: maybe reset buffer or messageId if "message not found"
       const msg = String(e?.message || e);
-      if (msg.toLowerCase().includes('message is not modified')) {
-        state.lastSentText = text;
-        return;
-      }
-      try {
-        const sent = await this.bot.telegram.sendMessage(chatId, text, {
-          link_preview_options: { is_disabled: true }
-        });
-        state.messageId = sent.message_id;
-        state.lastSentText = text;
-      } catch (err) {
-        console.error(`[TelegramChannel] Stream flush failed for ${userId}:`, err);
+      if (msg.includes('message is not modified')) {
+        state.lastSentText = state.buffer;
+      } else {
+        // If error is critical, maybe force new message next time
+        state.messageId = undefined;
       }
     }
   }
