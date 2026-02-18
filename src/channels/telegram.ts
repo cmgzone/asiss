@@ -192,6 +192,17 @@ export class TelegramChannel implements ChannelAdapter {
     }, 900);
   }
 
+  private getSafeCutIndex(text: string, maxLen: number): number {
+    if (text.length <= maxLen) return text.length;
+    // Look for last newline within reasonable range
+    const lastNewline = text.lastIndexOf('\n', maxLen);
+    if (lastNewline > maxLen * 0.75) return lastNewline;
+    // Look for last space
+    const lastSpace = text.lastIndexOf(' ', maxLen);
+    if (lastSpace > maxLen * 0.6) return lastSpace;
+    return maxLen;
+  }
+
   private async flushStream(userId: string) {
     const state = this.streamByUserId.get(userId);
     if (!state) return;
@@ -200,7 +211,7 @@ export class TelegramChannel implements ChannelAdapter {
     if (!state.buffer) return;
 
     const chatId: any = /^\d+$/.test(userId) ? Number(userId) : userId;
-    const MAX_MSG_LEN = 4000; // Leave margin for safety
+    const MAX_MSG_LEN = 4090; // Use near-full capacity (limit is 4096)
 
     try {
       // If buffer fits in one message, just edit/send it
@@ -225,34 +236,31 @@ export class TelegramChannel implements ChannelAdapter {
         }
         state.lastSentText = state.buffer;
       } else {
-        // Buffer overflow!
-        // 1. Finalize the current message with the first N chars
-        const chunk = state.buffer.slice(0, MAX_MSG_LEN);
-        const remainder = state.buffer.slice(MAX_MSG_LEN);
+        // Buffer overflow! Use smart splitting
+        const cutIndex = this.getSafeCutIndex(state.buffer, MAX_MSG_LEN);
+        const chunk = state.buffer.slice(0, cutIndex);
+        // Important: trim the start of remainder so we don't start new msg with space/newline
+        const remainder = state.buffer.slice(cutIndex).trimStart();
 
         if (state.messageId) {
           await this.bot.telegram.editMessageText(chatId, state.messageId, undefined, chunk, {
             link_preview_options: { is_disabled: true }
           });
         } else {
-          const sent = await this.bot.telegram.sendMessage(chatId, chunk, {
+          // Start of stream cases with huge initial chunks
+          await this.bot.telegram.sendMessage(chatId, chunk, {
             link_preview_options: { is_disabled: true }
           });
-          // We don't save this ID because we are done with it instantly
         }
 
         // 2. Start a new message for the remainder
-        // We effectively "reset" the stream state for the new tail
         state.buffer = remainder;
         state.lastSentText = '';
-        state.messageId = undefined; // Force a new send next time (or immediately)
+        state.messageId = undefined; // Force a new send next time
 
-        // Recursively flush the remainder (it might trigger another send immediately)
-        // Check recursion depth/stack? 
-        // Just calling flushStream again is safe since we updated state.buffer
-        // But to avoid async recursion issues, let's just trigger it via timer or direct call
-        // Direct call:
-        await this.flushStream(userId);
+        // Send remainder immediately by scheduling next tick (avoids deep stack)
+        // We do NOT await here to break the stack and let this function return
+        setImmediate(() => { void this.flushStream(userId); });
       }
     } catch (e: any) {
       console.error(`[TelegramChannel] Stream flush failed for ${userId}:`, e);
