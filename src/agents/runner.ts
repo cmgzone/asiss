@@ -1197,12 +1197,12 @@ ${context ? `\nSystem Context: ${context}` : ''}
           }
 
           // After search tools, inject a synthesis instruction into memory 
-          // to ensure the model writes a proper report on the next iteration
+          // to ensure the model writes a proper response on the next iteration
           const hasSearchResults = results.some(r => r.success && SEARCH_TOOL_NAMES.includes(r.call?.name));
           if (hasSearchResults) {
             this.memory.add(sessionId, {
               role: "system",
-              content: "IMPORTANT: You have received search results above. You MUST now write a comprehensive, professional research report based on those results. Include sections: Executive Summary, Key Findings (with data and citations [1][2]), Detailed Analysis, and Sources. Do NOT just list links — synthesize the information into an analytical report.",
+              content: "Search results received above. If the user asked for a simple fact, answer clearly and directly. If they asked for research/analysis/news, you MUST write a comprehensive professional report (Exec Summary, Findings, Analysis, Sources). Do NOT just list links.",
               timestamp: Date.now()
             });
           }
