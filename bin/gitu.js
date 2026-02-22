@@ -43,14 +43,29 @@ function runScript(command, args) {
     process.exit(1);
   }
 
-  const nodeArgs = target.useTsRuntime
-    ? ['-r', 'ts-node/register/transpile-only', target.file, ...args]
-    : [target.file, ...args];
-
-  const child = spawn(process.execPath, nodeArgs, {
-    stdio: 'inherit',
-    env: process.env
-  });
+  let child;
+  if (target.useTsRuntime) {
+    const tsNodeBin = path.join(
+      __dirname,
+      '..',
+      'node_modules',
+      '.bin',
+      process.platform === 'win32' ? 'ts-node.cmd' : 'ts-node'
+    );
+    if (!fs.existsSync(tsNodeBin)) {
+      console.error('[gitu] ts-node runtime is missing. Reinstall package.');
+      process.exit(1);
+    }
+    child = spawn(tsNodeBin, ['--transpile-only', target.file, ...args], {
+      stdio: 'inherit',
+      env: process.env
+    });
+  } else {
+    child = spawn(process.execPath, [target.file, ...args], {
+      stdio: 'inherit',
+      env: process.env
+    });
+  }
 
   child.on('error', (error) => {
     console.error(`[gitu] Failed to launch: ${error.message}`);
