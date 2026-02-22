@@ -1,6 +1,6 @@
 {
   "name": "gitu",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local AI assistant with web chat, automation, and multi-channel integrations.",
   "main": "dist/index.js",
   "bin": {
