@@ -58,7 +58,8 @@ function runScript(command, args) {
     }
     child = spawn(tsNodeBin, ['--transpile-only', target.file, ...args], {
       stdio: 'inherit',
-      env: process.env
+      env: process.env,
+      shell: process.platform === 'win32'
     });
   } else {
     child = spawn(process.execPath, [target.file, ...args], {
