@@ -1,18 +1,30 @@
 {
   "name": "gitu",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Local AI assistant with web chat, automation, and multi-channel integrations.",
+  "main": "dist/index.js",
+  "bin": {
+    "gitu": "bin/gitu.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    ".env.example",
+    "A2A.md",
+    "INSTALL_GITHUB.md"
+  ],
   "scripts": {
     "dev": "ts-node src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-runtime-assets.js",
+    "prepare": "npm run build",
     "start": "node dist/index.js",
     "start:prod": "npm run build && pm2 start ecosystem.config.js",
     "stop": "pm2 stop gitu",
     "restart": "pm2 restart gitu",
     "logs": "pm2 logs gitu",
     "status": "pm2 status",
-    "wizard": "ts-node src/cli/wizard.ts",
+    "wizard": "npm run build && node dist/cli/wizard.js",
+    "wizard:dev": "ts-node src/cli/wizard.ts",
     "wizzard": "npm run wizard",
     "nvidia:models": "ts-node src/scripts/nvidia_list_models.ts",
     "playwright:install": "npx playwright install chromium",
