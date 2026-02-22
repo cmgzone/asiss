@@ -5,8 +5,14 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const targets = {
-  start: path.join(__dirname, '..', 'dist', 'index.js'),
-  wizard: path.join(__dirname, '..', 'dist', 'cli', 'wizard.js')
+  start: {
+    dist: path.join(__dirname, '..', 'dist', 'index.js'),
+    src: path.join(__dirname, '..', 'src', 'index.ts')
+  },
+  wizard: {
+    dist: path.join(__dirname, '..', 'dist', 'cli', 'wizard.js'),
+    src: path.join(__dirname, '..', 'src', 'cli', 'wizard.ts')
+  }
 };
 
 function printHelp() {
@@ -18,13 +24,30 @@ function printHelp() {
   console.log('  help    Show this help');
 }
 
-function runScript(target, args) {
-  if (!fs.existsSync(target)) {
-    console.error('[gitu] Build artifacts are missing. Reinstall or run `npm run build`.');
+function resolveTarget(command) {
+  const entry = targets[command];
+  if (!entry) return null;
+  if (fs.existsSync(entry.dist)) {
+    return { file: entry.dist, useTsRuntime: false };
+  }
+  if (fs.existsSync(entry.src)) {
+    return { file: entry.src, useTsRuntime: true };
+  }
+  return null;
+}
+
+function runScript(command, args) {
+  const target = resolveTarget(command);
+  if (!target) {
+    console.error('[gitu] Runtime files are missing. Reinstall package.');
     process.exit(1);
   }
 
-  const child = spawn(process.execPath, [target, ...args], {
+  const nodeArgs = target.useTsRuntime
+    ? ['-r', 'ts-node/register/transpile-only', target.file, ...args]
+    : [target.file, ...args];
+
+  const child = spawn(process.execPath, nodeArgs, {
     stdio: 'inherit',
     env: process.env
   });
@@ -43,11 +66,11 @@ const command = process.argv[2];
 const args = process.argv.slice(3);
 
 if (!command) {
-  runScript(targets.start, []);
+  runScript('start', []);
 } else if (command === 'start') {
-  runScript(targets.start, args);
+  runScript('start', args);
 } else if (command === 'wizard') {
-  runScript(targets.wizard, args);
+  runScript('wizard', args);
 } else if (command === 'help' || command === '--help' || command === '-h') {
   printHelp();
 } else {
