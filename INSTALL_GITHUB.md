@@ -24,6 +24,13 @@ npx github:OWNER/REPO wizard
 npx github:OWNER/REPO start
 ```
 
+## Windows npm 11 fallback (if `github:OWNER/REPO` creates a broken `gitu` command)
+Use the GitHub tarball URL and skip install scripts:
+
+```bash
+npm install -g --ignore-scripts https://codeload.github.com/OWNER/REPO/tar.gz/refs/heads/main
+```
+
 ## Notes
 - `gitu wizard` creates/updates `config.json` and `.env` in your current folder.
 - `gitu start` launches the assistant and web UI (default: `http://localhost:3000`).
