@@ -7,6 +7,7 @@ import { TelegramChannel } from '../channels/telegram';
 import { DiscordChannel } from '../channels/discord';
 import { SlackChannel } from '../channels/slack';
 import { WhatsAppChannel } from '../channels/whatsapp';
+import { WebChannel } from '../channels/web/server';
 import { AuthManager } from '../core/auth';
 import chalk from 'chalk';
 import dotenv from 'dotenv';
@@ -235,33 +236,45 @@ async function runWizard() {
     dotenv.config({ override: true });
 
     const gateway = new Gateway();
+    let webChannel: WebChannel | null = null;
 
     if (answers.channels.includes('Console (CLI)')) {
       gateway.registerChannel(new ConsoleChannel());
     }
 
-    // Note: Web Channel would be registered here if implemented, but we rely on Gateway/Index logic mostly
-    // For now we just focus on the CLI look and feel update.
-    // The Gateway logic in src/index.ts handles the actual registration based on config.
+    if (answers.channels.includes('Web Interface (Chat)')) {
+      webChannel = new WebChannel(3000);
+      gateway.registerChannel(webChannel);
+    }
 
     if (answers.channels.includes('Telegram') && process.env.TELEGRAM_BOT_TOKEN) {
       gateway.registerChannel(new TelegramChannel(process.env.TELEGRAM_BOT_TOKEN));
+    } else if (answers.channels.includes('Telegram')) {
+      console.warn('[Gitubot] Telegram selected but TELEGRAM_BOT_TOKEN is missing in .env');
     }
 
     if (answers.channels.includes('Discord') && process.env.DISCORD_BOT_TOKEN) {
       gateway.registerChannel(new DiscordChannel(process.env.DISCORD_BOT_TOKEN));
+    } else if (answers.channels.includes('Discord')) {
+      console.warn('[Gitubot] Discord selected but DISCORD_BOT_TOKEN is missing in .env');
     }
 
     if (answers.channels.includes('Slack') && process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
       gateway.registerChannel(new SlackChannel(process.env.SLACK_BOT_TOKEN, process.env.SLACK_APP_TOKEN));
+    } else if (answers.channels.includes('Slack')) {
+      console.warn('[Gitubot] Slack selected but SLACK_BOT_TOKEN or SLACK_APP_TOKEN is missing in .env');
     }
 
     if (answers.channels.includes('WhatsApp')) {
+      console.log(chalk.yellow('[Gitubot] WhatsApp selected. Scan QR in console (or Web Settings) on first startup.'));
       gateway.registerChannel(new WhatsAppChannel());
     }
 
     console.log(chalk.cyan(`\n[Gitubot] Initialization sequence started for ${answers.name}...`));
     await gateway.start();
+    if (webChannel) {
+      console.log(chalk.green('[Gitubot] Web chat URL: http://localhost:3000'));
+    }
   }
 }
 

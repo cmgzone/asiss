@@ -31,24 +31,35 @@ async function main() {
   const gateway = new Gateway();
   
   // Load config if exists
-  let config = { channels: ['Console (CLI)', 'Web Interface (Chat)'] };
+  const defaultChannels = ['Web Interface (Chat)'];
+  let config: any = { channels: [...defaultChannels] };
   if (fs.existsSync('config.json')) {
-    config = JSON.parse(fs.readFileSync('config.json', 'utf-8'));
+    const raw = JSON.parse(fs.readFileSync('config.json', 'utf-8'));
+    config = { ...config, ...raw };
   }
+  const channels = Array.isArray(config.channels)
+    ? config.channels.filter((name: unknown): name is string => typeof name === 'string')
+    : [];
+  if (channels.length === 0) {
+    channels.push(...defaultChannels);
+    console.warn('[System] No channels configured; defaulting to Web Interface (Chat).');
+  }
+  const hasChannel = (name: string) => channels.includes(name);
 
   // Register Console Channel
-  if (config.channels.includes('Console (CLI)')) {
+  if (hasChannel('Console (CLI)')) {
     gateway.registerChannel(new ConsoleChannel());
   }
 
   // Register Web Channel
-  if (config.channels.includes('Web Interface (Chat)')) {
+  if (hasChannel('Web Interface (Chat)')) {
+      console.log('[System] Web Interface enabled');
       gateway.registerChannel(new WebChannel(3000));
   }
 
   // Register A2A Channel (Agent-to-Agent)
   const a2aConfig = typeof (config as any).a2a === 'object' ? (config as any).a2a : {};
-  const a2aEnabled = Boolean(a2aConfig?.enabled) || config.channels.includes('A2A');
+  const a2aEnabled = Boolean(a2aConfig?.enabled) || hasChannel('A2A');
   if (a2aEnabled) {
       const authTokenEnv = typeof a2aConfig?.authTokenEnv === 'string' ? a2aConfig.authTokenEnv : 'A2A_AUTH_TOKEN';
       const authToken = process.env[authTokenEnv] || a2aConfig?.authToken;
@@ -75,7 +86,7 @@ async function main() {
 
   // Register Telegram Channel
   const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
-  if (config.channels.includes('Telegram') || telegramToken) {
+  if (hasChannel('Telegram') || telegramToken) {
       if (telegramToken) {
           console.log('[System] Telegram enabled');
           gateway.registerChannel(new TelegramChannel(telegramToken));
@@ -86,8 +97,9 @@ async function main() {
 
   // Register Discord Channel
   const discordToken = process.env.DISCORD_BOT_TOKEN;
-  if (config.channels.includes('Discord') || discordToken) {
+  if (hasChannel('Discord') || discordToken) {
       if (discordToken) {
+          console.log('[System] Discord enabled');
           gateway.registerChannel(new DiscordChannel(discordToken));
       } else {
           console.warn('[System] Discord channel enabled but DISCORD_BOT_TOKEN is missing in .env');
@@ -97,8 +109,9 @@ async function main() {
   // Register Slack Channel
   const slackBotToken = process.env.SLACK_BOT_TOKEN;
   const slackAppToken = process.env.SLACK_APP_TOKEN;
-  if (config.channels.includes('Slack') || (slackBotToken && slackAppToken)) {
+  if (hasChannel('Slack') || (slackBotToken && slackAppToken)) {
       if (slackBotToken && slackAppToken) {
+          console.log('[System] Slack enabled');
           gateway.registerChannel(new SlackChannel(slackBotToken, slackAppToken));
       } else {
           console.warn('[System] Slack channel enabled but SLACK_BOT_TOKEN or SLACK_APP_TOKEN is missing in .env');
@@ -107,7 +120,8 @@ async function main() {
 
   // Register WhatsApp Channel
   // No token needed, relies on QR scan
-  if (config.channels.includes('WhatsApp')) {
+  if (hasChannel('WhatsApp')) {
+      console.log('[System] WhatsApp enabled (QR scan required on first run)');
       gateway.registerChannel(new WhatsAppChannel());
   }
 
