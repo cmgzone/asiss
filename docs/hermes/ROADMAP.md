@@ -128,5 +128,15 @@ directly through the index's exportedSymbols map ("fix authenticate()" ->
 src/auth/auth.ts, exact + case-insensitive) via `ContextEngine.resolveSymbols`,
 and a `symbol` skill answers "where does this symbol live?" with the defining
 files, kinds, and lines.
-Phase 9 next: keep the index warm — a lightweight watcher or on-demand
-refresh in the mission loop so symbols never go stale during long sessions.
+Phase 9 is done: the index stays warm on demand. `ContextEngine.refreshRepository`
+re-runs the Phase 8 incremental refresh (only changed files re-parsed, then
+re-saved) or rebuilds the lightweight index, throttled per root (default 5s,
+`repository.warm.throttleMs`, fully off via `repository.warm.enabled: false`,
+bypassed with `{ force: true }`). AgentRunner warms the workspace before
+rendering the repository section each turn, and the symbol skill force-warms
+before every explicit query, so /symbol never answers from a stale index.
+Verified by `scripts/smoke-repo-index.ts` (11 sections: + warm refresh,
+throttle, force, opt-out, lightweight rebuild, skill self-refresh).
+Phase 10 next: keep the execution loop honest — step/session limits already
+exist; add a repository-aware retry policy that suggests the files matched by
+the goal when a coding step fails.

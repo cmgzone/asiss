@@ -1779,6 +1779,9 @@ export class AgentRunner {
           const repoWorkspace = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
           if (repoWorkspace) {
             try {
+              // Phase 9: warm the index on demand so per-goal hints and the
+              // symbol skill never read a stale index during the mission.
+              this.contextEngine.refreshRepository(repoWorkspace);
               const repoText = this.contextEngine.repositorySection(repoWorkspace, msg.content);
               if (repoText) systemPrompt += `\n\n${repoText}`;
             } catch (contextError: any) {

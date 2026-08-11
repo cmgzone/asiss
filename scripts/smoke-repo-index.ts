@@ -387,6 +387,63 @@ async function main(): Promise<void> {
     }
   }
 
+
+  // ---- 11. Phase 9 warm: on-demand index refresh ----
+  {
+    const root = tmpRepo('repo-index-11-');
+    const dataRoot = tmpRepo('repo-data-11-');
+    try {
+      const auth = write(root, 'src/auth/auth.ts', 'export function authenticate(u: string) { return true; }\n');
+      write(root, 'src/app.ts', "export function main() { return 1; }\n");
+      const engine = new ContextEngine({ config: { repository: { dataRoot, warm: { throttleMs: 60000 } } } });
+
+      // Build (caches) the index, then add a NEW exported symbol to auth.ts.
+      engine.indexRepository(root);
+      assert.ok(!engine.resolveSymbols(root, 'logout').length, 'logout unknown before refresh');
+      // Establish the warm baseline.
+      assert.strictEqual(engine.refreshRepository(root, { force: true }), true, 'baseline warm ran');
+      fs.appendFileSync(auth, '\nexport function logout() { return true; }\n');
+
+      // Throttled refresh is a no-op within the window.
+      assert.strictEqual(engine.refreshRepository(root), false, 'throttled refresh skipped');
+
+      // Forced refresh re-parses the changed file and updates the cache.
+      assert.strictEqual(engine.refreshRepository(root, { force: true }), true, 'forced refresh ran');
+      const after = engine.resolveSymbols(root, 'logout');
+      assert.strictEqual(after.length, 1, 'logout resolves after warm refresh');
+      assert.strictEqual(after[0].files[0].path, 'src/auth/auth.ts', 'logout in the right file');
+
+      // The persisted index on disk was updated too (next load sees it).
+      const loaded = loadRepositoryIndex(root, dataRoot)!;
+      assert.ok(loaded.exportedSymbols['logout'], 'persisted index refreshed on disk');
+
+      // warm.enabled === false fully disables refresh.
+      const cold = new ContextEngine({ config: { repository: { dataRoot, warm: { enabled: false } } } });
+      cold.indexRepository(root);
+      const authPath = path.join(root, 'src/app.ts');
+      fs.appendFileSync(authPath, '\nexport function helper() { return 2; }\n');
+      assert.strictEqual(cold.refreshRepository(root, { force: true }), false, 'warm disabled -> no refresh');
+      assert.ok(!cold.resolveSymbols(root, 'helper').length, 'cache stays stale when warm disabled');
+
+      // Lightweight index (persistent: false) rebuilds on refresh.
+      const light = new ContextEngine({ config: { repository: { persistent: false, dataRoot } } });
+      light.indexRepository(root);
+      write(root, 'src/new.ts', 'export function fresh() { return 3; }\n');
+      assert.strictEqual(light.refreshRepository(root, { force: true }), true, 'lightweight refresh ran');
+      assert.ok(light.relevantFiles(root, 'fresh', 4).some((f: any) => f.path === 'src/new.ts'), 'new file picked up by lightweight refresh');
+
+      // SymbolSkill self-refreshes: after the file changed, a query finds it.
+      write(root, 'src/api.ts', 'export function session() { return "s"; }\n');
+      const skill = new SymbolSkill({ contextEngine: engine });
+      const res = await skill.execute({ symbol: 'session', __workspacePath: root });
+      assert.strictEqual(res.count, 1, 'skill sees fresh symbols without explicit warm');
+      assert.strictEqual(res.results[0].files[0].path, 'src/api.ts', 'skill resolves the new file');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+  }
+
   console.log(JSON.stringify({
     symbols: true,
     imports: true,
@@ -397,7 +454,8 @@ async function main(): Promise<void> {
     incrementalRefresh: true,
     engineIntegration: true,
     goalHints: true,
-    symbolResolution: true
+    symbolResolution: true,
+    warmRefresh: true
   }));
 }
 

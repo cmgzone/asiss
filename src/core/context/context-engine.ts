@@ -38,8 +38,10 @@ import {
   matchBySymbols,
   PersistentIndexOptions,
   PersistentRepositoryIndex,
+  refreshRepositoryIndex,
   renderGoalFileHints,
   resolveSymbols as resolveIndexSymbols,
+  saveRepositoryIndex,
   SymbolResolution
 } from './repo-index';
 
@@ -47,7 +49,7 @@ export interface ContextEngineConfig {
   /** Token budget for the assembled context. Default 32000. */
   maxTokens?: number;
   /** Repository context: surfaced when enabled and a workspace exists. */
-  repository?: { enabled?: boolean; persistent?: boolean; maxFiles?: number; maxDepth?: number; maxListed?: number; dataRoot?: string; goalHints?: { enabled?: boolean; maxFiles?: number } };
+  repository?: { enabled?: boolean; persistent?: boolean; maxFiles?: number; maxDepth?: number; maxListed?: number; dataRoot?: string; goalHints?: { enabled?: boolean; maxFiles?: number }; warm?: { enabled?: boolean; throttleMs?: number } };
   /** Summarize long sections via an injectable model. */
   summarize?: { enabled?: boolean; maxChars?: number };
   /** Cap history render truncation (chars per memory). Default 20000. */
@@ -72,6 +74,7 @@ export class ContextEngine {
   private readonly config: ContextEngineConfig;
   private readonly injectedIndex?: RepositoryIndex;
   private readonly indexCache = new Map<string, RepositoryIndex>();
+  private readonly lastWarm = new Map<string, number>();
 
   constructor(options: ContextEngineOptions = {}) {
     this.summarizer = options.summarizer;
@@ -134,6 +137,46 @@ export class ContextEngine {
     }
     if (index) this.indexCache.set(root, index);
     return index;
+  }
+
+  /**
+   * Phase 9 warm: refresh the repository index for a workspace on demand.
+   * Incremental for the persistent index (only files whose mtime/size changed
+   * are re-parsed, then re-saved); rebuilds the lightweight index. Throttled
+   * per root (default 5s) unless `force` — callers like the symbol skill pass
+   * force so an explicit query never reads a stale index. Returns true when a
+   * refresh actually ran.
+   */
+  refreshRepository(root: string, options: { force?: boolean } = {}): boolean {
+    if (!root) return false;
+    const warm = this.config.repository?.warm;
+    if (warm?.enabled === false) return false;
+    const throttleMs = warm?.throttleMs ?? 5000;
+    const now = Date.now();
+    if (!options.force && now - (this.lastWarm.get(root) || 0) < throttleMs) return false;
+    this.lastWarm.set(root, now);
+
+    const index = this.indexCache.get(root);
+    if (index && isPersistentIndex(index)) {
+      try {
+        const refreshed = refreshRepositoryIndex(index, root, this.persistentOptions());
+        saveRepositoryIndex(refreshed, this.dataRoot());
+        this.indexCache.set(root, refreshed);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    if (index) {
+      try {
+        this.indexCache.set(root, indexWorkspace(root, this.repositoryOptions()));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    // Nothing cached: the normal build path loads/persists a fresh index.
+    return Boolean(this.indexRepository(root));
   }
 
   /**
