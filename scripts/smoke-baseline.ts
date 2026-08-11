@@ -181,6 +181,38 @@ async function main() {
     const task: Task | undefined = reloaded.get(created.id);
     assert.ok(task && task.verification.length === 0 && task.artifacts.length === 0);
 
+    // ---- 10. New: host-driven lifecycle (start / completeToolExecution / failTask) ----
+    const bus4 = new TaskEventBus();
+    const events4: TaskEvent[] = [];
+    bus4.on('*', (event) => { events4.push(event); });
+    const engine4 = new TaskEngine({ store, bus: bus4 });
+    const host = await engine4.create({ goal: 'Host-driven mission' });
+    await engine4.analyze(host.id);
+    await engine4.plan(host.id);
+    await engine4.start(host.id);
+    assert.equal(engine4.require(host.id).status, 'EXECUTING');
+    const exec = await engine4.recordToolExecution(host.id, {
+      name: 'shell',
+      arguments: { command: 'npm test' },
+      status: 'STARTED'
+    });
+    const doneExec = await engine4.completeToolExecution(host.id, exec.id, {
+      status: 'COMPLETED',
+      output: 'all tests passed'
+    });
+    assert.equal(doneExec?.status, 'COMPLETED');
+    assert.equal(typeof doneExec?.durationMs, 'number');
+    const failedExec = await engine4.recordToolExecution(host.id, { name: 'git', status: 'STARTED' });
+    await engine4.completeToolExecution(host.id, failedExec.id, { status: 'FAILED', error: 'merge conflict' });
+    await engine4.failTask(host.id, 'verification failed', 'EXECUTING');
+    assert.equal(engine4.require(host.id).status, 'FAILED');
+    assert.equal(engine4.require(host.id).failures.length, 1);
+    assert.equal(engine4.require(host.id).toolExecutions.length, 2);
+    assert.equal(engine4.require(host.id).toolExecutions[1].status, 'FAILED');
+    for (const name of ['ToolStarted', 'ToolCompleted', 'ToolFailed', 'TaskFailed']) {
+      assert.ok(events4.some((e) => e.name === name), `expected event ${name}`);
+    }
+
     console.log(JSON.stringify({
       taskContext: true,
       checkpoints: true,
@@ -190,7 +222,8 @@ async function main() {
       dependencies: true,
       pauseResumeCancel: true,
       childTasks: true,
-      persistence: true
+      persistence: true,
+      hostDrivenLifecycle: true
     }));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

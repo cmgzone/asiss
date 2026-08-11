@@ -77,6 +77,7 @@ import { chainOfThought } from '../core/chain-of-thought';
 import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
+import { taskEngine } from '../core/task';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -1509,6 +1510,65 @@ export class AgentRunner {
     return true;
   }
 
+  // Canonical Task (Phase 2): create a Task for a mission and advance it to
+  // EXECUTING. The engine owns the lifecycle + records; AgentRunner keeps
+  // executing as before. Never throws — the mission continues even if the
+  // task layer fails.
+  private async beginMissionTask(input: {
+    sessionId: string;
+    channel: string;
+    content: string;
+    projectId?: string;
+    workspacePath?: string;
+    config: any;
+    background: boolean;
+  }): Promise<string | null> {
+    try {
+      const agentCfg = input.config?.agent || {};
+      const maxTurns = Number.isFinite(Number(agentCfg.maxTurns)) ? Math.max(1, Math.floor(Number(agentCfg.maxTurns))) : undefined;
+      const maxToolCalls = Number.isFinite(Number(agentCfg.maxToolCalls)) ? Math.max(4, Math.floor(Number(agentCfg.maxToolCalls))) : undefined;
+      const task = await taskEngine.create({
+        goal: String(input.content).slice(0, 2_000),
+        kind: 'mission',
+        priority: input.background ? 'low' : 'normal',
+        sessionId: input.sessionId,
+        context: {
+          sessionId: input.sessionId,
+          channel: input.channel,
+          userGoal: String(input.content).slice(0, 2_000),
+          projectId: input.projectId,
+          workspacePath: input.workspacePath,
+          input: String(input.content)
+        },
+        constraints: { maxTurns, maxToolCalls, workspacePath: input.workspacePath },
+        metadata: { source: 'agent-runner', background: input.background }
+      });
+      await taskEngine.analyze(task.id);
+      await taskEngine.plan(task.id);
+      await taskEngine.start(task.id);
+      return task.id;
+    } catch (error: any) {
+      console.warn('[TaskEngine] begin mission task failed (continuing without task):', error?.message || error);
+      return null;
+    }
+  }
+
+  // Finalize the mission Task on every loop exit. Never throws.
+  private async finalizeMissionTask(taskId: string, completed: boolean, summary: string, error?: string): Promise<void> {
+    try {
+      if (completed) {
+        await taskEngine.complete(taskId, {
+          status: 'SUCCESS',
+          summary: String(summary || '').slice(0, 1_000)
+        });
+      } else {
+        await taskEngine.failTask(taskId, error || 'Mission did not complete.', 'EXECUTING');
+      }
+    } catch (taskError: any) {
+      console.warn('[TaskEngine] finalize mission task failed:', taskError?.message || taskError);
+    }
+  }
+
   async processMessage(sessionId: string, msg: Message) {
     console.log(`[AgentRunner] Processing message for session ${sessionId}`);
     const isBackgroundMessage = msg.channel === 'background' || Boolean(msg.metadata?.backgroundGoalId);
@@ -1595,6 +1655,21 @@ export class AgentRunner {
 
     // Multi-turn Loop for Tool Execution
     const config = this.loadConfig();
+
+    // Canonical Task (Phase 2): every mission belongs to a Task. The engine
+    // owns the lifecycle + records while AgentRunner keeps executing.
+    const missionTaskId = await this.beginMissionTask({
+      sessionId,
+      channel: msg.channel,
+      content: msg.content,
+      projectId: typeof msg.metadata?.projectId === 'string' ? msg.metadata.projectId.trim() : undefined,
+      workspacePath: this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath),
+      config,
+      background: isBackgroundMessage
+    });
+    let missionCompleted = false;
+    let missionSummary = '';
+    let missionError = '';
 
     // 2. Fetch Tools (MCP + Native Skills), capped and deduplicated so the
     //    advertised list stays bounded and name conflicts resolve predictably
@@ -1692,6 +1767,7 @@ export class AgentRunner {
     let stoppedByStepLimit = true;
     let autoContinueCount = 0;
     let continuationBatch = 0;
+    try {
     for (; ;) {
       stoppedByStepLimit = true;
       for (let i = 0; i < maxTurns; i++) {
@@ -1878,6 +1954,15 @@ ${context ? `\nSystem Context: ${context}` : ''}
               Number(usage.cacheReadTokens) || 0,
               Number(usage.cacheWriteTokens) || 0
             );
+            if (missionTaskId) {
+              try {
+                await taskEngine.recordCost(missionTaskId, {
+                  model: modelName,
+                  tokensIn: Number(usage.promptTokens) || 0,
+                  tokensOut: Number(usage.completionTokens) || 0
+                });
+              } catch { /* ignore task cost tracking errors */ }
+            }
           } else {
             costTracker.recordFromText(modelName, sessionId, prompt, response.content || '');
           }
@@ -1910,6 +1995,9 @@ ${context ? `\nSystem Context: ${context}` : ''}
                 metadata: { final: true, completed: Boolean(candidate), toolBudgetStopped: true }
               });
               await this.deliverFinalResponse(sessionId, finalText, turnRunId, turnMessageId, Boolean(candidate));
+              missionCompleted = Boolean(candidate);
+              missionSummary = finalText;
+              if (!candidate) missionError = 'Tool budget reached before a reliable final answer.';
               stoppedByStepLimit = false;
               break;
             }
@@ -2006,6 +2094,9 @@ ${context ? `\nSystem Context: ${context}` : ''}
               metadata: { final: true, completed: false, blocked: true }
             });
             await this.deliverFinalResponse(sessionId, blockedText, turnRunId, turnMessageId, false);
+            missionCompleted = false;
+            missionSummary = blockedText;
+            missionError = reason;
             break;
           }
 
@@ -2077,12 +2168,25 @@ ${context ? `\nSystem Context: ${context}` : ''}
           // (recordToolCallResult) so usage counts are exact: calls = ok + err.
 
           const executeToolCall = async (call: any) => {
+            let taskToolExecutionId: string | undefined;
             try {
               await hookManager.emit('before_tool', {
                 tool: call.name,
                 arguments: call.arguments || {},
                 projectId: msg.metadata?.projectId || null
               }, sessionId);
+              if (missionTaskId) {
+                try {
+                  const taskTool = await taskEngine.recordToolExecution(missionTaskId, {
+                    name: call.name,
+                    arguments: call.arguments || {},
+                    status: 'STARTED'
+                  });
+                  taskToolExecutionId = taskTool.id;
+                } catch (taskError: any) {
+                  console.warn('[TaskEngine] record tool start failed:', taskError?.message || taskError);
+                }
+              }
               let output;
               const nativeSkill = SkillRegistry.get(call.name);
 
@@ -2108,6 +2212,16 @@ ${context ? `\nSystem Context: ${context}` : ''}
                       `Before ${call.name}: ${call.name === 'shell' ? shellCommand : 'file patch'}`,
                       sessionId
                     );
+                    if (missionTaskId) {
+                      try {
+                        await taskEngine.recordCheckpoint(missionTaskId, {
+                          id: automaticCheckpoint.id,
+                          reason: automaticCheckpoint.reason
+                        });
+                      } catch (taskError: any) {
+                        console.warn('[TaskEngine] record checkpoint failed:', taskError?.message || taskError);
+                      }
+                    }
                   } catch (checkpointError: any) {
                     if (checkpointConfig.required === true) throw checkpointError;
                     console.warn(`[Checkpoints] Could not create automatic checkpoint: ${checkpointError?.message || checkpointError}`);
@@ -2240,6 +2354,17 @@ ${context ? `\nSystem Context: ${context}` : ''}
                 success: true,
                 output: String(output || '').slice(0, 5_000)
               }, sessionId);
+              if (missionTaskId && taskToolExecutionId) {
+                try {
+                  const cappedOutput = typeof output === 'string' ? output.slice(0, 20_000) : output;
+                  await taskEngine.completeToolExecution(missionTaskId, taskToolExecutionId, {
+                    status: 'COMPLETED',
+                    output: cappedOutput
+                  });
+                } catch (taskError: any) {
+                  console.warn('[TaskEngine] record tool completion failed:', taskError?.message || taskError);
+                }
+              }
               return completed;
             } catch (err: any) {
               analyticsTracker.recordToolCallResult(sessionId, call.name, false);
@@ -2247,6 +2372,16 @@ ${context ? `\nSystem Context: ${context}` : ''}
                 tool: call.name,
                 error: err?.message || String(err)
               }, sessionId);
+              if (missionTaskId && taskToolExecutionId) {
+                try {
+                  await taskEngine.completeToolExecution(missionTaskId, taskToolExecutionId, {
+                    status: 'FAILED',
+                    error: err?.message || String(err)
+                  });
+                } catch (taskError: any) {
+                  console.warn('[TaskEngine] record tool failure failed:', taskError?.message || taskError);
+                }
+              }
               return {
                 success: false,
                 call: call,
@@ -2290,6 +2425,12 @@ ${context ? `\nSystem Context: ${context}` : ''}
             if (result.success && this.isVerificationToolCall(result.call)) {
               lastVerificationSequence = toolSequence;
             }
+          }
+          if (missionTaskId) {
+            try {
+              const batchPct = Math.min(90, 10 + Math.round((totalToolCalls / Math.max(1, maxToolCalls)) * 80));
+              await taskEngine.recordProgress(missionTaskId, batchPct, `Tool batch complete (${results.length} tool${results.length === 1 ? '' : 's'})`);
+            } catch { /* ignore task progress errors */ }
           }
 
           for (const result of results) {
@@ -2682,6 +2823,11 @@ ${context ? `\nSystem Context: ${context}` : ''}
             !completionBlocked,
             turnReasoning
           );
+          missionCompleted = !completionBlocked;
+          missionSummary = cleanContent;
+          if (completionBlocked) {
+            missionError = 'Required tool work or verification did not succeed.';
+          }
           if (!isBackgroundMessage) {
             void this.learning.recordInteraction(sessionId, msg.content, cleanContent);
           }
@@ -2717,7 +2863,13 @@ ${context ? `\nSystem Context: ${context}` : ''}
         fallbackNow: `Automation step limit reached (${maxTurns} turns).`,
         fallbackNext: 'Send "continue" to keep going, or increase/remove config.agent.maxTurns in config.json.'
       });
+      missionError = `Automation step limit reached (${maxTurns} turns).`;
       break;
+    }
+    } finally {
+      if (missionTaskId) {
+        await this.finalizeMissionTask(missionTaskId, missionCompleted, missionSummary, missionError);
+      }
     }
   }
 

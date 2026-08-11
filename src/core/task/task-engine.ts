@@ -212,13 +212,28 @@ export class TaskEngine {
       return { success: false, blocked: true, error: `Dependencies not completed: ${missing.join(', ')}` };
     }
 
+    await this.start(taskId);
+    return this.runExecution(taskId, options);
+  }
+
+  /**
+   * READY -> EXECUTING without running an executor. For hosts (e.g.
+   * AgentRunner in Phase 2) that drive the execution loop themselves and only
+   * use the engine to own the lifecycle + records.
+   */
+  async start(taskId: string): Promise<Task> {
+    const record = this.require(taskId);
+    const entity = new TaskEntity(record);
+    if (entity.status !== 'READY') {
+      throw new Error(`start() requires a READY task, got ${entity.status}.`);
+    }
     const started = this.persist(entity.transition('EXECUTING').record, {
       executingAt: Date.now(),
       attempts: entity.record.timing.attempts + 1,
       startedAt: entity.record.timing.startedAt || Date.now()
     });
     await this.emit('TaskStarted', taskId, { attempt: started.timing.attempts });
-    return this.runExecution(taskId, options);
+    return started;
   }
 
   /**
@@ -370,6 +385,37 @@ export class TaskEngine {
     return stored;
   }
 
+  /**
+   * Resolve a STARTED tool execution to its final state (COMPLETED/FAILED).
+   * Computes durationMs from startedAt, persists, and emits the matching
+   * ToolCompleted/ToolFailed event.
+   */
+  async completeToolExecution(
+    taskId: string,
+    executionId: string,
+    patch: { status?: 'COMPLETED' | 'FAILED'; output?: unknown; error?: string; completedAt?: number; durationMs?: number }
+  ): Promise<ToolExecution | undefined> {
+    const record = this.require(taskId);
+    const idx = record.toolExecutions.findIndex((exec) => exec.id === executionId);
+    if (idx === -1) return undefined;
+    const current = record.toolExecutions[idx];
+    const completedAt = patch.completedAt ?? Date.now();
+    const updated: ToolExecution = {
+      ...current,
+      status: patch.status || 'COMPLETED',
+      completedAt,
+      durationMs: patch.durationMs ?? (current.startedAt ? completedAt - current.startedAt : undefined),
+      ...(patch.output !== undefined ? { output: patch.output } : {}),
+      ...(patch.error !== undefined ? { error: patch.error } : {})
+    };
+    const toolExecutions = [...record.toolExecutions];
+    toolExecutions[idx] = updated;
+    this.persist(new TaskEntity(record).with({ toolExecutions }).record);
+    const eventName: TaskEventName = updated.status === 'FAILED' ? 'ToolFailed' : 'ToolCompleted';
+    await this.emit(eventName, taskId, { tool: updated.name, ...(updated.error ? { error: updated.error } : {}) });
+    return updated;
+  }
+
   /** Record an artifact on the task. */
   async recordArtifact(taskId: string, artifact: Omit<TaskArtifact, 'id' | 'createdAt'>): Promise<TaskArtifact> {
     const entity = new TaskEntity(this.require(taskId));
@@ -499,11 +545,25 @@ export class TaskEngine {
     return this.fail(taskId, 'VERIFYING', result?.detail || 'Verification failed.');
   }
 
+  /**
+   * Mark a task FAILED from an execution-phase state (public counterpart to
+   * the internal fail path). Records the failure and emits TaskFailed.
+   */
+  async failTask(taskId: string, error: string, phase: TaskStatus = 'EXECUTING'): Promise<Task> {
+    const record = this.require(taskId);
+    const entity = new TaskEntity(record);
+    if (isTerminal(entity.status)) {
+      return entity.record;
+    }
+    const recorded = this.recordFailure(taskId, phase, error);
+    const failed = this.persist(new TaskEntity(recorded).transition('FAILED').record);
+    await this.emit('TaskFailed', taskId, { error, phase });
+    return failed;
+  }
+
   /** EXECUTING/VERIFYING -> FAILED with a recorded failure. */
   private async fail(taskId: string, phase: TaskStatus, error: string): Promise<TaskRunOutcome> {
-    const recorded = this.recordFailure(taskId, phase, error);
-    this.persist(new TaskEntity(recorded).transition('FAILED').record);
-    await this.emit('TaskFailed', taskId, { error, phase });
+    await this.failTask(taskId, error, phase);
     return { success: false, failed: true, error };
   }
 

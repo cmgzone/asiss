@@ -16,7 +16,7 @@
 | --- | --- | --- | --- |
 | 0 | Freeze baseline | `docs/hermes/BASELINE.md`, `AGENT_RUNNER_FLOW.md`, `SUBSYSTEM_INVENTORY.md`, `scripts/smoke-baseline.ts` | [x] |
 | 1 | Canonical Task system | `src/core/task/` (types, state, events, store, engine) | [x] |
-| 2 | TaskEngine ownership | AgentRunner creates/executes Tasks while internals keep working | [ ] |
+| 2 | TaskEngine ownership | AgentRunner creates a Task per mission, records tools/checkpoints/cost/progress, finalizes on every exit | [x] |
 | 3 | Event system | Task/Tool/Agent/Checkpoint/Test events on an internal bus | [ ] |
 | 4 | ToolEngine | Extract tool dispatch from AgentRunner (`src/core/tools/`) | [ ] |
 | 5 | PolicyEngine | ALLOW / ASK / DENY before tool execution | [ ] |
@@ -38,7 +38,12 @@
 
 ## Current milestone
 
-Phase 0 + Phase 1 are complete: the baseline is frozen (see BASELINE.md) and the
-canonical Task model + TaskEngine live in `src/core/task/`, fully decoupled from
-AgentRunner. Phase 2 is the first wiring step: AgentRunner (or a thin adapter)
-creates a Task per mission/run while its existing internals keep executing.
+Phases 0-2 are complete. `AgentRunner.processMessage` now creates a canonical
+Task per mission (`kind: 'mission'`), advances it through the lifecycle
+(CREATED -> ANALYZING -> PLANNING -> EXECUTING), records tool executions
+(ToolStarted/ToolCompleted/ToolFailed), automatic workspace checkpoints, token
+cost and progress, and finalizes it on every exit path (success -> COMPLETED;
+blocked / step-limit / thrown errors -> FAILED) via try/finally. Existing
+behavior is unchanged: the engine only records, it does not execute. Verified
+end-to-end by `scripts/smoke-agent-runtime.ts`. Phase 3 next: route the
+TaskEventBus into telemetry/recovery via hookManager.
