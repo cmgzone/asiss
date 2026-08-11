@@ -11,6 +11,7 @@
     "bin",
     ".env.example",
     "A2A.md",
+    "RUNTIME.md",
     "INSTALL_GITHUB.md"
   ],
   "scripts": {
@@ -28,7 +29,18 @@
     "nvidia:models": "ts-node src/scripts/nvidia_list_models.ts",
     "playwright:install": "npx playwright install chromium",
     "playwright:install:local": "node -e \"process.env.PLAYWRIGHT_BROWSERS_PATH='0'; require('child_process').spawnSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['playwright','install','chromium'], { stdio: 'inherit', env: process.env });\"",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "smoke:delegation": "ts-node scripts/smoke-agent-delegation.ts",
+    "smoke:runtime": "ts-node scripts/smoke-agent-runtime.ts",
+    "smoke:learning": "ts-node scripts/smoke-learning-loop.ts",
+    "smoke:executable-skills": "ts-node scripts/smoke-executable-skills.ts",
+    "smoke:model-resilience": "ts-node scripts/smoke-model-resilience.ts",
+    "smoke:checkpoints": "ts-node scripts/smoke-checkpoints.ts",
+    "smoke:execution-backends": "ts-node scripts/smoke-execution-backends.ts",
+    "smoke:execute-workflow": "ts-node scripts/smoke-execute-workflow.ts",
+    "smoke:web-api": "ts-node scripts/smoke-web-api.ts",
+    "smoke:casual": "ts-node scripts/smoke-casual-conversation.ts",
+    "smoke:repetition": "ts-node scripts/smoke-repetition-guard.ts"
   },
   "keywords": [],
   "author": "",

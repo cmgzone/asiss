@@ -1,5 +1,6 @@
 import express from 'express';
 import { Server } from 'http';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
@@ -312,7 +313,13 @@ export class A2AChannel implements ChannelAdapter {
     const header = String(req.headers.authorization || '');
     if (!header.toLowerCase().startsWith('bearer ')) return false;
     const token = header.slice(7).trim();
-    return token === this.authToken;
+    return this.safeEqual(token, this.authToken);
+  }
+
+  private safeEqual(a: string, b: string): boolean {
+    const bufA = Buffer.from(a);
+    const bufB = Buffer.from(b);
+    return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
   }
 
   private async handleRpc(payload: any, req?: express.Request): Promise<JsonRpcResponse | null> {
@@ -414,6 +421,7 @@ export class A2AChannel implements ChannelAdapter {
 
     this.appendHistory(record, normalized);
     this.activeTaskByContext.set(contextId, taskId);
+    this.pruneTasks();
     this.updateStatus(record, 'working');
 
     if (!this.handler) {
@@ -487,7 +495,22 @@ export class A2AChannel implements ChannelAdapter {
     return this.buildTaskResponse(record, params?.historyLength);
   }
 
+  private pruneTasks() {
+    const now = Date.now();
+    // Drop records idle for more than 24h.
+    const idleCutoff = now - 24 * 60 * 60 * 1000;
+    for (const [id, record] of this.tasks) {
+      if (now - record.updatedAt > idleCutoff) this.tasks.delete(id);
+    }
+    // Hard cap: keep the most recently updated tasks.
+    if (this.tasks.size > 500) {
+      const sorted = [...this.tasks.entries()].sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+      for (const [id] of sorted.slice(300)) this.tasks.delete(id);
+    }
+  }
+
   private handleTasksList(params: any): { tasks: { id: string; contextId: string; status: A2ATaskStatus }[] } {
+    this.pruneTasks();
     const rawLimit = params?.limit;
     const numeric = typeof rawLimit === 'string' ? Number(rawLimit) : rawLimit;
     const limit = Number.isFinite(numeric) ? Math.max(1, Math.floor(numeric)) : 100;

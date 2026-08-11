@@ -1,5 +1,5 @@
-import { Message } from '../core/types';
-import { ModelProvider, ModelRegistry } from '../core/models';
+import { Message, StreamEventPayload } from '../core/types';
+import { ModelAttachment, ModelProvider, ModelRegistry } from '../core/models';
 import { SkillRegistry } from '../core/skills';
 import { Memory, MemoryManager } from '../core/memory';
 import { McpManager } from '../core/mcp';
@@ -16,6 +16,8 @@ import { SchedulerSkill } from '../skills/scheduler';
 import { PlaywrightSkill } from '../skills/playwright';
 import { BraveSearchSkill } from '../skills/brave';
 import { ApplyPatchSkill } from '../skills/patch';
+import { CheckpointsSkill } from '../skills/checkpoints';
+import { checkpointManager } from '../core/checkpoint-manager';
 import { BusinessSkill } from '../skills/business';
 import { ProjectManagerSkill } from '../skills/project-manager';
 import { AgentsMdSkill } from '../skills/agents-md';
@@ -27,13 +29,19 @@ import { TaskMemorySkill } from '../skills/task-memory';
 import { backgroundWorker } from '../core/background-worker';
 import { dndManager } from '../core/dnd';
 import { BackgroundGoalsSkill, DNDSkill } from '../skills/background';
+import { mainGoalManager } from '../core/main-goal';
+import { MainGoalSkill } from '../skills/main-goal';
 import { customAgentManager } from '../core/custom-agents';
 import { CustomAgentsSkill } from '../skills/custom-agents';
-import { modelManager } from '../core/model-manager';
+import { modelManager, resolveModelApiKey, isProviderKeyValid } from '../core/model-manager';
 import { ModelsSkill } from '../skills/models';
 import { GenericOpenAIProvider } from './openai-provider';
+import { OpenCodeProvider } from './opencode-provider';
 import { SerperSkill } from '../skills/serper';
 import { MemorySkill } from '../skills/memory';
+import { CodeSearchSkill } from '../skills/code-search';
+import { GitSkill } from '../skills/git';
+import { CodeReviewSkill } from '../skills/code-review';
 import { PlanModeSkill } from '../skills/plan-mode';
 import { planModeManager } from '../core/plan-mode';
 import { DeepResearchSkill } from '../skills/deep-research';
@@ -42,10 +50,24 @@ import { SendEmailSkill } from '../skills/send-email';
 import { WebhookSkill } from '../skills/webhook';
 import { agentProfileManager } from '../core/agent-profiles';
 import { AgentProfilesSkill } from '../skills/agent-profiles';
+import { agentRunManager } from '../core/agent-run-manager';
+import { DelegateAgentSkill } from '../skills/delegate-agent';
+import { ExecuteWorkflowSkill } from '../skills/execute-workflow';
+import { McpAdminSkill } from '../skills/mcp-admin';
+import { PortableSkillsSkill } from '../skills/portable-skills';
+import { portableSkillsManager } from '../core/portable-skills';
+import { HooksSkill } from '../skills/hooks';
 import { SkillMarketplaceManager } from '../core/skill-marketplace';
 import { MarketplaceSkill } from '../skills/marketplace';
 import { TrustedActionsSkill } from '../skills/trusted-actions';
 import { A2AClientSkill } from '../skills/a2a';
+import { LearnedSkillsSkill } from '../skills/learned-skills';
+import { learnedSkillsManager } from '../core/learned-skills';
+import { ReadFileSkill, WriteFileSkill, ListDirectorySkill, GlobSkill } from '../skills/filesystem';
+import { ToolsDiagSkill, buildToolReport } from '../skills/tools-diag';
+import type { AliasCoverage } from '../skills/tools-diag';
+import { DynamicToolManager } from '../core/dynamic-tools';
+import { ResilientModelProvider } from '../core/resilient-model';
 import { analyticsTracker } from '../core/analytics-tracker';
 import { withModelRetry } from '../core/retry-handler';
 import { guardrailManager } from '../core/guardrails';
@@ -53,6 +75,8 @@ import { costTracker } from '../core/cost-tracker';
 import { modelRouter } from '../core/model-router';
 import { chainOfThought } from '../core/chain-of-thought';
 import { proactiveEngine } from '../core/proactive-engine';
+import { executionStateManager } from '../core/execution-state';
+import { hookManager } from '../core/hooks';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -62,12 +86,25 @@ dotenv.config();
 
 const DEBUG_PREFIX = '__DEBUG__';
 
+const MUTATING_TOOL_NAMES = new Set([
+  'apply_patch',
+  'write_patch',
+  'write_file',
+  'shell',
+  'git',
+  'delegate_agent',
+  'playwright',
+  'notes'
+]);
+
 // Interface to avoid circular dependency import issues
 interface IGateway {
   sendResponse(sessionId: string, text: string): Promise<void>;
   sendStreamChunk(sessionId: string, chunk: string): Promise<void>;
+  sendStreamEvent(sessionId: string, event: StreamEventPayload): Promise<void>;
   sendMedia(sessionId: string, media: { type: 'image' | 'file'; path?: string; url?: string; caption?: string; filename?: string }): Promise<void>;
   listSessionIds(): string[];
+  supportsStructuredStreaming?(sessionId: string): boolean;
 }
 
 export class AgentRunner {
@@ -78,7 +115,10 @@ export class AgentRunner {
   private marketplace: SkillMarketplaceManager;
   private mcpManager: McpManager;
   private scheduler: SchedulerManager;
-  private defaultMaxTurns: number = 15;
+  private dynamicTools: DynamicToolManager;
+  // Keys already warned about (tool-capping) so truncation warnings are logged
+  // once per process run instead of on every message.
+  private advertisedWarnings = new Set<string>();
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private heartbeatMs: number = 60000; // Default 1 minute
   private proactiveEnabled: boolean = false;
@@ -88,6 +128,110 @@ export class AgentRunner {
   private proactiveInFlight = false;
   private proactiveEveryMs: number = 60 * 1000;
   private proactiveLastTickAt = 0;
+
+  // Ordered fallback chains per capability. The first entry is the preferred
+  // alternative when the requested skill fails (e.g. a missing/invalid API key).
+  private static readonly CAPABILITY_FALLBACK: Record<string, string[]> = {
+    web_search: ['web_search', 'playwright'],
+    web_fetch: ['web_fetch', 'playwright', 'web_search'],
+  };
+
+  // Resolve which other skills can satisfy the same job when `name` fails.
+  private static resolveFallbackSkills(name: string): string[] {
+    const skill: any = SkillRegistry.get(name);
+    const caps: string[] = skill?.capabilities || [];
+    const order: string[] = [];
+    for (const cap of caps) {
+      const list = AgentRunner.CAPABILITY_FALLBACK[cap] || SkillRegistry.skillsForCapability(cap);
+      for (const n of list) if (!order.includes(n)) order.push(n);
+    }
+    return order.filter((n) => n !== name);
+  }
+
+  // Adapt the original arguments to the argument shape of an alternative skill.
+  private static adaptFallbackArgs(altName: string, original: any): any {
+    const query = original?.query ?? original?.q ?? '';
+    if (altName === 'playwright') {
+      if (query) return { action: 'search', query, maxResults: original?.num ?? original?.maxResults ?? 5 };
+      if (original?.url) return { action: 'extract_text', url: original.url, selector: original?.selector };
+    }
+    if (altName === 'web_search') return { query, maxResults: original?.num ?? original?.maxResults ?? 5 };
+    if (altName === 'web_fetch') return { url: original?.url };
+    return { query, num: original?.num ?? 10, type: original?.type ?? 'search', maxResults: original?.maxResults };
+  }
+
+  // Models sometimes emit tool names that don't exactly match a registered
+  // skill (e.g. "spawn_subagent", "subagent", "research_agent"). Map those
+  // hallucinated names to the real skill so dispatch doesn't fall through to
+  // the MCP path and fail with "Tool not found in any connected MCP server".
+  private static readonly TOOL_ALIASES: Array<[RegExp, string]> = [
+    [/(^|[_-])(delegate|subagent|sub_agent|spawn_agent|spawn_subagent|research_agent|worker|agent)([_-]|$)/i, 'delegate_agent'],
+    [/(^|[_-])(research|deep_research|literature_review)([_-]|$)/i, 'web_search'],
+    [/(^|[_-])(grep|code_search|find_in_files|rg|ripgrep)([_-]|$)/i, 'code_search'],
+    [/(^|[_-])(git|github)([_-]|$)/i, 'git'],
+    [/(^|[_-])(fetch|scrape|http_get)([_-]|$)/i, 'web_fetch'],
+    // File-tool aliases: models commonly emit these variants of the native
+    // filesystem skills instead of the exact registered names. Without this
+    // they would fall through to a hard "tool not found" failure.
+    [/(^|[_-])(read_file|readfile|read-file|read_text_file|read-text-file|cat|view_file|get_file_contents|file_contents|read_text|read_file_contents)([_-]|$)/i, 'read_file'],
+    [/(^|[_-])(write_file|writefile|write-file|create_file|create-file|save_file|save-file|append_file|append-file|edit_file|edit-file|update_file|update-file|modify_file|put_file|overwrite_file)([_-]|$)/i, 'write_file'],
+    [/(^|[_-])(list_directory|list-dir|listdir|list_dir|list_files|list-files|ls|dir|read_directory|folder_contents|list_directories)([_-]|$)/i, 'list_directory'],
+    [/(^|[_-])(glob|search_files|search-files|find_files|find-files|file_search|find_file|list_matching_files|locate_file)([_-]|$)/i, 'glob'],
+  ];
+
+  // Resolve a possibly-hallucinated tool name to a real registered skill.
+  private static resolveToolAlias(name: string): string | null {
+    const lower = String(name || '').trim().toLowerCase();
+    if (!lower) return null;
+    if (SkillRegistry.get(lower)) return lower;
+    for (const [re, target] of AgentRunner.TOOL_ALIASES) {
+      if (re.test(lower)) return target;
+    }
+    return null;
+  }
+
+  // Report the alias patterns (regex sources) so diagnostics can show coverage.
+  private static getAliasCoverage(): AliasCoverage[] {
+    return AgentRunner.TOOL_ALIASES.map(([re, target]) => ({ pattern: re.source, target }));
+  }
+
+  // Score how close a requested tool name is to a candidate, to suggest
+  // likely-intended tools instead of a bare "not available" error. Combines a
+  // shared-prefix bonus with character-overlap (Jaccard) so mid-word typos
+  // like 'wite_file' → 'write_file' still rank high.
+  private static nameSimilarity(requested: string, candidate: string): number {
+    const a = requested.toLowerCase();
+    const b = candidate.toLowerCase();
+    if (a === b) return 100;
+    if (b.includes(a) || a.includes(b)) return 60 + Math.min(a.length, b.length);
+    const maxLen = Math.min(a.length, b.length);
+    let prefix = 0;
+    while (prefix < maxLen && a[prefix] === b[prefix]) prefix += 1;
+    const setA = new Set(a);
+    const setB = new Set(b);
+    let overlap = 0;
+    for (const ch of setA) if (setB.has(ch)) overlap += 1;
+    const union = setA.size + setB.size - overlap;
+    const jaccard = union > 0 ? overlap / union : 0;
+    return prefix + Math.round(jaccard * 40);
+  }
+
+  private static closestToolNames(requested: string, available: string[], max = 5): string[] {
+    const scored = (available || [])
+      .map((name) => ({ name, score: AgentRunner.nameSimilarity(requested, name) }))
+      .filter((s) => s.score >= 15) // meaningful overlap only, not incidental matches
+      .sort((x, y) => y.score - x.score);
+    return scored.slice(0, max).map((s) => s.name);
+  }
+
+  // Compute advertised-tool caps the same way buildAdvertisedTools does.
+  private static getToolLimits(config?: any): { maxNativeTools: number; maxMcpToolsPerServer: number } {
+    const agentCfg = config?.agent ?? {};
+    return {
+      maxNativeTools: Math.max(10, Math.min(300, Math.floor(Number(agentCfg.maxNativeTools) || 60))),
+      maxMcpToolsPerServer: Math.max(5, Math.min(200, Math.floor(Number(agentCfg.maxMcpToolsPerServer) || 40)))
+    };
+  }
 
   constructor(gateway: IGateway) {
     this.gateway = gateway;
@@ -99,6 +243,16 @@ export class AgentRunner {
     );
     this.marketplace = new SkillMarketplaceManager();
     this.mcpManager = new McpManager();
+    this.dynamicTools = new DynamicToolManager(async (prompt) => {
+      try {
+        const model = this.getModel();
+        const response = await model.generate(prompt, 'You resolve unknown tool calls to real tools or answer directly.', []);
+        return response?.content || '';
+      } catch (error: any) {
+        console.error('[AgentRunner] Dynamic tool interpreter failed:', error);
+        return '';
+      }
+    });
     this.scheduler = new SchedulerManager(async (job) => {
       const scheduledMsg: Message = {
         id: uuidv4(),
@@ -116,22 +270,51 @@ export class AgentRunner {
     SkillRegistry.register(new TimeSkill());
     SkillRegistry.register(new NotesSkill());
     SkillRegistry.register(new ShellSkill());
+    SkillRegistry.register(new ReadFileSkill());
+    SkillRegistry.register(new WriteFileSkill());
+    SkillRegistry.register(new ListDirectorySkill());
+    SkillRegistry.register(new GlobSkill());
+    SkillRegistry.register(new ToolsDiagSkill({
+      listMcpTools: () => this.mcpManager.listTools(),
+      buildAdvertised: (sid: string, mcpTools: any[]) => this.buildAdvertisedTools(sid, mcpTools),
+      getAliasCoverage: () => AgentRunner.getAliasCoverage(),
+      getLimits: () => AgentRunner.getToolLimits(),
+      getUsageStats: () => analyticsTracker.getToolUsageStats()
+    }));
     SkillRegistry.register(new WebFetchSkill());
     SkillRegistry.register(new WebSearchSkill());
     SkillRegistry.register(new SchedulerSkill(this.scheduler));
     SkillRegistry.register(new PlaywrightSkill());
     SkillRegistry.register(new BraveSearchSkill());
     SkillRegistry.register(new ApplyPatchSkill());
+    SkillRegistry.register(new CheckpointsSkill());
     SkillRegistry.register(new BusinessSkill());
+    SkillRegistry.register(new DelegateAgentSkill({
+      getModelById: (id?: string) => this.getModelById(id),
+      getDefaultModel: () => this.getModel(),
+      listMcpTools: () => this.mcpManager.listTools(),
+      callMcpTool: (name: string, args: any) => this.mcpManager.callTool(name, args)
+    }));
+    SkillRegistry.register(new ExecuteWorkflowSkill({
+      listMcpTools: () => this.mcpManager.listTools(),
+      callMcpTool: (name: string, args: any) => this.mcpManager.callTool(name, args)
+    }));
+    SkillRegistry.register(new McpAdminSkill(this.mcpManager));
+    SkillRegistry.register(new PortableSkillsSkill());
+    SkillRegistry.register(new HooksSkill());
     SkillRegistry.register(new ProjectManagerSkill());
     SkillRegistry.register(new AgentsMdSkill());
     SkillRegistry.register(new TaskMemorySkill());
+    SkillRegistry.register(new MainGoalSkill());
     SkillRegistry.register(new BackgroundGoalsSkill());
     SkillRegistry.register(new DNDSkill());
     SkillRegistry.register(new CustomAgentsSkill());
     SkillRegistry.register(new ModelsSkill());
     SkillRegistry.register(new SerperSkill());
     SkillRegistry.register(new MemorySkill(this.memory));
+    SkillRegistry.register(new CodeSearchSkill());
+    SkillRegistry.register(new GitSkill());
+    SkillRegistry.register(new CodeReviewSkill());
     SkillRegistry.register(new PlanModeSkill());
     SkillRegistry.register(new DeepResearchSkill());
     SkillRegistry.register(new SendTelegramSkill());
@@ -141,11 +324,21 @@ export class AgentRunner {
     SkillRegistry.register(new MarketplaceSkill(this.marketplace));
     SkillRegistry.register(new TrustedActionsSkill());
     SkillRegistry.register(new A2AClientSkill());
+    SkillRegistry.register(new LearnedSkillsSkill());
 
     // Load marketplace-installed skills (allowlist enforced by marketplace manager)
     for (const skill of this.marketplace.loadEnabledSkills()) {
       SkillRegistry.register(skill);
     }
+
+    const executableSkills = learnedSkillsManager.registerExecutableSkills();
+    if (executableSkills.registered || executableSkills.invalid) {
+      console.log(`[AgentRunner] Executable learned skills: ${executableSkills.registered} registered, ${executableSkills.invalid} invalid.`);
+    }
+
+    // Re-register dynamically-created tools from previous sessions so they
+    // remain available across restarts.
+    this.dynamicTools.rehydrate();
 
     // Load custom models
     for (const config of modelManager.listModels()) {
@@ -154,8 +347,11 @@ export class AgentRunner {
           config.id,
           config.name,
           config.baseUrl,
-          config.apiKey || process.env.OPENAI_API_KEY || '',
-          config.modelName
+          resolveModelApiKey(config.provider, config.apiKey),
+          config.modelName,
+          config.contextWindow,
+          config.maxOutputTokens,
+          config.level
         );
         ModelRegistry.register(provider);
         console.log(`[AgentRunner] Loaded custom model: ${config.name} (${config.provider})`);
@@ -164,12 +360,26 @@ export class AgentRunner {
 
     // Wire up agent swarm executor
     agentSwarm.setExecutor(async (agentId: string, prompt: string) => {
-      const agent = agentSwarm.getAgent(agentId);
-      const profile = agent?.profileId ? agentProfileManager.get(agent.profileId) : undefined;
-      const modelId = agent?.modelId || profile?.modelId;
-      const model = this.getModelById(modelId);
-      const response = await model.generate(prompt, this.baseSystemPrompt);
-      return response.content || '';
+      const delegate = SkillRegistry.get('delegate_agent');
+      if (!delegate) {
+        const agent = agentSwarm.getAgent(agentId);
+        const profile = agent?.profileId ? agentProfileManager.get(agent.profileId) : undefined;
+        const modelId = agent?.modelId || profile?.modelId;
+        const model = this.getModelById(modelId);
+        const response = await model.generate(prompt, this.baseSystemPrompt, []);
+        return response.content || '';
+      }
+
+      const result = await delegate.execute({
+        agentId,
+        task: prompt,
+        expectedOutput: 'Complete the assigned swarm-agent task and return a concise, evidence-backed result.',
+        maxTurns: 6,
+        retries: 1,
+        reviewCriteria: ['task completed', 'evidence included', 'risks called out']
+      });
+      const report = result?.report;
+      return report?.finalOutput || report?.summary || JSON.stringify(result);
     });
 
     // Load config
@@ -181,6 +391,31 @@ export class AgentRunner {
         console.error('[AgentRunner] Failed to load config.json', e);
       }
     }
+
+    // Register the configured provider during startup so the runtime and UI
+    // agree on the active model before the first user message.
+    const configuredProvider = String(config.model || config.llm?.provider || '').trim().toLowerCase();
+    if (configuredProvider === 'openrouter' && isProviderKeyValid('openrouter', process.env.OPENROUTER_API_KEY)) {
+      const configuredModel = String(config.aiModel || config.llm?.model || process.env.OPENROUTER_MODEL || '').trim();
+      if (configuredModel) {
+        ModelRegistry.register(new OpenRouterProvider(process.env.OPENROUTER_API_KEY || '', configuredModel));
+        ModelRegistry.setCurrentModel('openrouter');
+      }
+    } else if (configuredProvider === 'nvidia' && isProviderKeyValid('nvidia', process.env.NVIDIA_API_KEY)) {
+      const configuredModel = String(config.aiModel || config.llm?.model || process.env.NVIDIA_MODEL || '').trim();
+      if (configuredModel) {
+        ModelRegistry.register(new NvidiaProvider(process.env.NVIDIA_API_KEY || '', configuredModel, config?.nvidia?.thinking !== false));
+        ModelRegistry.setCurrentModel('nvidia');
+      }
+    } else if (configuredProvider === 'opencode' && process.env.OPENCODE_API_KEY) {
+      const configuredModel = String(config.aiModel || config.llm?.model || process.env.OPENCODE_MODEL || '').trim();
+      if (configuredModel) {
+        ModelRegistry.register(new OpenCodeProvider(process.env.OPENCODE_API_KEY, configuredModel));
+        ModelRegistry.setCurrentModel('opencode');
+      }
+    }
+    this.registerCredentialPoolProviders(config);
+    this.registerOpenCodeProvider(config);
 
     if (config.heartbeatInterval) {
       this.heartbeatMs = config.heartbeatInterval;
@@ -206,12 +441,9 @@ export class AgentRunner {
       }
     }
 
-    // Connect MCP Servers
-    if (config.mcpServers) {
-      for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
-        this.mcpManager.connect(name, serverConfig as any);
-      }
-    }
+    // Connect MCP Servers (awaited per server so failures are captured and
+    // reported visibly instead of being silently fire-and-forget).
+    void this.connectMcpServers(config);
 
     // Load soul
     try {
@@ -229,6 +461,35 @@ export class AgentRunner {
     this.scheduler.start();
   }
 
+  // Connect each configured MCP server, awaiting every result so connection
+  // failures are logged and surfaced (console + mcp_status hook) rather than
+  // silently ignored. Servers connect in parallel (allSettled) so one slow or
+  // hung server cannot block the others. Non-blocking: runs in the background.
+  private async connectMcpServers(config: any): Promise<void> {
+    const servers = config?.mcpServers;
+    if (!servers || typeof servers !== 'object') return;
+    await Promise.allSettled(
+      Object.entries(servers).map(async ([name, serverConfig]) => {
+        try {
+          const result = await this.mcpManager.connect(name, serverConfig as any);
+          if (result?.success) {
+            console.log(`[AgentRunner] MCP server connected: ${name}`);
+            void hookManager.emit('mcp_status', { server: name, connected: true });
+          } else {
+            const reason = result?.error || 'unknown error';
+            console.error(`[AgentRunner] MCP server '${name}' FAILED to connect: ${reason}`);
+            console.error(`[AgentRunner] Hint: check 'mcpServers.${name}' in config.json (command/args/transport) and that the server package is installed. Tools from this server will be unavailable.`);
+            void hookManager.emit('mcp_status', { server: name, connected: false, error: reason });
+          }
+        } catch (error: any) {
+          const reason = error?.message || String(error);
+          console.error(`[AgentRunner] MCP server '${name}' threw during connect: ${reason}`);
+          void hookManager.emit('mcp_status', { server: name, connected: false, error: reason });
+        }
+      })
+    );
+  }
+
   private isMainSessionChannel(channel: string) {
     const c = String(channel || '').toLowerCase();
     return c === 'console' || c === 'web';
@@ -241,6 +502,229 @@ export class AgentRunner {
     } catch {
       return '';
     }
+  }
+
+  private getValidWorkspacePath(value: unknown): string | undefined {
+    const workspacePath = typeof value === 'string' ? value.trim() : '';
+    if (!workspacePath) return undefined;
+    try {
+      return fs.existsSync(workspacePath) && fs.statSync(workspacePath).isDirectory()
+        ? workspacePath
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private buildProjectPrompt(metadata: any): string {
+    const projectId = typeof metadata?.projectId === 'string' ? metadata.projectId.trim() : '';
+    if (!projectId) return '';
+
+    const name = typeof metadata?.projectName === 'string' && metadata.projectName.trim()
+      ? metadata.projectName.trim()
+      : projectId;
+    const description = typeof metadata?.projectDescription === 'string' ? metadata.projectDescription.trim() : '';
+    const workspacePath = typeof metadata?.projectWorkspacePath === 'string' ? metadata.projectWorkspacePath.trim() : '';
+    const workspaceExists = Boolean(metadata?.projectWorkspaceExists);
+
+    const lines = [
+      'Active project context:',
+      `- Project ID: ${projectId}`,
+      `- Project name: ${name}`,
+      description ? `- Project description: ${description}` : '',
+      workspacePath ? `- Local workspace folder: ${workspacePath}` : '- Local workspace folder: not attached',
+      workspacePath ? `- Workspace folder exists: ${workspaceExists ? 'yes' : 'no'}` : '',
+      'Treat this chat as scoped to this project. Prefer project-specific history, decisions, files, tasks, and workspace paths when answering or using tools.'
+    ].filter(Boolean);
+
+    return `\n\n${lines.join('\n')}\n`;
+  }
+
+  private stableStringify(value: any): string {
+    if (value === null || typeof value !== 'object') {
+      return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) {
+      return `[${value.map(item => this.stableStringify(item)).join(',')}]`;
+    }
+    const keys = Object.keys(value).sort();
+    return `{${keys.map(key => `${JSON.stringify(key)}:${this.stableStringify(value[key])}`).join(',')}}`;
+  }
+
+  private buildToolBatchSignature(toolCalls: any[]): string {
+    return (toolCalls || [])
+      .map(call => `${String(call?.name || 'tool')}:${this.stableStringify(call?.arguments || {})}`)
+      .sort()
+      .join('|');
+  }
+
+  private buildConversationalProgressUpdate(content: string, toolCalls: any[], recovering: boolean, hasUnverifiedChanges: boolean): string {
+    // Prefer the model's own narration for this turn (streamed live to the
+    // chat) so progress updates stay dynamic and task-specific. Templates are
+    // only a fallback for turns where the model produced no usable text.
+    const narrated = String(content || '').trim().replace(/\s+/g, ' ');
+    if (narrated) {
+      return narrated.length > 200 ? `${narrated.slice(0, 200).trimEnd()}…` : narrated;
+    }
+    if (recovering) {
+      return "I hit a problem with the last step, so I'm switching approaches now. I'll keep working and verify the recovery before I finish.";
+    }
+
+    const names = (toolCalls || []).map(call => String(call?.name || '').toLowerCase());
+    if (names.some(name => name.includes('delegate') || name.includes('agent'))) {
+      return "I've split the independent parts of this task so they can run in parallel. I'll bring the results together and verify the final outcome.";
+    }
+    if (names.some(name => name.includes('patch'))) {
+      return "I found the relevant code, and I'm applying the change now. Once it's in place, I'll run the checks and correct anything that still fails.";
+    }
+    if (names.some(name => name.includes('playwright'))) {
+      return "I'm opening the page and checking the real behavior now. I'll use what I find to finish the change and verify it from the user's side.";
+    }
+    if (names.some(name => name.includes('search') || name.includes('research') || name.includes('brave') || name.includes('serper'))) {
+      return "I'm checking the relevant sources now so the answer is based on current evidence. I'll review the results before I give you the conclusion.";
+    }
+    if (names.some(name => name.includes('shell'))) {
+      return hasUnverifiedChanges
+        ? "The change is ready, so I'm running the checks now. I'll review any failure and keep working until the result is verified."
+        : "I'm inspecting the project and checking the current behavior first. That will give me the evidence I need to make the right change.";
+    }
+    const tools = this.describeToolBatch(toolCalls);
+    return `I'm running ${tools} now and checking the result before the next step.`;
+  }
+
+  private describeToolBatch(toolCalls: any[]): string {
+    const names = (toolCalls || [])
+      .map(call => String(call?.name || '').trim())
+      .filter(Boolean);
+    if (names.length === 0) return 'tools';
+    const uniq = [...new Set(names)].map(n => n.replace(/_/g, ' '));
+    const pretty = (t: string) => (/ /.test(t) ? t : `the ${t} tool`);
+    if (uniq.length === 1) return pretty(uniq[0]);
+    if (uniq.length === 2) return `${pretty(uniq[0])} and ${pretty(uniq[1])}`;
+    return `${uniq.slice(0, -1).map(pretty).join(', ')}, and ${pretty(uniq[uniq.length - 1])}`;
+  }
+
+  private normalizeToolCall(call: any): void {
+    if (!call || typeof call !== 'object') return;
+    const originalName = String(call.name || '').trim();
+    if (!originalName) return;
+    // Already a registered native skill: keep the exact name so budget/media
+    // logic and the dispatch lookup stay canonical.
+    if (SkillRegistry.get(originalName)) return;
+    // Strip MCP-style prefixes generically so "mcp__filesystem__read_file",
+    // "filesystem.read_file" or "mcp_playwright_navigate" resolve to the
+    // native skill instead of falling through to a hard "tool not found".
+    const normalizedBase = this.dynamicTools.normalizeName(originalName);
+    if (normalizedBase && SkillRegistry.get(normalizedBase)) {
+      call.name = normalizedBase;
+      return;
+    }
+    // Models sometimes emit MCP-style browser tool names
+    // (playwright_navigate, mcp_playwright__screenshot, browser_navigate, ...).
+    // Route those to the native PlaywrightSkill instead of failing with
+    // "Tool not found in any connected MCP server".
+    const lower = normalizedBase || originalName.toLowerCase().replace(/^mcp_/, '').replace(/_+/g, '_');
+    const isPlaywrightAlias = /^playwright(_[a-z0-9_]+)?$/.test(lower)
+      || /^browser(_[a-z0-9_]+)?$/.test(lower);
+    if (isPlaywrightAlias) {
+      call.name = 'playwright';
+      const args = (call.arguments && typeof call.arguments === 'object') ? call.arguments : {};
+      if (!args.action) {
+        const suffix = lower.replace(/^(playwright|browser)_?/, '');
+        let action = 'extract_text';
+        if (/screenshot|shot/.test(suffix)) action = 'screenshot';
+        else if (/navigate|goto|open|visit|go_/.test(suffix)) action = 'extract_text';
+        else if (/snapshot|scrape|extract|text|content|get_/.test(suffix)) action = 'extract_text';
+        args.action = action;
+      }
+      if (!args.url) {
+        args.url = args.link || args.href || args.page || args.target || args.website || '';
+      }
+      call.arguments = args;
+      return;
+    }
+    // General alias resolution for other commonly hallucinated tool names
+    // (e.g. "spawn_subagent" -> delegate_agent). Without this the unknown name
+    // would fall through to the MCP path and fail with "Tool not found".
+    const resolved = AgentRunner.resolveToolAlias(originalName);
+    if (resolved) {
+      call.name = resolved;
+    }
+  }
+
+  private requiresToolExecution(text: string): boolean {
+    return /\b(fix|debug|implement|build|create|code|edit|modify|update|add|remove|rename|move|install|configure|deploy|run|test|verify|inspect|audit|refactor|write\s+(?:a\s+)?(?:file|code|script|test))\b/i.test(String(text || ''));
+  }
+
+  private looksLikeProgressOnly(text: string): boolean {
+    const value = String(text || '').trim();
+    if (!value) return true;
+    const hasSubstantiveResult = value.length >= 400
+      && /(?:^|\n)\s*(?:#{1,4}\s+|[-*]\s+|\d+\.\s+)|\b(?:executive summary|findings|sources|result|completed|implemented|verified)\b/i.test(value);
+    if (hasSubstantiveResult) return false;
+    const opening = value.slice(0, 320);
+    return /\b(i(?:'ll| will| am going to)|let me|next i(?:'ll| will)|i need to|i should now|i can now|we(?:'ll| will) now|proceeding to|starting (?:with|by)|continue by)\b/i.test(opening)
+      || /(?:^|\n)\s*(?:next|now|then)\s*[:,-]/i.test(opening);
+  }
+
+  private isMutationToolCall(call: any): boolean {
+    const name = String(call?.name || '').toLowerCase();
+    if (name === 'apply_patch') return true;
+    if (name === 'shell') {
+      const command = String(call?.arguments?.command || '');
+      return /(?:^|[;&|]\s*)(?:set-content|add-content|remove-item|move-item|copy-item|new-item|mkdir|del|erase|rm|mv|cp|touch|git\s+(?:add|commit|merge|rebase|checkout|switch)|npm\s+install|pnpm\s+install|yarn\s+add)\b|(?:>>?|\|\s*tee\b)/i.test(command);
+    }
+    return ['project_manager', 'background_goals', 'memory', 'notes', 'models', 'scheduler'].includes(name);
+  }
+
+  private isVerificationToolCall(call: any): boolean {
+    const name = String(call?.name || '').toLowerCase();
+    if (name !== 'shell') return false;
+    const command = String(call?.arguments?.command || '');
+    return /\b(test|tests|build|lint|typecheck|check|verify|pytest|jest|vitest|mocha|tsc|cargo\s+test|go\s+test|dotnet\s+test|git\s+(?:diff|status))\b/i.test(command);
+  }
+
+  private selectRelevantMemories(memories: Memory[], query: string, limit: number): Memory[] {
+    const tokens = new Set(
+      String(query || '')
+        .toLowerCase()
+        .match(/[a-z0-9_]{3,}/g)
+        ?.filter(token => !['this', 'that', 'with', 'from', 'have', 'will', 'your', 'please'].includes(token)) || []
+    );
+    if (tokens.size === 0) return [];
+    return memories
+      .map((memory, index) => {
+        const haystack = memory.content.toLowerCase();
+        let score = 0;
+        for (const token of tokens) {
+          if (haystack.includes(token)) score += 1;
+        }
+        return { memory, index, score };
+      })
+      .filter(item => item.score > 0)
+      .sort((a, b) => b.score - a.score || b.index - a.index)
+      .slice(0, limit)
+      .sort((a, b) => a.index - b.index)
+      .map(item => item.memory);
+  }
+
+  private async deliverFinalResponse(
+    sessionId: string,
+    draft: string,
+    runId: string,
+    messageId: string,
+    completed: boolean = true,
+    reasoning?: string
+  ) {
+    const finalText = executionStateManager.prepareAssistantResponse(sessionId, draft, { final: completed });
+    if (!finalText.trim()) return;
+    if (this.gateway.supportsStructuredStreaming?.(sessionId)) {
+      await this.gateway.sendStreamEvent(sessionId, { type: 'assistant_start', runId, messageId });
+      await this.gateway.sendStreamEvent(sessionId, { type: 'assistant_delta', runId, messageId, text: finalText });
+      await this.gateway.sendStreamEvent(sessionId, { type: 'assistant_done', runId, messageId, finalText, reasoning, ok: completed });
+      return;
+    }
+    await this.gateway.sendResponse(sessionId, finalText);
   }
 
   private buildTimePrompt() {
@@ -276,7 +760,7 @@ export class AgentRunner {
     return `${y}-${m}-${day}`;
   }
 
-  private buildWorkspacePrompt(channel: string) {
+  private buildWorkspacePrompt(channel: string, sessionId?: string, query = '') {
     const root = process.cwd();
     const agents = this.readTextFileIfExists(path.join(root, 'AGENTS.md')).trim();
     const user = this.readTextFileIfExists(path.join(root, 'USER.md')).trim();
@@ -301,16 +785,51 @@ export class AgentRunner {
       if (todayDaily) parts.push(`memory/${todayKey}.md:\n${todayDaily}`);
     }
 
-    if (parts.length === 0) return '';
+    let result = parts.length > 0
+      ? `\n\nWorkspace Context:\n${parts.join('\n\n')}\n`
+      : '';
 
-    // Add task context for auto-resume
-    let result = `\n\nWorkspace Context:\n${parts.join('\n\n')}\n`;
+    const mainGoalPrompt = mainGoalManager.getPrompt(sessionId);
+    if (mainGoalPrompt) {
+      result += `\n\n${mainGoalPrompt}\n`;
+    }
+
+    const learnedRules = this.learning.getPromptLessons(sessionId);
+    if (learnedRules) {
+      result += `\n${learnedRules}\n`;
+    }
+
+    const learnedSkills = this.learning.getLearnedSkillsPrompt(sessionId || '', query);
+    if (learnedSkills) {
+      result += `\n${learnedSkills}\n`;
+    }
+
+    const portableSkills = portableSkillsManager.getCatalogPrompt();
+    if (portableSkills) {
+      result += `\n${portableSkills}\n`;
+    }
+
+    const projectSummary = backgroundWorker.getProjectSummaryPrompt(sessionId);
+    if (projectSummary) {
+      result += `\n${projectSummary}\n`;
+    }
+
+    const strategyScores = backgroundWorker.getStrategyScoreSummary(sessionId);
+    if (strategyScores) {
+      result += `\n${strategyScores}\n`;
+    }
+
+    const delegationReports = agentRunManager.buildReviewPrompt(sessionId);
+    if (delegationReports) {
+      result += `\n${delegationReports}\n`;
+    }
 
     const taskSummary = taskContext.getSummaryPrompt();
     if (taskSummary) {
       result += `\n${taskSummary}`;
     }
 
+    if (!result.trim()) return '';
     return result;
   }
 
@@ -324,6 +843,82 @@ export class AgentRunner {
       }
     }
     return config;
+  }
+
+  // Build the tool list advertised to the model. Bounded per provider and
+  // deduplicated by name so a huge MCP surface (or a registry with many
+  // learned skills) cannot blow the context window, and so native skills are
+  // never shadowed by same-named MCP tools.
+  //
+  // Limits (config.agent): maxNativeTools (default 60, floor 10) and
+  // maxMcpToolsPerServer (default 40, floor 5). Floors prevent an accidental
+  // tiny cap from crippling the agent. Conflict resolution: native skills win;
+  // the first MCP server that advertises a name claims it for the rest.
+  // Truncation warnings are logged at most once per key (see advertisedWarnings).
+  private buildAdvertisedTools(sessionId: string, mcpTools: any[], config?: any): any[] {
+    const limits = AgentRunner.getToolLimits(config ?? this.loadConfig());
+    const maxNative = limits.maxNativeTools;
+    const maxMcpPerServer = limits.maxMcpToolsPerServer;
+
+    const byName = new Map<string, any>();
+
+    // Native skills first so they own name conflicts.
+    let nativeCount = 0;
+    const skills = SkillRegistry.getAll().filter(skill => {
+      const learnedSessionId = (skill as any).learnedSessionId;
+      return !learnedSessionId || learnedSessionId === sessionId;
+    });
+    const nativeTotal = skills.filter(s => Boolean(s.inputSchema)).length;
+    for (const skill of skills) {
+      if (!skill.inputSchema) continue;
+      if (nativeCount >= maxNative) break;
+      nativeCount += 1;
+      byName.set(skill.name, {
+        name: skill.name,
+        description: skill.description,
+        inputSchema: skill.inputSchema,
+        source: 'native'
+      });
+    }
+    if (nativeTotal > maxNative) {
+      const key = `native:${maxNative}`;
+      if (!this.advertisedWarnings.has(key)) {
+        this.advertisedWarnings.add(key);
+        console.warn(`[AgentRunner] Advertised native tools capped at ${maxNative} (${nativeTotal} available).`);
+      }
+    }
+
+    // MCP tools: skip names already claimed by native skills; cap per server.
+    // Truncation warnings only fire when the cap (not a name conflict) dropped tools.
+    const perServer = new Map<string, number>();
+    const truncatedServers = new Set<string>();
+    for (const tool of mcpTools || []) {
+      const name = String(tool?.name || '').trim();
+      if (!name) continue;
+      if (byName.has(name)) continue; // native skill wins the conflict
+      const server = String(tool?.source || 'mcp');
+      const used = perServer.get(server) || 0;
+      if (used >= maxMcpPerServer) {
+        truncatedServers.add(server);
+        continue;
+      }
+      perServer.set(server, used + 1);
+      byName.set(name, {
+        name,
+        description: String(tool?.description || ''),
+        inputSchema: tool?.inputSchema,
+        source: server
+      });
+    }
+    for (const server of truncatedServers) {
+      const key = `mcp:${server}:${maxMcpPerServer}`;
+      if (this.advertisedWarnings.has(key)) continue;
+      this.advertisedWarnings.add(key);
+      const listed = (mcpTools || []).filter((t: any) => String(t?.source || 'mcp') === server).length;
+      console.warn(`[AgentRunner] MCP server '${server}' advertised ${listed} tools, capped at ${maxMcpPerServer}.`);
+    }
+
+    return Array.from(byName.values());
   }
 
   private isCompactionMemory(memory: Memory): boolean {
@@ -350,8 +945,8 @@ export class AgentRunner {
   private async autoCompactSessionIfNeeded(sessionId: string, config: any, memories: Memory[]): Promise<boolean> {
     const agentConfig = config?.agent ?? {};
     const autoCompactCfg = agentConfig.autoCompact;
-    const autoCompactEnabled = autoCompactCfg === true
-      || (typeof autoCompactCfg === 'object' && autoCompactCfg.enabled !== false);
+    const autoCompactEnabled = autoCompactCfg !== false
+      && !(typeof autoCompactCfg === 'object' && autoCompactCfg.enabled === false);
 
     if (!autoCompactEnabled) return false;
 
@@ -426,6 +1021,110 @@ export class AgentRunner {
     }
   }
 
+  private registerCredentialPoolProviders(config: any): void {
+    const resilience = config?.modelResilience || {};
+    if (resilience.enabled === false) return;
+
+    const openRouterKeys = this.readCredentialPool('OPENROUTER_API_KEYS', process.env.OPENROUTER_API_KEY)
+      .filter(key => isProviderKeyValid('openrouter', key));
+    const openRouterModels = this.uniqueStrings([
+      config?.aiModel,
+      config?.llm?.model,
+      ...(Array.isArray(resilience.openRouterModels) ? resilience.openRouterModels : []),
+      ...this.splitList(process.env.OPENROUTER_FALLBACK_MODELS)
+    ]);
+    let openRouterIndex = 0;
+    for (const key of openRouterKeys) {
+      for (const modelName of openRouterModels) {
+        if (key === process.env.OPENROUTER_API_KEY && modelName === String(config?.aiModel || config?.llm?.model || '')) continue;
+        openRouterIndex += 1;
+        ModelRegistry.register(new OpenRouterProvider(key, modelName, `openrouter_pool_${openRouterIndex}`));
+      }
+    }
+
+    const nvidiaKeys = this.readCredentialPool('NVIDIA_API_KEYS', process.env.NVIDIA_API_KEY)
+      .filter(key => isProviderKeyValid('nvidia', key));
+    const nvidiaModels = this.uniqueStrings([
+      ...(Array.isArray(resilience.nvidiaModels) ? resilience.nvidiaModels : []),
+      ...this.splitList(process.env.NVIDIA_FALLBACK_MODELS)
+    ]);
+    let nvidiaIndex = 0;
+    for (const key of nvidiaKeys) {
+      for (const modelName of nvidiaModels) {
+        nvidiaIndex += 1;
+        ModelRegistry.register(new NvidiaProvider(key, modelName, config?.nvidia?.thinking !== false, `nvidia_pool_${nvidiaIndex}`));
+      }
+    }
+  }
+
+  private readCredentialPool(envName: string, primary?: string): string[] {
+    return this.uniqueStrings([primary, ...this.splitList(process.env[envName])]);
+  }
+
+  private splitList(value: unknown): string[] {
+    return typeof value === 'string'
+      ? value.split(/[\r\n,;]+/).map(item => item.trim()).filter(Boolean)
+      : [];
+  }
+
+  private uniqueStrings(values: unknown[]): string[] {
+    return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)));
+  }
+
+  private registerOpenCodeProvider(config: any): void {
+    const apiKey = process.env.OPENCODE_API_KEY;
+    if (!apiKey) return;
+    const model = String(process.env.OPENCODE_MODEL || config?.opencode?.model || '').trim();
+    if (!model) {
+      console.warn('[AgentRunner] OPENCODE_API_KEY is set but no OpenCode model is configured (set OPENCODE_MODEL or config.opencode.model). OpenCode Zen will not be registered as a fallback.');
+      return;
+    }
+    const provider = new OpenCodeProvider(apiKey, model);
+    ModelRegistry.register(provider);
+    console.log(`[AgentRunner] Loaded OpenCode Zen provider (fallback) with model: ${model}`);
+
+    // Optional additional Zen models (OPENCODE_FALLBACK_MODELS) give real
+    // redundancy when the primary is rate-limited or cooling down. Each gets a
+    // distinct provider id so the resilient wrapper treats them independently.
+    const altModels = this.splitList(process.env.OPENCODE_FALLBACK_MODELS);
+    let altIndex = 1;
+    for (const altModel of altModels) {
+      if (altModel === model) continue;
+      const alt = new OpenCodeProvider(apiKey, altModel);
+      alt.id = `opencode_alt_${altIndex}`;
+      alt.name = `OpenCode Zen (${altModel})`;
+      ModelRegistry.register(alt);
+      altIndex += 1;
+      console.log(`[AgentRunner] Loaded OpenCode Zen fallback model: ${altModel}`);
+    }
+  }
+
+  setOpenCodeModel(modelName: string): boolean {
+    const provider = ModelRegistry.get('opencode') as OpenCodeProvider | undefined;
+    if (!provider || !(provider instanceof OpenCodeProvider)) return false;
+    provider.setModel(modelName);
+    return true;
+  }
+
+
+  private withModelFallback(primary: ModelProvider): ModelProvider {
+    const config = this.loadConfig();
+    const resilience = config?.modelResilience || {};
+    if (resilience.enabled === false || primary.id === 'mock' || primary.id === 'error' || primary.id.startsWith('resilient:')) {
+      return primary;
+    }
+    const configuredIds = Array.isArray(resilience.fallbackModelIds)
+      ? resilience.fallbackModelIds.map((id: unknown) => String(id || '').trim()).filter(Boolean)
+      : [];
+    const configured = configuredIds
+      .map((id: string) => ModelRegistry.get(id))
+      .filter((provider: ModelProvider | undefined): provider is ModelProvider => Boolean(provider));
+    const discovered = resilience.includeAllEnabledModels === false
+      ? []
+      : ModelRegistry.getAll();
+    return new ResilientModelProvider(primary, [...configured, ...discovered], resilience);
+  }
+
   // Helper to get the current model based on config/env at runtime
   private getModel(): ModelProvider {
     // 1. Check ModelRegistry for a specifically selected model (e.g. from Web UI)
@@ -434,7 +1133,7 @@ export class AgentRunner {
       const model = ModelRegistry.get(currentModelId);
       if (model) {
         console.log(`[AgentRunner] Using registry-selected model: ${currentModelId}`);
-        return model;
+        return this.withModelFallback(model);
       }
     }
 
@@ -445,7 +1144,7 @@ export class AgentRunner {
 
     // Check OpenRouter
     if (modelKey === 'openrouter') {
-      if (process.env.OPENROUTER_API_KEY) {
+      if (isProviderKeyValid('openrouter', process.env.OPENROUTER_API_KEY)) {
         const aiModel = String(config.aiModel || process.env.OPENROUTER_MODEL || '').trim();
         if (!aiModel) {
           console.warn('[AgentRunner] OpenRouter selected but no model id is configured.');
@@ -458,23 +1157,23 @@ export class AgentRunner {
           };
         }
         console.log(`[AgentRunner] Using OpenRouter legacy config: ${aiModel}`);
-        const provider = new OpenRouterProvider(process.env.OPENROUTER_API_KEY, aiModel);
+        const provider = new OpenRouterProvider(process.env.OPENROUTER_API_KEY || '', aiModel);
         ModelRegistry.register(provider);
-        return provider;
+        return this.withModelFallback(provider);
       } else {
-        console.warn('[AgentRunner] Config is OpenRouter but OPENROUTER_API_KEY is missing.');
+        console.warn('[AgentRunner] Config is OpenRouter but OPENROUTER_API_KEY is missing or invalid.');
         return {
           id: 'error',
           name: 'Error',
           generate: async () => ({
-            content: "⚠️ **Configuration Error**: You selected 'OpenRouter' but no API Key was found. Please go to Settings and enter your OpenRouter API Key."
+            content: "⚠️ **Configuration Error**: You selected 'OpenRouter' but no valid API Key was found. Please go to Settings and enter your OpenRouter API Key (starts with sk-or-v1-)."
           })
         };
       }
     }
 
     if (modelKey === 'nvidia') {
-      if (process.env.NVIDIA_API_KEY) {
+      if (isProviderKeyValid('nvidia', process.env.NVIDIA_API_KEY)) {
         const aiModel = String(config.aiModel || '').trim();
         if (!aiModel) {
           console.warn('[AgentRunner] NVIDIA selected but no model id is configured.');
@@ -488,16 +1187,45 @@ export class AgentRunner {
         }
         const enableThinking = typeof config?.nvidia?.thinking === 'boolean' ? config.nvidia.thinking : true;
         console.log(`[AgentRunner] Using NVIDIA legacy config: ${aiModel}`);
-        const provider = new NvidiaProvider(process.env.NVIDIA_API_KEY, aiModel, enableThinking);
+        const provider = new NvidiaProvider(process.env.NVIDIA_API_KEY || '', aiModel, enableThinking);
         ModelRegistry.register(provider);
-        return provider;
+        return this.withModelFallback(provider);
       } else {
-        console.warn('[AgentRunner] Config is NVIDIA but NVIDIA_API_KEY is missing.');
+        console.warn('[AgentRunner] Config is NVIDIA but NVIDIA_API_KEY is missing or invalid.');
         return {
           id: 'error',
           name: 'Error',
           generate: async () => ({
-            content: "⚠️ **Configuration Error**: You selected 'NVIDIA' but no API Key was found. Please set NVIDIA_API_KEY in .env."
+            content: "⚠️ **Configuration Error**: You selected 'NVIDIA' but no valid API Key was found. Please set NVIDIA_API_KEY (starts with nvapi-) in Settings or .env."
+          })
+        };
+      }
+    }
+
+    if (modelKey === 'opencode') {
+      if (process.env.OPENCODE_API_KEY) {
+        const aiModel = String(config.aiModel || process.env.OPENCODE_MODEL || '').trim();
+        if (!aiModel) {
+          console.warn('[AgentRunner] OpenCode selected but no model id is configured.');
+          return {
+            id: 'error',
+            name: 'Error',
+            generate: async () => ({
+              content: "Configuration Error: OpenCode selected but no model id is set. Set config.aiModel or OPENCODE_MODEL."
+            })
+          };
+        }
+        console.log(`[AgentRunner] Using OpenCode Zen legacy config: ${aiModel}`);
+        const provider = new OpenCodeProvider(process.env.OPENCODE_API_KEY, aiModel);
+        ModelRegistry.register(provider);
+        return this.withModelFallback(provider);
+      } else {
+        console.warn('[AgentRunner] Config is OpenCode but OPENCODE_API_KEY is missing.');
+        return {
+          id: 'error',
+          name: 'Error',
+          generate: async () => ({
+            content: "⚠️ **Configuration Error**: You selected 'OpenCode' but no API Key was found. Please set OPENCODE_API_KEY in .env."
           })
         };
       }
@@ -511,7 +1239,7 @@ export class AgentRunner {
   private getModelById(modelId?: string): ModelProvider {
     if (modelId) {
       const provider = ModelRegistry.get(modelId);
-      if (provider) return provider;
+      if (provider) return this.withModelFallback(provider);
     }
     return this.getModel();
   }
@@ -542,26 +1270,94 @@ export class AgentRunner {
     // Start background worker with goal executor
     backgroundWorker.setExecutor(async (goal, progressCallback) => {
       progressCallback(10, 'Starting goal execution...');
-      const model = this.getModel();
-      const prompt = `You are working on a background task autonomously.\n\nGoal: ${goal.title}\n\nDescription: ${goal.description}\n\nTags: ${goal.tags.join(', ') || 'none'}\n\nWork on this goal step by step. When done, provide a summary of what was accomplished.`;
-      const response = await model.generate(prompt, this.baseSystemPrompt, []);
-      progressCallback(100, 'Goal completed');
-      return response.content || 'Task completed';
+
+      if (goal.metadata?.kind === 'learned-skill-creation') {
+        progressCallback(35, 'Validating the learned workflow...');
+        const result = await this.learning.executeSkillCreationGoal(goal);
+        progressCallback(100, 'Learned skill created and activated');
+        return result;
+      }
+
+      const backgroundSessionId = `${goal.sessionId}:background:${goal.id}`;
+      const before = this.memory.getAll(backgroundSessionId).length;
+      const project = goal.projectId ? backgroundWorker.getProject(goal.projectId) : undefined;
+      const dependencyLines = goal.dependencies.length > 0
+        ? goal.dependencies.map(depId => {
+          const dep = backgroundWorker.getGoal(depId);
+          return dep ? `${dep.title} [${dep.id.slice(0, 8)}]: ${dep.status}` : `${depId}: missing`;
+        })
+        : [];
+      const projectMemory = project
+        ? [
+          project.memory.notes.length > 0 ? `Project notes: ${project.memory.notes.slice(-3).join(' | ')}` : '',
+          project.memory.filesTouched.length > 0 ? `Project files touched: ${project.memory.filesTouched.slice(-10).join(', ')}` : '',
+          project.memory.decisions.length > 0 ? `Project decisions: ${project.memory.decisions.slice(-5).join(' | ')}` : ''
+        ].filter(Boolean)
+        : [];
+      const backgroundMsg: Message = {
+        id: uuidv4(),
+        channel: 'background',
+        senderId: 'background-worker',
+        content: [
+          'Background goal execution request.',
+          '',
+          `Goal: ${goal.title}`,
+          '',
+          `Description: ${goal.description}`,
+          '',
+          `Goal ID: ${goal.id}`,
+          goal.projectId ? `Project: ${project?.title || goal.projectId} (${goal.projectId})` : '',
+          goal.milestoneId ? `Milestone ID: ${goal.milestoneId}` : '',
+          goal.parentId ? `Parent goal ID: ${goal.parentId}` : '',
+          `Attempt: ${goal.attempts + 1}/${goal.maxRetries + 1}`,
+          goal.error ? `Previous error: ${goal.error}` : '',
+          goal.checkpoint?.note ? `Last checkpoint: ${goal.checkpoint.note}` : '',
+          dependencyLines.length > 0 ? `Dependencies:\n${dependencyLines.map(line => `- ${line}`).join('\n')}` : '',
+          projectMemory.length > 0 ? projectMemory.join('\n') : '',
+          '',
+          `Tags: ${goal.tags.join(', ') || 'none'}`,
+          '',
+          'Use available tools when needed. If you change files or make project decisions, record them with the background_goals goal_memory or project_memory action. If this is a retry, use the previous error and checkpoint to recover instead of repeating the same failed approach. Finish with a concise summary of what was accomplished.'
+        ].filter(Boolean).join('\n'),
+        timestamp: Date.now(),
+        metadata: {
+          backgroundGoalId: goal.id,
+          backgroundGoalTitle: goal.title
+        }
+      };
+
+      progressCallback(25, 'Dispatching goal through the tool-capable agent loop...');
+      await this.processMessage(backgroundSessionId, backgroundMsg);
+
+      const newMemories = this.memory.getAll(backgroundSessionId).slice(before);
+      const lastAssistant = [...newMemories].reverse().find(m => m.role === 'assistant');
+      progressCallback(100, 'Goal completed through agent loop');
+      return lastAssistant?.content || 'Background goal completed through the tool-capable agent loop.';
     });
 
-    // Wire analytics for background goals
-    const origOnComplete = backgroundWorker;
+// Wire analytics for background goals
     backgroundWorker.setOnComplete(async (goal) => {
       const duration = goal.completedAt && goal.startedAt ? goal.completedAt - goal.startedAt : undefined;
+      const summary = this.summarizeBackgroundReport(goal.result || goal.error || 'Done');
+      const status = goal.status === 'completed' ? 'completed' as const : 'failed' as const;
+      executionStateManager.recordBackgroundUpdate(goal.sessionId, `${goal.title}: ${summary}`, status);
+
       if (goal.status === 'completed') {
         analyticsTracker.recordGoalComplete(goal.sessionId, goal.title, duration);
       } else {
         analyticsTracker.recordGoalFailed(goal.sessionId, goal.title);
       }
-      await this.gateway.sendResponse(goal.sessionId, `✅ **Background task completed:** ${goal.title}\n\n${goal.result || 'Done'}`);
+      if (!goal.tags.includes('learning')) {
+        await this.sendManagedProgressUpdate(goal.sessionId, { final: goal.status !== 'in-progress' });
+      }
     });
     backgroundWorker.setOnReport(async (sessionId, message) => {
-      await this.gateway.sendResponse(sessionId, message);
+      const summarized = this.summarizeBackgroundReport(message);
+      // Skip trivial periodic status reports (pure counts/status lines)
+      const countOnlyPattern = /^(Background status update:)\s*(Active:\s*\d+,\s*Pending:\s*\d+)$/;
+      if (countOnlyPattern.test(summarized.trim())) return;
+      executionStateManager.recordBackgroundUpdate(sessionId, summarized, 'in_progress');
+      await this.sendManagedResponse(sessionId, summarized, { final: false });
     });
     backgroundWorker.setAutoGoalGenerator(async (sessionId) => {
       const config = this.loadConfig();
@@ -645,18 +1441,93 @@ export class AgentRunner {
     }
   }
 
+  private isContinuationRequest(text: string): boolean {
+    const normalized = String(text || '').trim().toLowerCase();
+    return normalized === 'continue'
+      || normalized === 'resume'
+      || normalized === 'go on'
+      || normalized === 'keep going'
+      || normalized === 'carry on'
+      || normalized.startsWith('continue ')
+      || normalized.startsWith('resume ');
+  }
+
+  private async sendManagedResponse(
+    sessionId: string,
+    text: string,
+    options: { final?: boolean; fallbackNow?: string; fallbackNext?: string } = {}
+  ) {
+    const finalText = executionStateManager.prepareAssistantResponse(sessionId, text, options);
+    if (!finalText || !finalText.trim()) return;
+    await this.gateway.sendResponse(sessionId, finalText);
+  }
+
+  private async sendManagedProgressUpdate(
+    sessionId: string,
+    options: { final?: boolean; fallbackNow?: string; fallbackNext?: string } = {}
+  ) {
+    const summary = executionStateManager.buildConciseContinuation(sessionId, options);
+    if (!summary || !summary.trim()) return;
+    await this.sendManagedResponse(sessionId, summary, options);
+  }
+
+  private summarizeBackgroundReport(message: string): string {
+    const cleaned = String(message || '').replace(/\s+/g, ' ').trim();
+    if (!cleaned) return 'Background work is still in progress.';
+    if (cleaned.length <= 220) return cleaned;
+    return cleaned.slice(0, 217).trimEnd() + '...';
+  }
+
+  private async tryHandleCasualConversation(sessionId: string, msg: Message, isBackgroundMessage: boolean): Promise<boolean> {
+    if (isBackgroundMessage) return false;
+    const text = String(msg.content || '').trim();
+    const normalized = text.toLowerCase().replace(/[!?.]+$/g, '').trim();
+    let response = '';
+    if (/^(?:hi|hello|hey|hiya|howdy|good morning|good afternoon|good evening)(?:\s+gitu)?$/.test(normalized)) {
+      response = 'Hello! What would you like me to work on?';
+    } else if (/^(?:thanks|thank you|thank you very much|thx)$/.test(normalized)) {
+      response = "You're welcome.";
+    } else if (/^(?:ok|okay|got it|understood|cool)$/.test(normalized)) {
+      response = 'Ready when you are.';
+    } else if (/^(?:how are you|how is it going|are you ready)$/.test(normalized)) {
+      response = "I'm ready. What would you like me to work on?";
+    } else if (/^(?:who are you|what are you|what can you do)$/.test(normalized)) {
+      response = 'I’m Gitu, your local autonomous workspace agent. I can inspect and edit real projects, run and verify commands, research, automate workflows, use reusable skills, and delegate independent work to isolated specialist agents.';
+    }
+    if (!response) return false;
+
+    this.memory.add(sessionId, {
+      role: 'user', content: text, timestamp: Date.now(),
+      metadata: { ...(msg.metadata || {}), casualConversation: true }
+    });
+    this.memory.add(sessionId, {
+      role: 'assistant', content: response, timestamp: Date.now(),
+      metadata: { final: true, completed: true, casualConversation: true }
+    });
+    analyticsTracker.recordMessage(sessionId);
+    await this.deliverFinalResponse(sessionId, response, uuidv4(), uuidv4(), true);
+    return true;
+  }
+
   async processMessage(sessionId: string, msg: Message) {
     console.log(`[AgentRunner] Processing message for session ${sessionId}`);
+    const isBackgroundMessage = msg.channel === 'background' || Boolean(msg.metadata?.backgroundGoalId);
 
     // Track user activity for background worker idle detection
-    backgroundWorker.recordActivity(sessionId);
-    this.learning.recordActivity(sessionId);
+    if (!isBackgroundMessage) {
+      backgroundWorker.recordActivity(sessionId);
+      this.learning.recordActivity(sessionId);
+    }
 
     // Flush any queued DND notifications when user becomes active
-    const pendingNotifications = dndManager.flushQueue(sessionId);
+    const pendingNotifications = isBackgroundMessage ? [] : dndManager.flushQueue(sessionId);
     if (pendingNotifications.length > 0) {
       const summary = pendingNotifications.map(n => `• ${n.message}`).join('\n');
       await this.gateway.sendResponse(sessionId, `📬 **${pendingNotifications.length} notifications while you were away:**\n\n${summary}`);
+    }
+
+    if (this.handleMainGoalCommand(sessionId, msg.content)) {
+      return;
     }
 
     if (this.handleScheduleCommand(sessionId, msg.content)) {
@@ -678,6 +1549,11 @@ export class AgentRunner {
       return;
     }
 
+    // Handle human-approved learning actions
+    if (await this.handleLearningCommand(sessionId, msg.content)) {
+      return;
+    }
+
     if (await this.handleDeepResearchCommand(sessionId, msg)) {
       return;
     }
@@ -689,37 +1565,47 @@ export class AgentRunner {
       return;
     }
 
-    // 1. Add User Message to Memory
+    if (await this.tryHandleCasualConversation(sessionId, msg, isBackgroundMessage)) {
+      return;
+    }
+
+    if (!isBackgroundMessage) {
+      mainGoalManager.observeUserMessage(sessionId, msg);
+    }
+
+    const missionMarker = uuidv4();
+
+// 1. Add User Message to Memory
     this.memory.add(sessionId, {
       role: 'user',
       content: msg.content,
       timestamp: Date.now(),
-      metadata: msg.metadata
+      metadata: { ...(msg.metadata || {}), __missionMarker: missionMarker }
     });
 
     // Track message for analytics
-    analyticsTracker.recordMessage(sessionId);
+    if (!isBackgroundMessage) {
+      analyticsTracker.recordMessage(sessionId);
+    }
 
-    // 2. Fetch Tools (MCP + Native Skills)
-    let allTools: any[] = [];
+    // Initialize mission execution state (anti-repetition)
+    if (!isBackgroundMessage) {
+      executionStateManager.beginMission(sessionId, msg.content);
+    }
 
+    // Multi-turn Loop for Tool Execution
+    const config = this.loadConfig();
+
+    // 2. Fetch Tools (MCP + Native Skills), capped and deduplicated so the
+    //    advertised list stays bounded and name conflicts resolve predictably
+    //    (native skills win over MCP tools with the same name).
+    let mcpTools: any[] = [];
     try {
-      const mcpTools = await this.mcpManager.listTools();
-      allTools = allTools.concat(mcpTools);
+      mcpTools = await this.mcpManager.listTools();
     } catch (e) {
       console.error('[AgentRunner] Failed to list MCP tools:', e);
     }
-
-    const skills = SkillRegistry.getAll();
-    skills.forEach(skill => {
-      if (skill.inputSchema) {
-        allTools.push({
-          name: skill.name,
-          description: skill.description,
-          inputSchema: skill.inputSchema
-        });
-      }
-    });
+    const allTools = this.buildAdvertisedTools(sessionId, mcpTools, config);
 
     // Check for legacy skill triggers
     let context = "";
@@ -731,37 +1617,78 @@ export class AgentRunner {
       }
     }
 
-    // Multi-turn Loop for Tool Execution
-    const config = this.loadConfig();
     const agentConfig = config?.agent ?? {};
-    const configuredMaxTurnsRaw =
+    const unlimitedTools = Boolean(agentConfig.unlimitedTools);
+    const configuredMaxTurns =
       typeof config?.agent?.maxTurns === "number"
         ? config.agent.maxTurns
         : (typeof config?.maxTurns === "number" ? config.maxTurns : undefined);
-    const hasConfiguredMaxTurns = Number.isFinite(configuredMaxTurnsRaw);
-    const unlimitedTurns = hasConfiguredMaxTurns && Number(configuredMaxTurnsRaw) <= 0;
-    const maxTurns = unlimitedTurns
-      ? Number.POSITIVE_INFINITY
-      : (hasConfiguredMaxTurns
-        ? Math.min(50, Math.max(1, Math.floor(Number(configuredMaxTurnsRaw))))
-        : this.defaultMaxTurns);
+    const hasTurnLimit = Number.isFinite(configuredMaxTurns) && Number(configuredMaxTurns) > 0;
+    const maxTurns = unlimitedTools
+      ? Number.MAX_SAFE_INTEGER
+      : (hasTurnLimit
+        ? Math.max(1, Math.floor(Number(configuredMaxTurns)))
+        : 24);
 
     const autoContinueCfg = agentConfig.autoContinue;
-    const autoContinueEnabled = !unlimitedTurns && (autoContinueCfg === true
-      || (typeof autoContinueCfg === "object" && autoContinueCfg.enabled !== false));
+    const autoContinueEnabled = autoContinueCfg !== false
+      && !(typeof autoContinueCfg === "object" && autoContinueCfg.enabled === false);
     const autoContinueMax = typeof autoContinueCfg === "number"
       ? Math.max(0, Math.floor(autoContinueCfg))
       : (typeof autoContinueCfg?.maxBatches === "number"
         ? Math.max(0, Math.floor(autoContinueCfg.maxBatches))
-        : 3);
+        : 2);
     const autoContinueNotify = typeof autoContinueCfg?.notify === "boolean"
       ? autoContinueCfg.notify
-      : true;
+      : false;
+    const repetitionGuardCfg = typeof agentConfig.repetitionGuard === 'object'
+      ? agentConfig.repetitionGuard
+      : {};
+    const maxRepeatedToolBatchesRaw =
+      typeof repetitionGuardCfg.maxRepeatedToolBatches === 'number'
+        ? repetitionGuardCfg.maxRepeatedToolBatches
+        : (typeof agentConfig.maxRepeatedToolBatches === 'number' ? agentConfig.maxRepeatedToolBatches : undefined);
+    const maxRepeatedToolBatches = Number.isFinite(maxRepeatedToolBatchesRaw)
+      ? Math.max(2, Math.floor(Number(maxRepeatedToolBatchesRaw)))
+      : 3;
+    const maxExplorationBatchesRaw =
+      typeof repetitionGuardCfg.maxExplorationBatches === 'number'
+        ? repetitionGuardCfg.maxExplorationBatches
+        : (typeof agentConfig.maxExplorationBatches === 'number' ? agentConfig.maxExplorationBatches : undefined);
+    const maxExplorationBatches = Number.isFinite(maxExplorationBatchesRaw)
+      ? Math.max(2, Math.floor(Number(maxExplorationBatchesRaw)))
+      : 6;
+    const toolBatchCounts = new Map<string, number>();
+    const missionDisabledTools = new Set<string>();
+    const singleUseTools = new Set(['notes']);
+    const toolUsageCounts = new Map<string, number>();
+    const maxToolCalls = unlimitedTools
+      ? Number.MAX_SAFE_INTEGER
+      : (typeof agentConfig.maxToolCalls === 'number'
+        ? Math.max(4, Math.floor(agentConfig.maxToolCalls))
+        : 12);
+    let forceFinalAnswer = false;
+    let suppressedToolRequests = 0;
+    const toolRequired = this.requiresToolExecution(msg.content);
+    const verificationRequired = /\b(fix|debug|implement|build|code|edit|modify|refactor|test|verify)\b/i.test(msg.content);
+    const maxForcedContinuations = unlimitedTools
+      ? Number.MAX_SAFE_INTEGER
+      : (typeof agentConfig.maxPrematureCompletions === 'number'
+        ? Math.max(1, Math.floor(agentConfig.maxPrematureCompletions))
+        : 3);
+    let forcedContinuations = 0;
+    let totalToolCalls = 0;
+    let lastBatchHadFailure = false;
+    let lastToolError = '';
+    let repeatedFailureRecoveries = 0;
+    let explorationBatches = 0;
+    let toolSequence = 0;
+    let lastMutationSequence = -1;
+    let lastVerificationSequence = -1;
 
     const initialMemories = this.memory.getAll(sessionId);
     await this.autoCompactSessionIfNeeded(sessionId, config, initialMemories);
 
-    let executedAnyTools = false;
     let stoppedByStepLimit = true;
     let autoContinueCount = 0;
     let continuationBatch = 0;
@@ -771,28 +1698,24 @@ export class AgentRunner {
         // Smart Context Construction
         const allMemories = this.applyCompactionFilter(this.memory.getAll(sessionId));
         const totalMemories = allMemories.length;
-        const recentCount = 10;
-
-        let contextMemories: typeof allMemories = [];
-
-        if (totalMemories <= recentCount + 2) {
-          // Short conversation, use everything
-          contextMemories = allMemories;
-        } else {
-          // Long conversation: Pin Goal + Recent
-          const firstUserMsg = allMemories.find(m => m.role === "user");
-          const recentMemories = allMemories.slice(-recentCount);
-
-          if (firstUserMsg && !recentMemories.includes(firstUserMsg)) {
-            contextMemories = [
-              firstUserMsg,
-              { role: "system", content: `... (Skipped ${totalMemories - recentCount - 1} messages) ...`, timestamp: Date.now() },
-              ...recentMemories
-            ];
-          } else {
-            contextMemories = recentMemories;
-          }
-        }
+        const missionStartIndex = allMemories.findIndex(memory => memory.metadata?.__missionMarker === missionMarker);
+        const safeMissionStart = missionStartIndex >= 0 ? missionStartIndex : Math.max(0, totalMemories - 1);
+        const priorMemories = allMemories.slice(0, safeMissionStart);
+        const fullMissionMemories = allMemories.slice(safeMissionStart);
+        const missionMemories: Memory[] = fullMissionMemories.length > 24
+          ? [
+              fullMissionMemories[0],
+              {
+                role: 'system',
+                content: `... (${fullMissionMemories.length - 24} earlier mission events summarized by durable execution state) ...`,
+                timestamp: Date.now()
+              },
+              ...fullMissionMemories.slice(-23)
+            ]
+          : fullMissionMemories;
+        const recentPrior = priorMemories.slice(-6);
+        const relevantPrior = this.selectRelevantMemories(priorMemories.slice(-250), msg.content, 4);
+        const contextMemories = [...new Set([...relevantPrior, ...recentPrior, ...missionMemories])];
 
         // Re-fetch logic for loop i > 0 is handled implicitly because we fetch from memory each time
         // But we must respect the 'current state' if we just added things in previous iterations of THIS loop
@@ -808,7 +1731,9 @@ export class AgentRunner {
         const currentHistoryText = contextMemories.map((m, index) => {
           const truncatedContent = truncateForContext(m.content);
           if (m.role === "user") {
-            return (index === 0 && totalMemories > recentCount) ? `User (Original Goal): ${truncatedContent}` : `User: ${truncatedContent}`;
+            return m.metadata?.__missionMarker === missionMarker
+              ? `User (Current Mission): ${truncatedContent}`
+              : `User: ${truncatedContent}`;
           }
           if (m.role === "assistant") return `Assistant: ${truncatedContent}`;
           if (m.role === "system") return `System: ${truncatedContent}`;
@@ -818,19 +1743,22 @@ export class AgentRunner {
         // Dynamic Identity Injection
         const agentName = config.name || "Gitu";
         let systemPrompt = this.baseSystemPrompt.replace("{{AGENT_NAME}}", agentName);
-        systemPrompt += this.buildWorkspacePrompt(msg.channel);
+        systemPrompt += this.buildWorkspacePrompt(msg.channel, sessionId, msg.content);
         systemPrompt += `\n\n${this.buildTimePrompt()}`;
 
         // User Context Injection
         const lastUserMsg = [...allMemories].reverse().find(m => m.role === "user");
         const username = lastUserMsg?.metadata?.username || msg.metadata?.username || "User";
         systemPrompt += `\n\nYou are speaking with ${username}.`;
+        systemPrompt += this.buildProjectPrompt(msg.metadata);
 
         const prompt = `
-Previous Conversation:
+Conversation and current mission:
 ${currentHistoryText}
 
-${i === 0 && continuationBatch === 0 ? `Current User Input: ${msg.content}` : '(Continuing execution...)'}
+${i === 0 && continuationBatch === 0
+  ? 'Begin the current mission from the user message above.'
+  : 'Continue the current mission from the latest tool results above.'}
 ${context ? `\nSystem Context: ${context}` : ''}
 `;
 
@@ -846,73 +1774,354 @@ ${context ? `\nSystem Context: ${context}` : ''}
           ? `${systemPrompt}\n\n[Thinking Mode: ${thinkingPrompt}]`
           : systemPrompt;
         const planPrompt = planModeManager.getPlanPrompt(sessionId);
-        const finalSystemPrompt = planPrompt
+        let finalSystemPrompt = planPrompt
           ? `${enhancedSystemPrompt}\n\n${planPrompt}`
           : enhancedSystemPrompt;
 
-        // Call Model (Dynamic Selection w/ Model Router)
-        const routedModelId = modelRouter.isEnabled() ? modelRouter.selectModelId(msg.content) : null;
-        const currentModel = routedModelId ? this.getModelById(routedModelId) : this.getModel();
+        finalSystemPrompt += [
+          '',
+          'Execution contract:',
+          '- Work autonomously until the current mission is actually complete or a concrete external blocker makes progress impossible.',
+          '- Never present a plan, promise, or future action as the final answer. Use the available tools now.',
+          '- Do not ask the user to say "continue" for work you can complete in this run.',
+          '- Do not repeat prior plans, explanations, or summaries. Continue from recorded tool results.',
+          '- On a turn where you call tools, put a short user-facing progress update in response content: 1-3 natural first-person sentences explaining what you found or are doing next. Do not reveal hidden reasoning or chain-of-thought.',
+          '- Respect tool dependencies: inspect before editing and verify after changing files or state.',
+          `- Runtime platform: ${process.platform}. ${process.platform === 'win32' ? 'The shell uses PowerShell; use PowerShell commands and Windows paths.' : 'Use commands appropriate for this platform.'}`,
+          '- Use multiple delegate_agent calls or its tasks batch for genuinely independent subtasks; they run concurrently.',
+          '- Use execute_workflow when several dependent existing-tool calls can be expressed as one validated sequence with explicit inputs and outputs.',
+          toolRequired
+            ? '- This is an action task. You must use tools and gather verification evidence before giving the final answer.'
+            : '- If the request only needs an answer, respond directly once you have enough evidence.'
+        ].join('\n');
 
-        // STREAMING LOGIC (wrapped with retry handler)
-        let response;
-        if (currentModel.generateStream) {
-          let streamedAnyChunk = false;
-          response = await withModelRetry(() => currentModel.generateStream!(prompt, finalSystemPrompt, allTools, (chunk) => {
-            if (!chunk) return;
-            streamedAnyChunk = true;
-            void this.gateway.sendStreamChunk(sessionId, chunk);
-          }), 'StreamGenerate');
-          if (!streamedAnyChunk && response?.content) {
-            await this.gateway.sendResponse(sessionId, response.content);
-          }
-        } else {
-          // Fallback for non-streaming models (with retry)
-          response = await withModelRetry(
-            () => currentModel.generate(prompt, finalSystemPrompt, allTools),
-            'Generate'
+        // Inject anti-repetition continuation prompt for turns > 0
+        if (i > 0 || continuationBatch > 0) {
+          const continuationPrompt = executionStateManager.buildContinuationPrompt(
+            sessionId,
+            { continuation: true, finalTurn: false }
           );
-          if (!currentModel.generateStream) {
-            await this.gateway.sendResponse(sessionId, response.content || "");
+          if (continuationPrompt) {
+            finalSystemPrompt = `${finalSystemPrompt}\n\n${continuationPrompt}`;
           }
         }
+        if (forceFinalAnswer) {
+          finalSystemPrompt += '\n\nFINAL RESPONSE REQUIRED: Tool execution is closed for this task. Return the complete user-facing result now using evidence already in context. Do not emit a tool call, do not promise future work, and do not repeat a progress update.';
+        }
+
+        // Call Model (Dynamic Selection w/ Model Router)
+        // Explicit rules first, then level-aware capability routing.
+        let routedModelId: string | null = null;
+        if (modelRouter.isEnabled()) {
+          routedModelId = modelRouter.selectModelId(msg.content);
+        } else if (modelRouter.hasProviders()) {
+          routedModelId = modelRouter.selectModelIdByLevel(msg.content);
+        }
+        const currentModel = routedModelId ? this.getModelById(routedModelId) : this.getModel();
+        const turnRunId = uuidv4();
+        const turnMessageId = uuidv4();
+
+        // Stream model output live to structured-streaming channels (web):
+        // lazily open a message bubble on the first chunk, append everything
+        // after. Tool-turn text is finalized as a completed bubble once the
+        // tool batch is known, and final answers are finalized by
+        // deliverFinalResponse (its assistant_start resets the bubble, so the
+        // buffered final text can never duplicate the streamed text). Non-
+        // streaming channels still receive the buffered response at the end.
+        const attachments: ModelAttachment[] = Array.isArray(msg.metadata?.attachments)
+          ? msg.metadata.attachments.slice(0, 4).filter((item: any) =>
+              item?.type === 'image'
+              && typeof item?.dataUrl === 'string'
+              && /^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(item.dataUrl)
+            )
+          : [];
+        const modelTools = forceFinalAnswer
+          ? []
+          : allTools.filter(tool => !missionDisabledTools.has(String(tool?.name || '')));
+        let response;
+        let turnReasoning: string | undefined;
+        let fullStreamContent = '';
+        let liveStreamed = false;
+        if (currentModel.generateStream) {
+          response = await withModelRetry(() => currentModel.generateStream!(prompt, finalSystemPrompt, modelTools, (chunk) => {
+            if (!chunk) return;
+            fullStreamContent += chunk;
+            if (this.gateway.supportsStructuredStreaming?.(sessionId)) {
+              if (!liveStreamed) {
+                liveStreamed = true;
+                void this.gateway.sendStreamEvent(sessionId, { type: 'assistant_start', runId: turnRunId, messageId: turnMessageId });
+              }
+              void this.gateway.sendStreamEvent(sessionId, { type: 'assistant_delta', runId: turnRunId, messageId: turnMessageId, text: chunk });
+            }
+          }, attachments), 'StreamGenerate');
+          if (fullStreamContent.trim() && !response?.content) {
+            response.content = fullStreamContent;
+          }
+        } else {
+          response = await withModelRetry(
+            () => currentModel.generate(prompt, finalSystemPrompt, modelTools, attachments),
+            'Generate'
+          );
+        }
+        turnReasoning = (response as any)?.reasoning;
 
         // Track cost
         try {
           const modelName = (currentModel as any).modelName || (currentModel as any).model || 'unknown';
-          costTracker.recordFromText(modelName, sessionId, prompt, response.content || '');
+          const usage = response?.usage;
+          if (usage && Number.isFinite(Number(usage.promptTokens))) {
+            costTracker.record(
+              modelName,
+              sessionId,
+              Number(usage.promptTokens) || 0,
+              Number(usage.completionTokens) || 0,
+              Number(usage.cacheReadTokens) || 0,
+              Number(usage.cacheWriteTokens) || 0
+            );
+          } else {
+            costTracker.recordFromText(modelName, sessionId, prompt, response.content || '');
+          }
         } catch { /* ignore cost tracking errors */ }
-
-        // Handle Content (Save to Memory) — sanitize output via guardrails
-        if (response.content) {
-          const sanitized = guardrailManager.sanitizeOutput(response.content);
-          const cleanContent = sanitized.sanitized || response.content;
-          this.memory.add(sessionId, {
-            role: "assistant",
-            content: cleanContent,
-            timestamp: Date.now()
-          });
-        }
 
         // Handle Tool Calls
         if (response.toolCalls && response.toolCalls.length > 0) {
-          console.log(`[AgentRunner] Executing ${response.toolCalls.length} tools in parallel...`);
-          await this.gateway.sendResponse(sessionId, `${DEBUG_PREFIX} 🛠️ Executing ${response.toolCalls.length} tools...`);
-          executedAnyTools = true;
-
-          // Track tool calls for analytics
+          if (liveStreamed && fullStreamContent.trim()) {
+            void this.gateway.sendStreamEvent(sessionId, {
+              type: 'assistant_done',
+              runId: turnRunId,
+              messageId: turnMessageId,
+              finalText: fullStreamContent.trim(),
+              ok: true,
+              progress: true
+            });
+          }
+          for (const call of response.toolCalls) this.normalizeToolCall(call);
+          const disabledRequests = response.toolCalls.filter(call => missionDisabledTools.has(String(call?.name || '')));
+          if (forceFinalAnswer || disabledRequests.length > 0) {
+            forceFinalAnswer = true;
+            suppressedToolRequests += 1;
+            if (suppressedToolRequests >= 2) {
+              const candidate = String(response.content || '').trim();
+              const finalText = candidate && !this.looksLikeProgressOnly(candidate)
+                ? candidate
+                : 'I stopped additional tool calls because the task reached its safety budget. The completed tool results have been preserved, but the model did not provide a reliable final summary.';
+              this.memory.add(sessionId, {
+                role: 'assistant', content: finalText, timestamp: Date.now(),
+                metadata: { final: true, completed: Boolean(candidate), toolBudgetStopped: true }
+              });
+              await this.deliverFinalResponse(sessionId, finalText, turnRunId, turnMessageId, Boolean(candidate));
+              stoppedByStepLimit = false;
+              break;
+            }
+            this.memory.add(sessionId, {
+              role: 'system',
+              content: 'A tool call was suppressed because that tool has already completed its allowed work for this task. Produce the complete final answer now using the collected evidence. Do not call another tool and do not describe future work.',
+              timestamp: Date.now(),
+              metadata: { type: 'mission_tool_budget' }
+            });
+            continue;
+          }
+          if (!unlimitedTools) {
+            const defaultToolCaps: Record<string, number> = {
+              notes: 1,
+              shell: 8,
+              web_fetch: 8,
+              web_search: 3,
+              code_search: 8,
+              git: 8,
+              code_review: 3,
+              apply_patch: 6,
+              playwright: 6,
+              delegate_agent: 6
+            };
+            const capConfig = typeof repetitionGuardCfg.toolCaps === 'object' ? repetitionGuardCfg.toolCaps : {};
+            let exceededTool = '';
+            for (const call of response.toolCalls) {
+              const name = String(call?.name || 'tool');
+              const nextCount = (toolUsageCounts.get(name) || 0) + 1;
+              const cap = Number.isFinite(Number(capConfig[name]))
+                ? Math.max(1, Math.floor(Number(capConfig[name])))
+                : (defaultToolCaps[name] || 6);
+              if (nextCount > cap) exceededTool = name;
+            }
+            if (exceededTool) {
+              missionDisabledTools.add(exceededTool);
+              forceFinalAnswer = true;
+              this.memory.add(sessionId, {
+                role: 'system',
+                content: `Tool '${exceededTool}' reached its per-task call limit. It is now disabled. Produce the complete final answer using the results already collected; do not perform more inspection or describe future work.`,
+                timestamp: Date.now(),
+                metadata: { type: 'mission_tool_budget' }
+              });
+              continue;
+            }
+          }
           for (const call of response.toolCalls) {
-            analyticsTracker.recordToolCall(sessionId, call.name);
+            const name = String(call?.name || 'tool');
+            toolUsageCounts.set(name, (toolUsageCounts.get(name) || 0) + 1);
+          }
+          const toolBatchSignature = this.buildToolBatchSignature(response.toolCalls);
+          const repeatedBatchCount = (toolBatchCounts.get(toolBatchSignature) || 0) + 1;
+          toolBatchCounts.set(toolBatchSignature, repeatedBatchCount);
+          if (repeatedBatchCount >= maxRepeatedToolBatches) {
+            const toolNames = response.toolCalls.map(c => c.name).join(', ');
+            const reason = `Repeated the same tool batch ${repeatedBatchCount} times: ${toolNames}.`;
+            if (lastBatchHadFailure && repeatedFailureRecoveries < 1) {
+              repeatedFailureRecoveries += 1;
+              this.memory.add(sessionId, {
+                role: 'system',
+                content: [
+                  `Runtime recovery: ${reason}`,
+                  lastToolError ? `Last error: ${lastToolError}` : '',
+                  `Do not call the same failed command again. Use a different approach appropriate for ${process.platform}.`,
+                  'Continue autonomously and verify the alternative.'
+                ].filter(Boolean).join('\n'),
+                timestamp: Date.now(),
+                metadata: { type: 'repetition_recovery' }
+              });
+              continue;
+            }
+            if (!lastBatchHadFailure) {
+              forceFinalAnswer = true;
+              for (const call of response.toolCalls) missionDisabledTools.add(String(call.name || ''));
+              this.memory.add(sessionId, {
+                role: 'system',
+                content: `The same successful tool action was requested ${repeatedBatchCount} times. It has been suppressed. Use the evidence already collected and produce the complete final answer now with no more tool calls.`,
+                timestamp: Date.now(),
+                metadata: { type: 'repetition_recovery' }
+              });
+              continue;
+            }
+            executionStateManager.markBlocked(sessionId, reason);
+            stoppedByStepLimit = false;
+            const blockedText = [
+              `I stopped the task because the same failed tool action was repeated ${repeatedBatchCount} times.`,
+              lastToolError ? `Last error: ${lastToolError}` : '',
+              'The loop was stopped instead of showing or executing the same action again.'
+            ].filter(Boolean).join('\n\n');
+            this.memory.add(sessionId, {
+              role: 'assistant',
+              content: blockedText,
+              timestamp: Date.now(),
+              metadata: { final: true, completed: false, blocked: true }
+            });
+            await this.deliverFinalResponse(sessionId, blockedText, turnRunId, turnMessageId, false);
+            break;
           }
 
-          // Map each tool call to a Promise
-          const toolPromises = response.toolCalls.map(async (call) => {
+          const batchMutates = response.toolCalls.some(call => MUTATING_TOOL_NAMES.has(String(call?.name || '')));
+          if (batchMutates) {
+            explorationBatches = 0;
+          } else {
+            explorationBatches += 1;
+            if (explorationBatches >= maxExplorationBatches) {
+              const explorationReason = `Ran ${explorationBatches} consecutive read-only tool batches (${response.toolCalls.map(c => c.name).join(', ')}) without making any changes.`;
+              if (lastBatchHadFailure && repeatedFailureRecoveries < 1) {
+                repeatedFailureRecoveries += 1;
+                this.memory.add(sessionId, {
+                  role: 'system',
+                  content: [
+                    `Runtime recovery: ${explorationReason}`,
+                    lastToolError ? `Last error: ${lastToolError}` : '',
+                    `Do not repeat the same inspection again. Use a different approach appropriate for ${process.platform}.`,
+                    'Continue autonomously and verify the alternative.'
+                  ].filter(Boolean).join('\n'),
+                  timestamp: Date.now(),
+                  metadata: { type: 'repetition_recovery' }
+                });
+                continue;
+              }
+              forceFinalAnswer = true;
+              for (const call of response.toolCalls) missionDisabledTools.add(String(call.name || ''));
+              this.memory.add(sessionId, {
+                role: 'system',
+                content: `${explorationReason} It has been suppressed. Use the evidence already collected and produce the complete final answer now with no more tool calls.`,
+                timestamp: Date.now(),
+                metadata: { type: 'repetition_recovery' }
+              });
+              continue;
+            }
+          }
+
+          const batchMessageId = `${turnMessageId}:tool:${continuationBatch}:${i}`;
+          const progressUpdate = this.buildConversationalProgressUpdate(
+            response.content || '',
+            response.toolCalls,
+            lastBatchHadFailure,
+            lastMutationSequence > lastVerificationSequence
+          );
+          await this.gateway.sendStreamEvent(sessionId, {
+            type: 'assistant_update',
+            runId: turnRunId,
+            messageId: `${missionMarker}:progress`,
+            text: progressUpdate
+          });
+
+          const parallelDelegation = response.toolCalls.length > 1
+            && response.toolCalls.every(call => call.name === 'delegate_agent');
+          console.log(`[AgentRunner] Executing ${response.toolCalls.length} tools ${parallelDelegation ? 'in parallel' : 'in dependency order'}...`);
+          await this.gateway.sendResponse(sessionId, `${DEBUG_PREFIX} 🛠️ Executing ${response.toolCalls.length} tools...`);
+          // Emit structured tool_start event
+          void this.gateway.sendStreamEvent(sessionId, {
+            type: 'tool_start', runId: turnRunId, messageId: batchMessageId,
+            name: response.toolCalls.map(c => c.name).join(', ')
+          });
+
+          // Track tool execution state
+          executionStateManager.markToolExecutionStarted(
+            sessionId,
+            `Executing ${response.toolCalls.length} tools: ${response.toolCalls.map(c => c.name).join(', ')}`
+          );
+
+          // Tool outcomes are recorded per-call inside executeToolCall
+          // (recordToolCallResult) so usage counts are exact: calls = ok + err.
+
+          const executeToolCall = async (call: any) => {
             try {
+              await hookManager.emit('before_tool', {
+                tool: call.name,
+                arguments: call.arguments || {},
+                projectId: msg.metadata?.projectId || null
+              }, sessionId);
               let output;
               const nativeSkill = SkillRegistry.get(call.name);
 
               if (nativeSkill) {
-                const args = { ...(call.arguments || {}), __sessionId: sessionId };
+                const projectWorkspacePath = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
+                const projectId = typeof msg.metadata?.projectId === 'string'
+                  ? msg.metadata.projectId.trim()
+                  : '';
+                if (projectId && !projectWorkspacePath && ['shell', 'apply_patch', 'write_file'].includes(call.name)) {
+                  throw new Error(
+                    'This project has no attached local workspace. Create or select a workspace from the Projects page before running commands or editing files.'
+                  );
+                }
+                let automaticCheckpoint: any = null;
+                const checkpointConfig = this.loadConfig()?.checkpoints || {};
+                const shellCommand = String(call.arguments?.command || '');
+                const mutatesWorkspace = (call.name === 'apply_patch' && checkpointConfig.automaticBeforePatch !== false)
+                  || (call.name === 'shell' && checkpointConfig.automaticBeforeDestructiveShell !== false && checkpointManager.shouldCheckpointShell(shellCommand));
+                if (checkpointConfig.enabled !== false && projectWorkspacePath && mutatesWorkspace) {
+                  try {
+                    automaticCheckpoint = checkpointManager.create(
+                      projectWorkspacePath,
+                      `Before ${call.name}: ${call.name === 'shell' ? shellCommand : 'file patch'}`,
+                      sessionId
+                    );
+                  } catch (checkpointError: any) {
+                    if (checkpointConfig.required === true) throw checkpointError;
+                    console.warn(`[Checkpoints] Could not create automatic checkpoint: ${checkpointError?.message || checkpointError}`);
+                  }
+                }
+                const args = {
+                  ...(call.arguments || {}),
+                  __sessionId: sessionId,
+                  __projectId: projectId || undefined,
+                  __workspacePath: projectWorkspacePath
+                };
+                if (projectWorkspacePath && call.name === "apply_patch") {
+                  args.basePath = projectWorkspacePath;
+                }
                 if (call.name === "shell") {
                   (args as any).__stream = (chunk: string) => {
                     if (chunk) {
@@ -920,33 +2129,196 @@ ${context ? `\nSystem Context: ${context}` : ''}
                     }
                   };
                 }
-                output = JSON.stringify(await nativeSkill.execute(args));
+                let nativeResult = await nativeSkill.execute(args);
+                const failedPatchCount = Number(nativeResult?.summary?.failed || 0);
+                let semanticError = nativeResult?.error
+                  || nativeResult?.success === false
+                  || failedPatchCount > 0;
+                if (semanticError) {
+                  // Dynamic skill fallback: if this skill failed (e.g. invalid/missing
+                  // API key), try another skill that provides the same capability.
+                  const requestedName = call.name;
+                  for (const altName of AgentRunner.resolveFallbackSkills(requestedName)) {
+                    const altSkill = SkillRegistry.get(altName);
+                    if (!altSkill) continue;
+                    let altResult: any;
+                    try {
+                      altResult = await altSkill.execute(AgentRunner.adaptFallbackArgs(altName, args));
+                    } catch {
+                      continue;
+                    }
+                    const altFailed = altResult?.error
+                      || altResult?.success === false
+                      || Number(altResult?.summary?.failed || 0) > 0;
+                    if (!altFailed) {
+                      nativeResult = altResult;
+                      semanticError = false;
+                      call.name = altName;
+                      this.memory.add(sessionId, {
+                        role: 'system',
+                        content: `Skill '${altName}' dynamically replaced a failed call to '${requestedName}' and succeeded. Prefer '${altName}' for similar requests in this session.`,
+                        timestamp: Date.now(),
+                        metadata: { type: 'skill_fallback' }
+                      });
+                      break;
+                    }
+                  }
+                }
+                if (semanticError) {
+                  const detail = typeof nativeResult?.error === 'string'
+                    ? [nativeResult.error, nativeResult.stderr, nativeResult.stdout]
+                        .map(value => String(value || '').trim())
+                        .filter(Boolean)
+                        .join('\n')
+                    : (failedPatchCount > 0
+                      ? `${failedPatchCount} patch operation(s) failed: ${JSON.stringify(nativeResult?.results || [])}`
+                      : `Tool '${call.name}' reported failure.`);
+                  throw new Error(detail);
+                }
+                output = JSON.stringify(automaticCheckpoint
+                  ? { result: nativeResult, checkpoint: automaticCheckpoint }
+                  : nativeResult);
               } else {
-                const result = await this.mcpManager.callTool(call.name, call.arguments);
-                output = JSON.stringify(result);
+                let mcpResult: any;
+                let dynamicOutput: string | null = null;
+                try {
+                  mcpResult = await this.mcpManager.callTool(call.name, call.arguments);
+                } catch (mcpErr: any) {
+                  const mcpMsg = String(mcpErr?.message || mcpErr);
+                  // Unknown tool name that isn't a registered skill or MCP tool:
+                  // resolve it dynamically instead of hard-failing. This routes
+                  // hallucinated/MCP-style names to real skills and creates new
+                  // tools on the fly when possible ("the agent adds the tool
+                  // itself"), instead of throwing a dead-end "tool not found".
+                  if (/not found in any connected MCP server/i.test(mcpMsg)) {
+                    const dynamic = await this.dynamicTools.resolve(call.name, call.arguments, sessionId);
+                    if (dynamic.success) {
+                      dynamicOutput = JSON.stringify(dynamic.output);
+                      if (dynamic.tool && dynamic.tool !== call.name) {
+                        this.memory.add(sessionId, {
+                          role: 'system',
+                          content: `Tool '${call.name}' was dynamically resolved to '${dynamic.tool}' and succeeded. Prefer '${dynamic.tool}' for similar requests in this session.`,
+                          timestamp: Date.now(),
+                          metadata: { type: 'skill_fallback' }
+                        });
+                      }
+                    } else {
+                      const skillNames = SkillRegistry.getAll().map((s) => s.name);
+                      const mcpNames = this.mcpManager.getKnownToolNames();
+                      const available = Array.from(new Set([...skillNames, ...mcpNames])).sort();
+                      const closest = AgentRunner.closestToolNames(call.name, available);
+                      const hint = closest.length > 0
+                        ? ` Did you mean: ${closest.join(', ')}?`
+                        : '';
+                      throw new Error(
+                        `Tool '${call.name}' is not available: it is neither a registered skill nor provided by any connected MCP server, and could not be created dynamically.` +
+                        `${hint} Run the tools_diag skill to see exactly which tools are callable. Available tools: ${available.join(', ')}.`
+                      );
+                    }
+                  } else {
+                    throw mcpErr;
+                  }
+                }
+                if (dynamicOutput !== null) {
+                  output = dynamicOutput;
+                } else {
+                  if (mcpResult?.isError || mcpResult?.error || mcpResult?.success === false) {
+                    throw new Error(String(mcpResult?.error || mcpResult?.message || `MCP tool '${call.name}' reported failure.`));
+                  }
+                  output = JSON.stringify(mcpResult);
+                }
               }
 
-              return {
+              const completed = {
                 success: true,
                 call: call,
                 output: output
               };
+              analyticsTracker.recordToolCallResult(sessionId, call.name, true);
+              await hookManager.emit('after_tool', {
+                tool: call.name,
+                success: true,
+                output: String(output || '').slice(0, 5_000)
+              }, sessionId);
+              return completed;
             } catch (err: any) {
+              analyticsTracker.recordToolCallResult(sessionId, call.name, false);
+              await hookManager.emit('tool_error', {
+                tool: call.name,
+                error: err?.message || String(err)
+              }, sessionId);
               return {
                 success: false,
                 call: call,
                 error: err.message
               };
             }
-          });
+          };
 
-          // Wait for all tools to finish
-          const results = await Promise.all(toolPromises);
+          // Independent child agents are safe and useful to run concurrently.
+          // Other tools stay in model-declared order so edits finish before
+          // builds/tests and dependent commands cannot race each other.
+          const results: any[] = parallelDelegation
+            ? await Promise.all(response.toolCalls.map(executeToolCall))
+            : [];
+          if (!parallelDelegation) {
+            for (const call of response.toolCalls) {
+              results.push(await executeToolCall(call));
+            }
+          }
+
+          for (const result of results) {
+            const toolName = result.call?.name || 'unknown';
+            if (result.success) {
+              console.log(`[Tool] ${toolName} ok`);
+            } else {
+              console.log(`[Tool] ${toolName} FAILED: ${String(result.error || 'Unknown error')}`);
+            }
+          }
+
+          totalToolCalls += response.toolCalls.length;
+          lastBatchHadFailure = results.some(result => !result.success);
+          lastToolError = results
+            .filter(result => !result.success)
+            .map(result => `${result.call?.name || 'tool'}: ${String(result.error || 'Unknown error')}`)
+            .join(' | ');
+          for (const result of results) {
+            toolSequence += 1;
+            if (result.success && this.isMutationToolCall(result.call)) {
+              lastMutationSequence = toolSequence;
+            }
+            if (result.success && this.isVerificationToolCall(result.call)) {
+              lastVerificationSequence = toolSequence;
+            }
+          }
+
+          for (const result of results) {
+            const isSingleUseWrite = singleUseTools.has(String(result.call?.name || ''))
+              && String(result.call?.arguments?.action || '').toLowerCase() !== 'read_notes';
+            if (result.success && isSingleUseWrite) {
+              missionDisabledTools.add(String(result.call.name));
+              this.memory.add(sessionId, {
+                role: 'system',
+                content: `Tool '${result.call.name}' has completed its one allowed write for this task. Do not call it again; continue with the task and produce the final result.`,
+                timestamp: Date.now(),
+                metadata: { type: 'mission_tool_budget' }
+              });
+            }
+          }
+          if (totalToolCalls >= maxToolCalls && !forceFinalAnswer) {
+            forceFinalAnswer = true;
+            this.memory.add(sessionId, {
+              role: 'system',
+              content: `The task tool budget (${maxToolCalls}) has been reached. No more tools are available. Produce the best complete final answer now from the evidence already collected. Do not describe future work.`,
+              timestamp: Date.now(),
+              metadata: { type: 'mission_tool_budget' }
+            });
+          }
 
           // Process results
           for (const result of results) {
             if (result.success) {
-              // Clean up tool output for memory — remove internal fields and truncate large outputs
+              // Clean up tool output for memory while preserving full report content.
               let outputForMemory = String(result.output);
               try {
                 const parsed = JSON.parse(outputForMemory);
@@ -956,23 +2328,47 @@ ${context ? `\nSystem Context: ${context}` : ''}
                 }
               } catch { /* not JSON, keep as is */ }
 
-              // Truncate very large outputs to prevent context overflow
-              if (outputForMemory.length > 8000) {
-                outputForMemory = outputForMemory.slice(0, 8000) + '\n... [truncated for context]';
-              }
-
               this.memory.add(sessionId, {
                 role: "system",
                 content: `Tool '${result.call.name}' Output: ${outputForMemory}`,
                 timestamp: Date.now()
               });
             } else {
+              const errorMsg = String(result.error || 'Unknown error');
               this.memory.add(sessionId, {
                 role: "system",
-                content: `Tool '${result.call.name}' Error: ${result.error}`,
+                content: `Tool '${result.call.name}' Error: ${errorMsg}`,
                 timestamp: Date.now()
               });
             }
+          }
+
+          // Record tool execution events for anti-repetition state
+          executionStateManager.recordEvents(
+            sessionId,
+            results.map(r => ({
+              kind: 'tool' as const,
+              label: r.call.name,
+              summary: r.success
+                ? `${r.call.name} completed`
+                : `${r.call.name} failed: ${String(r.error || 'unknown')}`,
+              status: r.success ? 'completed' as const : 'failed' as const
+            })),
+            results.some(r => !r.success) ? undefined : undefined
+          );
+
+          // Emit structured tool_done events for each tool result
+          for (const result of results) {
+            void this.gateway.sendStreamEvent(sessionId, {
+              type: 'tool_done',
+              runId: turnRunId,
+              messageId: batchMessageId,
+              toolCallId: result.call.name,
+              name: result.call.name,
+              output: result.success ? String(result.output).slice(0, 3000) : undefined,
+              status: result.success ? 'completed' : 'failed',
+              error: result.success ? undefined : String(result.error || '')
+            });
           }
 
           const normalizeOutput = (value: any) => {
@@ -1011,6 +2407,31 @@ ${context ? `\nSystem Context: ${context}` : ''}
             return [`🧠 Agent results${label}:`, ...blocks].join("\n\n");
           };
 
+          const formatAgentReports = (agentLabel: string, reports: any[]) => {
+            if (!Array.isArray(reports) || reports.length === 0) return "";
+            const label = agentLabel ? ` (${agentLabel})` : "";
+            const blocks = reports.map((report: any) => {
+              const status = normalizeOutput(report?.status || "unknown");
+              const taskId = normalizeOutput(report?.taskId || "task");
+              const summary = normalizeOutput(report?.summary);
+              const finalOutput = normalizeOutput(report?.finalOutput);
+              const risks = Array.isArray(report?.risks) && report.risks.length
+                ? `Risks: ${report.risks.map((r: any) => normalizeOutput(r)).filter(Boolean).join("; ")}`
+                : "";
+              const evidence = Array.isArray(report?.evidence) && report.evidence.length
+                ? `Evidence: ${report.evidence.map((e: any) => normalizeOutput(e)).filter(Boolean).join("; ")}`
+                : "";
+              return [
+                `Task ${taskId} (${status})`,
+                summary,
+                finalOutput,
+                evidence,
+                risks
+              ].filter(Boolean).join("\n");
+            });
+            return [`Agent reports${label}:`, ...blocks].join("\n\n");
+          };
+
           const buildAgentResultMessages = (toolResults: any[]) => {
             const messages: string[] = [];
             for (const result of toolResults) {
@@ -1023,12 +2444,16 @@ ${context ? `\nSystem Context: ${context}` : ''}
               if (resultsByAgent && resultsByAgent.length > 0) {
                 const sections = resultsByAgent.map((entry: any) => {
                   const results = Array.isArray(entry?.results) ? entry.results : [];
-                  if (results.length === 0) return "";
+                  const reports = Array.isArray(entry?.reports) ? entry.reports : [];
+                  if (results.length === 0 && reports.length === 0) return "";
                   const labelParts: string[] = [];
                   if (entry?.agentName) labelParts.push(String(entry.agentName));
                   if (entry?.agentId) labelParts.push(String(entry.agentId));
-                  const agentLabel = labelParts.join(" • ");
-                  return formatAgentResults(agentLabel, results);
+                  const agentLabel = labelParts.join(" | ");
+                  return [
+                    formatAgentReports(agentLabel, reports),
+                    formatAgentResults(agentLabel, results)
+                  ].filter(Boolean).join("\n\n");
                 }).filter(Boolean);
                 if (sections.length > 0) {
                   messages.push(sections.join("\n\n"));
@@ -1037,16 +2462,20 @@ ${context ? `\nSystem Context: ${context}` : ''}
               }
 
               const results = Array.isArray(payload.results) ? payload.results : [];
-              if (results.length === 0) continue;
+              const reports = Array.isArray(payload.reports) ? payload.reports : [];
+              if (results.length === 0 && reports.length === 0) continue;
 
               const agentId = String(result.call?.arguments?.agentId || payload.agentId || "").trim();
               let agentLabel = "";
               if (agentId) {
                 const agent = agentSwarm.getAgent(agentId);
-                agentLabel = agent?.name ? `${agent.name} • ${agentId}` : agentId;
+                agentLabel = agent?.name ? `${agent.name} | ${agentId}` : agentId;
               }
 
-              const message = formatAgentResults(agentLabel, results);
+              const message = [
+                formatAgentReports(agentLabel, reports),
+                formatAgentResults(agentLabel, results)
+              ].filter(Boolean).join("\n\n");
               if (message) messages.push(message);
             }
             return messages;
@@ -1089,6 +2518,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
             const errorText = normalizeOutput(outputObj?.error || result.error);
             const exitCode = outputObj?.exitCode;
             const elevated = outputObj?.elevated;
+            const cwd = normalizeOutput(outputObj?.cwd) || process.cwd();
 
             const metaParts: string[] = [];
             if (typeof exitCode !== "undefined") metaParts.push(`exit: ${exitCode}`);
@@ -1105,7 +2535,6 @@ ${context ? `\nSystem Context: ${context}` : ''}
 
             const prompt = process.platform === "win32" ? "PS>" : "$";
             const lines = ["```shell"];
-            const cwd = process.cwd();
             if (cwd) {
               lines.push(`# cwd: ${cwd}`);
             }
@@ -1136,7 +2565,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
           const formatSearchResultCompact = (result: any) => {
             try {
               const payload = parseJson(String(result.output));
-              if (!payload) return String(result.output).slice(0, 300);
+              if (!payload) return String(result.output);
 
               // Remove internal synthesis instructions from display
               delete payload._synthesisInstructions;
@@ -1145,16 +2574,15 @@ ${context ? `\nSystem Context: ${context}` : ''}
               const items = payload.results || payload.sources || [];
               const count = items.length;
               const query = payload.query || '';
-              const titles = items.slice(0, 3).map((r: any) => r.title || r.url || '').filter(Boolean);
+              const titles = items.map((r: any) => r.title || r.url || '').filter(Boolean);
 
               let summary = `Found ${count} results`;
               if (query) summary += ` for "${query}"`;
               if (titles.length > 0) summary += `:\n${titles.map((t: string) => `  • ${t}`).join('\n')}`;
-              if (count > 3) summary += `\n  ... and ${count - 3} more`;
-              if (payload.answerBox?.answer) summary += `\nDirect answer: ${String(payload.answerBox.answer).slice(0, 200)}`;
+              if (payload.answerBox?.answer) summary += `\nDirect answer: ${String(payload.answerBox.answer)}`;
               return summary;
             } catch {
-              return String(result.output).slice(0, 300);
+              return String(result.output);
             }
           };
 
@@ -1169,15 +2597,11 @@ ${context ? `\nSystem Context: ${context}` : ''}
               return `✅ ${result.call.name}\n${compact}`;
             }
             if (result.success) {
-              const output = String(result.output);
-              // Truncate very large tool outputs in debug display
-              const displayed = output.length > 1500 ? output.slice(0, 1500) + '\n... [truncated]' : output;
-              return `✅ ${result.call.name}\n${displayed}`;
+              return `✅ ${result.call.name}\n${String(result.output)}`;
             }
             return `❌ ${result.call.name}\n${String(result.error || "Unknown error")}`;
           };
 
-          const agentResultMessages = buildAgentResultMessages(results);
           const mediaRequests = buildMediaRequests(results);
 
           let toolOutputText = results.map((r) => {
@@ -1190,19 +2614,13 @@ ${context ? `\nSystem Context: ${context}` : ''}
           for (const media of mediaRequests) {
             await this.gateway.sendMedia(sessionId, media);
           }
-          for (const message of agentResultMessages) {
-            if (message && message.trim()) {
-              await this.gateway.sendResponse(sessionId, message);
-            }
-          }
-
           // After search tools, inject a synthesis instruction into memory 
           // to ensure the model writes a proper response on the next iteration
           const hasSearchResults = results.some(r => r.success && SEARCH_TOOL_NAMES.includes(r.call?.name));
           if (hasSearchResults) {
             this.memory.add(sessionId, {
               role: "system",
-              content: "Search results received above. If the user asked for a simple fact, answer clearly and directly. If they asked for research/analysis/news, you MUST write a comprehensive professional report (Exec Summary, Findings, Analysis, Sources). Do NOT just list links.",
+              content: "Search candidates were received above. For research or news, fetch the strongest sources, then write a complete answer using only claims supported by the fetched readable text. Cite the exact URLs. Never fill evidence gaps with plausible model names, dates, metrics, quotations, or events. If the available sources are weak or incomplete, say so explicitly.",
               timestamp: Date.now()
             });
           }
@@ -1211,14 +2629,65 @@ ${context ? `\nSystem Context: ${context}` : ''}
           // Continue loop to let model interpret results
         } else {
           const text = (response.content || "").trim();
-          if (!text && executedAnyTools) {
-            await this.gateway.sendResponse(
-              sessionId,
-              'Automation paused without a final message. Send "continue" to keep going, or describe the next step you want.'
-            );
+          let continuationReason = '';
+          if (forcedContinuations < maxForcedContinuations) {
+            if (toolRequired && totalToolCalls === 0) {
+              continuationReason = 'The action task has not used any tools yet.';
+            } else if (lastBatchHadFailure) {
+              continuationReason = 'The latest tool batch failed and needs a recovery attempt.';
+            } else if (verificationRequired && lastMutationSequence > lastVerificationSequence) {
+              continuationReason = 'Changes were made but no later verification command has run.';
+            } else if (this.looksLikeProgressOnly(text)) {
+              continuationReason = 'The draft only promises future work instead of completing it.';
+            }
           }
-          if (text) {
-            void this.learning.recordInteraction(sessionId, msg.content, text);
+
+          if (continuationReason) {
+            forcedContinuations += 1;
+            this.memory.add(sessionId, {
+              role: 'system',
+              content: [
+                `Runtime completion check: ${continuationReason}`,
+                'Continue autonomously now. Use the next required tool, recover from the error, or run verification.',
+                'Do not repeat the draft and do not ask the user to continue.'
+              ].join('\n'),
+              timestamp: Date.now(),
+              metadata: { type: 'runtime_completion_check' }
+            });
+            continue;
+          }
+
+          const completionBlocked = lastBatchHadFailure
+            || (toolRequired && totalToolCalls === 0)
+            || (verificationRequired && lastMutationSequence > lastVerificationSequence);
+          const finalDraft = text || (completionBlocked
+            ? 'I could not complete the task because the required tool work or verification did not succeed.'
+            : 'The task completed, but the model returned no final summary.');
+          if (completionBlocked) {
+            executionStateManager.markBlocked(sessionId, finalDraft);
+          }
+          const sanitized = guardrailManager.sanitizeOutput(finalDraft);
+          const cleanContent = sanitized.sanitized || finalDraft;
+          this.memory.add(sessionId, {
+            role: 'assistant',
+            content: cleanContent,
+            timestamp: Date.now(),
+            metadata: { final: true, completed: !completionBlocked, reasoning: turnReasoning }
+          });
+          await this.deliverFinalResponse(
+            sessionId,
+            cleanContent,
+            turnRunId,
+            turnMessageId,
+            !completionBlocked,
+            turnReasoning
+          );
+          if (!isBackgroundMessage) {
+            void this.learning.recordInteraction(sessionId, msg.content, cleanContent);
+          }
+          const currentGoal = mainGoalManager.getCurrent(sessionId);
+          if (!completionBlocked && currentGoal?.origin === 'auto') {
+            mainGoalManager.completeGoal(sessionId, 'Completed by the autonomous execution loop.');
           }
           stoppedByStepLimit = false;
           break;
@@ -1233,20 +2702,21 @@ ${context ? `\nSystem Context: ${context}` : ''}
         autoContinueCount += 1;
         continuationBatch += 1;
         if (autoContinueNotify) {
-          await this.gateway.sendResponse(
-            sessionId,
-            `🔁 Auto-continue (${autoContinueCount}/${autoContinueMax})...`
-          );
+          // Use concise progress update instead of raw notification
+          await this.sendManagedProgressUpdate(sessionId, {
+            fallbackNow: `Auto-continue ${autoContinueCount}/${autoContinueMax}.`,
+            fallbackNext: 'Continue executing the next tool batch.'
+          });
         }
         const updatedMemories = this.memory.getAll(sessionId);
         await this.autoCompactSessionIfNeeded(sessionId, config, updatedMemories);
         continue;
       }
 
-      await this.gateway.sendResponse(
-        sessionId,
-        `Automation step limit reached (${maxTurns}). Send "continue" to keep going, or increase config.agent.maxTurns in config.json.`
-      );
+      await this.sendManagedProgressUpdate(sessionId, {
+        fallbackNow: `Automation step limit reached (${maxTurns} turns).`,
+        fallbackNext: 'Send "continue" to keep going, or increase/remove config.agent.maxTurns in config.json.'
+      });
       break;
     }
   }
@@ -1287,6 +2757,120 @@ ${context ? `\nSystem Context: ${context}` : ''}
     } finally {
       this.proactiveInFlight = false;
     }
+  }
+
+  private handleMainGoalCommand(sessionId: string, text: string): boolean {
+    const trimmed = (text || '').trim();
+    const lower = trimmed.toLowerCase();
+    if (lower !== '/main goal' && !lower.startsWith('/main goal ')) {
+      return false;
+    }
+
+    const formatGoal = (goal: any) => {
+      if (!goal) return 'No active main goal.';
+      const lines = [
+        `ID: ${goal.id}`,
+        `Title: ${goal.title}`,
+        `Objective: ${goal.objective}`,
+        `Status: ${goal.status}`,
+        `Origin: ${goal.origin}`,
+        goal.latestUserRequest ? `Latest user request: ${goal.latestUserRequest}` : '',
+        goal.linkedProjectId ? `Linked project: ${goal.linkedProjectId}` : '',
+        goal.constraints?.length ? `Constraints: ${goal.constraints.slice(-8).join(' | ')}` : '',
+        goal.acceptanceCriteria?.length ? `Done means: ${goal.acceptanceCriteria.slice(-8).join(' | ')}` : '',
+        goal.notes?.length ? `Notes: ${goal.notes.slice(-8).join(' | ')}` : ''
+      ].filter(Boolean);
+      return lines.join('\n');
+    };
+
+    if (lower === '/main goal' || lower === '/main goal show' || lower === '/main goal status') {
+      void this.gateway.sendResponse(sessionId, formatGoal(mainGoalManager.getCurrent(sessionId)));
+      return true;
+    }
+
+    if (lower === '/main goal help') {
+      void this.gateway.sendResponse(sessionId, [
+        'Main goal commands:',
+        '/main goal',
+        '/main goal set <title> - <objective>',
+        '/main goal note <note>',
+        '/main goal constraint <constraint>',
+        '/main goal acceptance <criterion>',
+        '/main goal done [note]',
+        '/main goal clear [note]'
+      ].join('\n'));
+      return true;
+    }
+
+    if (lower.startsWith('/main goal set ')) {
+      const rest = trimmed.slice('/main goal set '.length).trim();
+      const dash = rest.indexOf(' - ');
+      const title = dash > 0 ? rest.slice(0, dash).trim() : rest;
+      const objective = dash > 0 ? rest.slice(dash + 3).trim() : rest;
+      if (!title) {
+        void this.gateway.sendResponse(sessionId, 'Usage: /main goal set <title> - <objective>');
+        return true;
+      }
+      const goal = mainGoalManager.setGoal(sessionId, {
+        title,
+        objective,
+        origin: 'manual',
+        confidence: 1
+      });
+      void this.gateway.sendResponse(sessionId, `Main goal set: ${goal.title}\nID: ${goal.id}`);
+      return true;
+    }
+
+    if (lower.startsWith('/main goal note ')) {
+      const note = trimmed.slice('/main goal note '.length).trim();
+      const ok = mainGoalManager.addNote(sessionId, note);
+      void this.gateway.sendResponse(sessionId, ok ? 'Main goal note added.' : 'No active main goal.');
+      return true;
+    }
+
+    if (lower.startsWith('/main goal constraint ')) {
+      const constraint = trimmed.slice('/main goal constraint '.length).trim();
+      const ok = mainGoalManager.addConstraint(sessionId, constraint);
+      void this.gateway.sendResponse(sessionId, ok ? 'Main goal constraint added.' : 'No active main goal.');
+      return true;
+    }
+
+    if (lower.startsWith('/main goal acceptance ')) {
+      const criterion = trimmed.slice('/main goal acceptance '.length).trim();
+      const ok = mainGoalManager.addAcceptanceCriterion(sessionId, criterion);
+      void this.gateway.sendResponse(sessionId, ok ? 'Main goal acceptance criterion added.' : 'No active main goal.');
+      return true;
+    }
+
+    if (lower === '/main goal done' || lower.startsWith('/main goal done ')) {
+      const note = trimmed.length > '/main goal done'.length
+        ? trimmed.slice('/main goal done'.length).trim()
+        : undefined;
+      const ok = mainGoalManager.completeGoal(sessionId, note);
+      void this.gateway.sendResponse(sessionId, ok ? 'Main goal marked done.' : 'No active main goal.');
+      return true;
+    }
+
+    if (lower === '/main goal complete' || lower.startsWith('/main goal complete ')) {
+      const note = trimmed.length > '/main goal complete'.length
+        ? trimmed.slice('/main goal complete'.length).trim()
+        : undefined;
+      const ok = mainGoalManager.completeGoal(sessionId, note);
+      void this.gateway.sendResponse(sessionId, ok ? 'Main goal marked done.' : 'No active main goal.');
+      return true;
+    }
+
+    if (lower === '/main goal clear' || lower.startsWith('/main goal clear ')) {
+      const note = trimmed.length > '/main goal clear'.length
+        ? trimmed.slice('/main goal clear'.length).trim()
+        : undefined;
+      const ok = mainGoalManager.clearGoal(sessionId, note);
+      void this.gateway.sendResponse(sessionId, ok ? 'Main goal cleared.' : 'No active main goal.');
+      return true;
+    }
+
+    void this.gateway.sendResponse(sessionId, 'Usage: /main goal help');
+    return true;
   }
 
   private handleScheduleCommand(sessionId: string, text: string) {
@@ -1376,6 +2960,240 @@ ${context ? `\nSystem Context: ${context}` : ''}
   private handleBackgroundGoalCommand(sessionId: string, text: string): boolean {
     const trimmed = (text || '').trim();
 
+    const resolveGoal = (rawId: string) => {
+      const id = rawId.trim();
+      if (!id) return { error: 'Missing goal id.' };
+      const candidates = backgroundWorker.getGoals(sessionId);
+      const direct = backgroundWorker.getGoal(id);
+      if (direct && direct.sessionId === sessionId) return { goal: direct };
+      const matches = candidates.filter(goal => goal.id.startsWith(id));
+      if (matches.length === 0) return { error: `No goal matches "${id}".` };
+      if (matches.length > 1) return { error: `Multiple goals match "${id}". Use a longer id prefix.` };
+      return { goal: matches[0] };
+    };
+
+    const formatGoal = (goal: any) => {
+      const blocked = goal.blockedReason ? `\nBlocked: ${goal.blockedReason}` : '';
+      const deps = Array.isArray(goal.dependencies) && goal.dependencies.length > 0
+        ? `\nDependencies: ${goal.dependencies.join(', ')}`
+        : '';
+      const checkpoint = goal.checkpoint?.note ? `\nCheckpoint: ${goal.checkpoint.note}` : '';
+      return [
+        `ID: ${goal.id}`,
+        `Title: ${goal.title}`,
+        `Status: ${goal.status}`,
+        `Priority: ${goal.priority}`,
+        `Progress: ${goal.progress}%`,
+        `Attempts: ${goal.attempts || 0}/${(goal.maxRetries || 0) + 1}`,
+        `Description: ${goal.description}${deps}${blocked}${checkpoint}`
+      ].join('\n');
+    };
+
+    const resolveProject = (rawId: string) => {
+      const id = rawId.trim();
+      if (!id) return { error: 'Missing project id.' };
+      const direct = backgroundWorker.getProject(id);
+      if (direct && direct.sessionId === sessionId) return { project: direct };
+      const matches = backgroundWorker.getProjects(sessionId).filter(project => project.id.startsWith(id));
+      if (matches.length === 0) return { error: `No project matches "${id}".` };
+      if (matches.length > 1) return { error: `Multiple projects match "${id}". Use a longer id prefix.` };
+      return { project: matches[0] };
+    };
+
+    const formatProject = (project: any) => {
+      const goals = backgroundWorker.getProjectGoals(project.id);
+      const completed = goals.filter(g => g.status === 'completed').length;
+      const active = goals.filter(g => g.status === 'in-progress').length;
+      const pending = goals.filter(g => g.status === 'pending').length;
+      const blocked = goals.filter(g => g.blockedReason || g.status === 'failed' || g.status === 'cancelled').length;
+      const milestoneLines = project.milestoneIds.map((id: string) => {
+        const milestone = project.milestones[id];
+        return milestone ? `- ${milestone.title}: ${milestone.status} (${milestone.goalIds.length} goals)` : '';
+      }).filter(Boolean);
+      const memoryLines = [
+        project.memory?.notes?.length ? `Latest note: ${project.memory.notes[project.memory.notes.length - 1]}` : '',
+        project.memory?.filesTouched?.length ? `Files: ${project.memory.filesTouched.slice(-8).join(', ')}` : '',
+        project.memory?.decisions?.length ? `Decisions: ${project.memory.decisions.slice(-5).join('; ')}` : ''
+      ].filter(Boolean);
+      return [
+        `ID: ${project.id}`,
+        `Title: ${project.title}`,
+        `Status: ${project.status}`,
+        `Goals: ${completed}/${goals.length} completed, ${active} active, ${pending} pending, ${blocked} blocked`,
+        `Description: ${project.description}`,
+        milestoneLines.length > 0 ? `Milestones:\n${milestoneLines.join('\n')}` : '',
+        memoryLines.length > 0 ? `Memory:\n${memoryLines.join('\n')}` : ''
+      ].filter(Boolean).join('\n');
+    };
+
+    if (trimmed.toLowerCase() === '/projects') {
+      const projects = backgroundWorker.getProjects(sessionId);
+      if (projects.length === 0) {
+        void this.gateway.sendResponse(sessionId, 'No background projects. Use `/project plan <title> - <description>` to create one.');
+        return true;
+      }
+      const response = projects.slice(0, 12).map(project => {
+        const goals = backgroundWorker.getProjectGoals(project.id);
+        const completed = goals.filter(g => g.status === 'completed').length;
+        return `- ${project.id.slice(0, 8)} [${project.status}] ${project.title} (${completed}/${goals.length} goals)`;
+      }).join('\n');
+      void this.gateway.sendResponse(sessionId, response);
+      return true;
+    }
+
+    if (trimmed.toLowerCase().startsWith('/project plan ')) {
+      const rest = trimmed.slice('/project plan '.length).trim();
+      const dashIndex = rest.indexOf(' - ');
+      const title = dashIndex > 0 ? rest.slice(0, dashIndex).trim() : rest;
+      const description = dashIndex > 0 ? rest.slice(dashIndex + 3).trim() : rest;
+      if (!title) {
+        void this.gateway.sendResponse(sessionId, 'Usage: /project plan <title> - <description>');
+        return true;
+      }
+      const result = backgroundWorker.planProject({ title, description, sessionId });
+      if (!mainGoalManager.getCurrent(sessionId)) {
+        mainGoalManager.setGoal(sessionId, {
+          title,
+          objective: description,
+          origin: 'manual',
+          confidence: 1
+        });
+      }
+      mainGoalManager.linkProject(sessionId, result.project.id);
+      void this.gateway.sendResponse(
+        sessionId,
+        result.reused
+          ? `Project already exists, reusing: ${result.project.title}\nID: ${result.project.id}\nGoals: ${result.goals.length}`
+          : `Project planned: ${result.project.title}\nID: ${result.project.id}\nMilestones: ${result.project.milestoneIds.length}\nGoals: ${result.goals.length}`
+      );
+      return true;
+    }
+
+    if (trimmed.toLowerCase().startsWith('/project show ')) {
+      const resolved = resolveProject(trimmed.slice('/project show '.length));
+      if (resolved.error || !resolved.project) {
+        void this.gateway.sendResponse(sessionId, resolved.error || 'Project not found.');
+        return true;
+      }
+      void this.gateway.sendResponse(sessionId, formatProject(resolved.project));
+      return true;
+    }
+
+    if (trimmed.toLowerCase().startsWith('/project memory ')) {
+      const rest = trimmed.slice('/project memory '.length).trim();
+      const dash = rest.indexOf(' - ');
+      if (dash <= 0) {
+        void this.gateway.sendResponse(sessionId, 'Usage: /project memory <id> - <note>');
+        return true;
+      }
+      const rawId = rest.slice(0, dash).trim();
+      const note = rest.slice(dash + 3).trim();
+      const resolved = resolveProject(rawId);
+      if (resolved.error || !resolved.project) {
+        void this.gateway.sendResponse(sessionId, resolved.error || 'Project not found.');
+        return true;
+      }
+      const ok = backgroundWorker.recordProjectMemory(resolved.project.id, { note });
+      void this.gateway.sendResponse(sessionId, ok ? `Project memory recorded: ${resolved.project.title}` : 'Project not found.');
+      return true;
+    }
+
+    if (trimmed.toLowerCase().startsWith('/goal cancel ')) {
+      const resolved = resolveGoal(trimmed.slice('/goal cancel '.length));
+      if (resolved.error || !resolved.goal) {
+        void this.gateway.sendResponse(sessionId, resolved.error || 'Goal not found.');
+        return true;
+      }
+      const ok = backgroundWorker.cancelGoal(resolved.goal.id);
+      void this.gateway.sendResponse(sessionId, ok ? `Goal cancelled: ${resolved.goal.title}` : 'Goal not found.');
+      return true;
+    }
+
+    if (trimmed.toLowerCase().startsWith('/goal done ') || trimmed.toLowerCase().startsWith('/goal complete ')) {
+      const prefix = trimmed.toLowerCase().startsWith('/goal done ') ? '/goal done ' : '/goal complete ';
+      const rest = trimmed.slice(prefix.length).trim();
+      const dash = rest.indexOf(' - ');
+      const rawId = dash >= 0 ? rest.slice(0, dash).trim() : rest;
+      const note = dash >= 0 ? rest.slice(dash + 3).trim() : undefined;
+      const resolved = resolveGoal(rawId);
+      if (resolved.error || !resolved.goal) {
+        void this.gateway.sendResponse(sessionId, resolved.error || 'Goal not found.');
+        return true;
+      }
+      const ok = backgroundWorker.completeGoal(resolved.goal.id, note || 'Marked done by user');
+      void this.gateway.sendResponse(sessionId, ok ? `Goal marked done: ${resolved.goal.title}` : 'Goal not found.');
+      return true;
+    }
+
+    if (trimmed.toLowerCase().startsWith('/goal show ')) {
+      const resolved = resolveGoal(trimmed.slice('/goal show '.length));
+      if (resolved.error || !resolved.goal) {
+        void this.gateway.sendResponse(sessionId, resolved.error || 'Goal not found.');
+        return true;
+      }
+      void this.gateway.sendResponse(sessionId, formatGoal(resolved.goal));
+      return true;
+    }
+
+    if (trimmed.toLowerCase().startsWith('/goal checkpoint ')) {
+      const rest = trimmed.slice('/goal checkpoint '.length).trim();
+      const dash = rest.indexOf(' - ');
+      if (dash <= 0) {
+        void this.gateway.sendResponse(sessionId, 'Usage: /goal checkpoint <id> - <note>');
+        return true;
+      }
+      const rawId = rest.slice(0, dash).trim();
+      const note = rest.slice(dash + 3).trim();
+      const resolved = resolveGoal(rawId);
+      if (resolved.error || !resolved.goal) {
+        void this.gateway.sendResponse(sessionId, resolved.error || 'Goal not found.');
+        return true;
+      }
+      const ok = backgroundWorker.checkpointGoal(resolved.goal.id, note);
+      void this.gateway.sendResponse(sessionId, ok ? `Checkpoint saved for: ${resolved.goal.title}` : 'Goal not found.');
+      return true;
+    }
+
+    if (trimmed.toLowerCase().startsWith('/goal memory ')) {
+      const rest = trimmed.slice('/goal memory '.length).trim();
+      const dash = rest.indexOf(' - ');
+      if (dash <= 0) {
+        void this.gateway.sendResponse(sessionId, 'Usage: /goal memory <id> - <note>');
+        return true;
+      }
+      const rawId = rest.slice(0, dash).trim();
+      const note = rest.slice(dash + 3).trim();
+      const resolved = resolveGoal(rawId);
+      if (resolved.error || !resolved.goal) {
+        void this.gateway.sendResponse(sessionId, resolved.error || 'Goal not found.');
+        return true;
+      }
+      const ok = backgroundWorker.recordGoalMemory(resolved.goal.id, { note });
+      void this.gateway.sendResponse(sessionId, ok ? `Goal memory recorded: ${resolved.goal.title}` : 'Goal not found.');
+      return true;
+    }
+
+    if (trimmed.toLowerCase().startsWith('/goal score ')) {
+      const rest = trimmed.slice('/goal score '.length).trim();
+      const parts = rest.split(/\s+/);
+      const rawId = parts.shift() || '';
+      const rawScore = parts.shift() || '';
+      const note = parts.join(' ').trim();
+      const score = Number(rawScore);
+      if (!rawId || !Number.isFinite(score)) {
+        void this.gateway.sendResponse(sessionId, 'Usage: /goal score <id> <0-1> [note]');
+        return true;
+      }
+      const resolved = resolveGoal(rawId);
+      if (resolved.error || !resolved.goal) {
+        void this.gateway.sendResponse(sessionId, resolved.error || 'Goal not found.');
+        return true;
+      }
+      const ok = backgroundWorker.scoreGoal(resolved.goal.id, score, note);
+      void this.gateway.sendResponse(sessionId, ok ? `Goal scored: ${resolved.goal.title}` : 'Goal not found.');
+      return true;
+    }
+
     // /goal <title> - <description>
     if (trimmed.toLowerCase().startsWith('/goal ')) {
       const rest = trimmed.slice(6).trim();
@@ -1402,14 +3220,29 @@ ${context ? `\nSystem Context: ${context}` : ''}
         sessionId,
         priority: 'normal'
       });
-      void this.gateway.sendResponse(sessionId, `🎯 **Goal queued:** ${goal.title}\n\nThis will run automatically when you're idle.`);
+      if (!mainGoalManager.getCurrent(sessionId)) {
+        mainGoalManager.setGoal(sessionId, {
+          title,
+          objective: description,
+          origin: 'manual',
+          confidence: 0.9
+        });
+      }
+      mainGoalManager.linkBackgroundGoal(sessionId, goal.id);
+      const duplicate = goal.duplicateCount > 0 && goal.lastDuplicateAt && Date.now() - goal.lastDuplicateAt < 5000;
+      void this.gateway.sendResponse(
+        sessionId,
+        duplicate
+          ? `Goal already exists, reusing: ${goal.title}\nID: ${goal.id}`
+          : `Goal queued: ${goal.title}\nID: ${goal.id}\n\nThis will run automatically when you're idle.`
+      );
       return true;
     }
 
     // /goals - list pending goals
     if (trimmed.toLowerCase() === '/goals') {
       const pending = backgroundWorker.getPendingGoals(sessionId);
-      const active = backgroundWorker.getActiveGoals();
+      const active = backgroundWorker.getActiveGoals(sessionId);
 
       if (pending.length === 0 && active.length === 0) {
         void this.gateway.sendResponse(sessionId, '📋 No background goals. Use `/goal <title> - <description>` to add one.');
@@ -1418,13 +3251,16 @@ ${context ? `\nSystem Context: ${context}` : ''}
 
       let response = '';
       if (active.length > 0) {
-        response += '**🟢 Active:**\n';
-        response += active.map(g => `• ${g.title} (${g.progress}%)`).join('\n');
+        response += '**Active:**\n';
+        response += active.map(g => `- ${g.id.slice(0, 8)} ${g.title} (${g.progress}%, attempt ${g.attempts}/${g.maxRetries + 1})`).join('\n');
         response += '\n\n';
       }
       if (pending.length > 0) {
-        response += '**⏳ Pending:**\n';
-        response += pending.map(g => `• [${g.priority}] ${g.title}`).join('\n');
+        response += '**Pending:**\n';
+        response += pending.map(g => {
+          const blocked = g.blockedReason ? ` - ${g.blockedReason}` : '';
+          return `- ${g.id.slice(0, 8)} [${g.priority}] ${g.title}${blocked}`;
+        }).join('\n');
       }
 
       void this.gateway.sendResponse(sessionId, response);
@@ -1549,8 +3385,24 @@ ${context ? `\nSystem Context: ${context}` : ''}
           await this.gateway.sendResponse(sessionId, `💭 *${agent.displayName} is thinking...*`);
 
           try {
-            const response = await model.generate(prompt, agentSystemPrompt, []);
-            const agentResponse = response.content || 'I have no response.';
+            const delegate = SkillRegistry.get('delegate_agent');
+            let agentResponse = '';
+            if (delegate) {
+              const result = await delegate.execute({
+                agentId: agent.id,
+                task: prompt,
+                expectedOutput: 'Answer the user directly while following the custom agent persona.',
+                allowedTools: agent.skills,
+                maxTurns: 6,
+                retries: 1,
+                reviewCriteria: ['answered the user', 'used evidence when tools were called'],
+                __sessionId: sessionId
+              });
+              agentResponse = result?.report?.finalOutput || result?.report?.summary || JSON.stringify(result);
+            } else {
+              const response = await model.generate(prompt, agentSystemPrompt, []);
+              agentResponse = response.content || 'I have no response.';
+            }
 
             // Store agent response
             customAgentManager.addMessage(sessionId, agent.id, 'agent', agentResponse);
@@ -1569,6 +3421,12 @@ ${context ? `\nSystem Context: ${context}` : ''}
 
   private handleModelCommand(sessionId: string, text: string): boolean {
     const trimmed = (text || '').trim();
+
+    // /tools — diagnostic report of exactly what the model can call next turn
+    if (trimmed.toLowerCase() === '/tools') {
+      void this.handleToolsCommand(sessionId);
+      return true;
+    }
 
     // /models
     if (trimmed.toLowerCase() === '/models') {
@@ -1637,6 +3495,264 @@ ${context ? `\nSystem Context: ${context}` : ''}
     return false;
   }
 
+  // /tools implementation: fetch MCP tools, build the exact next-turn report.
+  private async handleToolsCommand(sessionId: string): Promise<void> {
+    try {
+      const config = this.loadConfig();
+      let mcpTools: any[] = [];
+      let mcpListError = '';
+      try {
+        mcpTools = await this.mcpManager.listTools();
+      } catch (error: any) {
+        mcpListError = error?.message || String(error);
+        mcpTools = [];
+      }
+      const { report } = buildToolReport(
+        {
+          listMcpTools: () => Promise.resolve(mcpTools),
+          buildAdvertised: (sid: string, tools: any[]) => this.buildAdvertisedTools(sid, tools, config),
+          getAliasCoverage: () => AgentRunner.getAliasCoverage(),
+          getLimits: () => AgentRunner.getToolLimits(config),
+          getUsageStats: () => analyticsTracker.getToolUsageStats()
+        },
+        sessionId,
+        mcpTools,
+        mcpListError || undefined
+      );
+      await this.gateway.sendResponse(sessionId, report);
+    } catch (error: any) {
+      console.error('[AgentRunner] /tools failed:', error);
+      await this.gateway.sendResponse(sessionId, `❌ Tool diagnostics failed: ${error?.message || String(error)}`);
+    }
+  }
+
+  private async handleLearningCommand(sessionId: string, text: string): Promise<boolean> {
+    const trimmed = (text || '').trim();
+    const lowered = trimmed.toLowerCase();
+
+    const formatAction = (action: any, verbose = false) => {
+      const shortId = String(action.id || '').slice(0, 8);
+      const created = action.createdAt ? new Date(action.createdAt).toLocaleString() : 'unknown time';
+      const kind = action.type === 'auto_update'
+        ? `update ${action.target || 'file'}`
+        : 'queue background goal';
+      const title = action.entryTitle || 'Learning action';
+      const confidence = typeof action.confidence === 'number' ? `${Math.round(action.confidence * 100)}%` : 'n/a';
+      const lines = [
+        `ID: ${shortId}`,
+        `Status: ${action.status || 'pending'}`,
+        `Type: ${kind}`,
+        `From: ${title}`,
+        `Score: ${action.successCount || 0} success / ${action.failureCount || 0} failure (${confidence} confidence)`,
+        `Created: ${created}`
+      ];
+
+      if (action.type === 'auto_update' && Array.isArray(action.lines)) {
+        lines.push(`Target: ${action.target} / ${action.sectionTitle}`);
+        lines.push('Lines:');
+        action.lines.forEach((line: string) => lines.push(`- ${line}`));
+      } else if (action.goal) {
+        lines.push(`Goal: ${action.goal.title}`);
+        if (verbose) {
+          lines.push('Description:');
+          lines.push(action.goal.description);
+        }
+      }
+
+      if (verbose && action.summary) {
+        lines.push('Summary:');
+        lines.push(action.summary);
+      }
+
+      if (verbose && Array.isArray(action.feedback) && action.feedback.length > 0) {
+        lines.push('Feedback:');
+        action.feedback.slice(-5).forEach((item: any) => {
+          const at = item.createdAt ? new Date(item.createdAt).toLocaleString() : 'unknown time';
+          lines.push(`- ${item.outcome} at ${at}${item.note ? `: ${item.note}` : ''}`);
+        });
+      }
+
+      return lines.join('\n');
+    };
+
+    const resolveAction = (rawId: string, includeResolved = false) => {
+      const id = rawId.trim();
+      if (!id) return { error: 'Missing learning action id.' };
+      const pending = this.learning.listPendingLearningActions(sessionId, includeResolved);
+      const matches = pending.filter(action => action.id === id || action.id.startsWith(id));
+      if (matches.length === 0) return { error: `No pending learning action matches "${id}".` };
+      if (matches.length > 1) return { error: `Multiple learning actions match "${id}". Use a longer id prefix.` };
+      return { action: matches[0] };
+    };
+
+    if (lowered === '/lessons' || lowered === '/learning pending') {
+      const pending = this.learning.listPendingLearningActions(sessionId);
+      if (pending.length === 0) {
+        await this.gateway.sendResponse(sessionId, 'No pending learning actions.');
+        return true;
+      }
+
+      const blocks = pending.slice(0, 20).map(action => formatAction(action));
+      const more = pending.length > 20 ? `\n\n...and ${pending.length - 20} more.` : '';
+      await this.gateway.sendResponse(
+        sessionId,
+        `Pending learning actions (${pending.length}):\n\n${blocks.join('\n\n')}${more}\n\nUse /lesson approve <id>, /lesson reject <id>, or /lesson show <id>.`
+      );
+      return true;
+    }
+
+    if (lowered === '/lesson help' || lowered === '/lessons help') {
+      await this.gateway.sendResponse(
+        sessionId,
+        [
+          'Learning approval commands:',
+          '- /lessons',
+          '- /lesson show <id>',
+          '- /lesson approve <id|all>',
+          '- /lesson reject <id|all>',
+          '- /lesson success <id> [note]',
+          '- /lesson fail <id> [note]',
+          '- /lesson stats',
+          '- /training status',
+          '- /training export'
+        ].join('\n')
+      );
+      return true;
+    }
+
+    if (lowered.startsWith('/lesson show ')) {
+      const resolved = resolveAction(trimmed.slice('/lesson show '.length));
+      if (resolved.error || !resolved.action) {
+        await this.gateway.sendResponse(sessionId, resolved.error || 'Learning action not found.');
+        return true;
+      }
+      await this.gateway.sendResponse(sessionId, formatAction(resolved.action, true));
+      return true;
+    }
+
+    if (lowered.startsWith('/lesson approve ')) {
+      const id = trimmed.slice('/lesson approve '.length).trim();
+      const pending = this.learning.listPendingLearningActions(sessionId);
+      if (id.toLowerCase() === 'all') {
+        if (pending.length === 0) {
+          await this.gateway.sendResponse(sessionId, 'No pending learning actions to approve.');
+          return true;
+        }
+        const results = pending.map(action => this.learning.approvePendingLearningAction(action.id, sessionId));
+        await this.gateway.sendResponse(sessionId, results.map(r => `${r.success ? 'OK' : 'ERR'} ${r.message}`).join('\n'));
+        return true;
+      }
+
+      const resolved = resolveAction(id);
+      if (resolved.error || !resolved.action) {
+        await this.gateway.sendResponse(sessionId, resolved.error || 'Learning action not found.');
+        return true;
+      }
+      const result = this.learning.approvePendingLearningAction(resolved.action.id, sessionId);
+      await this.gateway.sendResponse(sessionId, result.message);
+      return true;
+    }
+
+    if (lowered.startsWith('/lesson reject ')) {
+      const id = trimmed.slice('/lesson reject '.length).trim();
+      const pending = this.learning.listPendingLearningActions(sessionId);
+      if (id.toLowerCase() === 'all') {
+        if (pending.length === 0) {
+          await this.gateway.sendResponse(sessionId, 'No pending learning actions to reject.');
+          return true;
+        }
+        const results = pending.map(action => this.learning.rejectPendingLearningAction(action.id, sessionId));
+        await this.gateway.sendResponse(sessionId, results.map(r => `${r.success ? 'OK' : 'ERR'} ${r.message}`).join('\n'));
+        return true;
+      }
+
+      const resolved = resolveAction(id);
+      if (resolved.error || !resolved.action) {
+        await this.gateway.sendResponse(sessionId, resolved.error || 'Learning action not found.');
+        return true;
+      }
+      const result = this.learning.rejectPendingLearningAction(resolved.action.id, sessionId);
+      await this.gateway.sendResponse(sessionId, result.message);
+      return true;
+    }
+
+    if (lowered === '/lesson stats' || lowered === '/learning stats') {
+      const actions = this.learning.listPendingLearningActions(sessionId, true)
+        .filter(action => action.status === 'applied')
+        .sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+      if (actions.length === 0) {
+        await this.gateway.sendResponse(sessionId, 'No approved learning actions have feedback yet.');
+        return true;
+      }
+      const blocks = actions.slice(0, 20).map(action => formatAction(action));
+      const more = actions.length > 20 ? `\n\n...and ${actions.length - 20} more.` : '';
+      await this.gateway.sendResponse(sessionId, `Learning scores (${actions.length} approved):\n\n${blocks.join('\n\n')}${more}`);
+      return true;
+    }
+
+    const feedbackMatch = /^\/lesson\s+(success|succeed|worked|fail|failed|failure)\s+(\S+)(?:\s+([\s\S]+))?$/i.exec(trimmed);
+    if (feedbackMatch) {
+      const outcome = /^(success|succeed|worked)$/i.test(feedbackMatch[1]) ? 'success' : 'failure';
+      const id = feedbackMatch[2];
+      const note = feedbackMatch[3]?.trim();
+      const resolved = resolveAction(id, true);
+      if (resolved.error || !resolved.action) {
+        await this.gateway.sendResponse(sessionId, resolved.error || 'Learning action not found.');
+        return true;
+      }
+      const result = this.learning.recordLearningFeedback(resolved.action.id, outcome, note, sessionId);
+      await this.gateway.sendResponse(sessionId, result.message);
+      return true;
+    }
+
+    const feedbackLongMatch = /^\/lesson\s+feedback\s+(\S+)\s+(success|failure|fail|worked)(?:\s+([\s\S]+))?$/i.exec(trimmed);
+    if (feedbackLongMatch) {
+      const id = feedbackLongMatch[1];
+      const outcome = /^(success|worked)$/i.test(feedbackLongMatch[2]) ? 'success' : 'failure';
+      const note = feedbackLongMatch[3]?.trim();
+      const resolved = resolveAction(id, true);
+      if (resolved.error || !resolved.action) {
+        await this.gateway.sendResponse(sessionId, resolved.error || 'Learning action not found.');
+        return true;
+      }
+      const result = this.learning.recordLearningFeedback(resolved.action.id, outcome, note, sessionId);
+      await this.gateway.sendResponse(sessionId, result.message);
+      return true;
+    }
+
+    if (lowered === '/training status' || lowered === '/self training status') {
+      const status = this.learning.getSelfTrainingStatus(sessionId);
+      const lines = [
+        `Self-training: ${status.enabled ? 'enabled' : 'disabled'}`,
+        `Applied lessons: ${status.applied}`,
+        `Training candidates: ${status.candidates}`,
+        `Minimum confidence: ${Math.round(status.minConfidence * 100)}%`,
+        `Minimum successes: ${status.minSuccesses}`,
+        `Max prompt lessons: ${status.maxPromptLessons}`,
+        `Export path: ${status.exportPath}`
+      ];
+      if (status.promptPreview) {
+        lines.push('');
+        lines.push(status.promptPreview);
+      }
+      await this.gateway.sendResponse(sessionId, lines.join('\n'));
+      return true;
+    }
+
+    if (lowered === '/training export' || lowered === '/self training export') {
+      const result = this.learning.exportSelfTrainingExamples(sessionId);
+      await this.gateway.sendResponse(
+        sessionId,
+        result.success
+          ? `${result.message}\n${result.path}`
+          : result.message
+      );
+      return true;
+    }
+
+    return false;
+  }
+
   private async handleDeepResearchCommand(sessionId: string, msg: Message): Promise<boolean> {
     const trimmed = (msg.content || '').trim();
     let query = '';
@@ -1674,12 +3790,12 @@ ${context ? `\nSystem Context: ${context}` : ''}
       metadata: msg.metadata
     });
 
-    await this.gateway.sendResponse(sessionId, `ðŸ” Deep research started for: **${query}**`);
+    await this.gateway.sendResponse(sessionId, `Deep research started for: **${query}**`);
 
     const skill = new DeepResearchSkill();
     const data = await skill.execute({ query, maxSources: 6, maxImages: 4, maxFetchChars: 8000 });
     if (data?.error) {
-      await this.gateway.sendResponse(sessionId, `âŒ Deep research failed: ${data.error}`);
+      await this.gateway.sendResponse(sessionId, `Deep research failed: ${data.error}`);
       return true;
     }
 
@@ -1688,22 +3804,16 @@ ${context ? `\nSystem Context: ${context}` : ''}
     const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
 
     if (sources.length === 0) {
-      await this.gateway.sendResponse(sessionId, 'âŒ Deep research found no sources. Try a different query.');
+      await this.gateway.sendResponse(sessionId, 'Deep research found no sources. Try a different query.');
       return true;
     }
-
-    const truncate = (text: string, max: number) => {
-      if (!text) return '';
-      if (text.length <= max) return text;
-      return text.slice(0, max) + `\n... [Truncated ${text.length - max} chars] ...`;
-    };
 
     const sourceText = sources.map((s: any, i: number) => {
       const idx = i + 1;
       const title = s.title || 'Untitled';
       const url = s.url || '';
       const snippet = s.snippet ? `Snippet: ${s.snippet}` : '';
-      const extract = s.content ? `Extract:\n${truncate(String(s.content), 2500)}` : '';
+      const extract = s.content ? `Extract:\n${String(s.content)}` : '';
       return `[${idx}] ${title}\nURL: ${url}${snippet ? `\n${snippet}` : ''}${extract ? `\n${extract}` : ''}`;
     }).join('\n\n');
 
@@ -1756,7 +3866,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
     ].join('\n');
 
     let systemPrompt = this.baseSystemPrompt;
-    systemPrompt += this.buildWorkspacePrompt(msg.channel);
+    systemPrompt += this.buildWorkspacePrompt(msg.channel, sessionId, msg.content);
     systemPrompt += `\n\n${this.buildTimePrompt()}`;
     const username = msg.metadata?.username || 'User';
     systemPrompt += `\n\nYou are speaking with ${username}.`;
@@ -1767,19 +3877,38 @@ ${context ? `\nSystem Context: ${context}` : ''}
     const prompt = `${researchInstructions}\n\nTopic: ${query}\n\n${warningText}Sources:\n${sourceText}\n\nImages:\n${imageText}`;
 
     const currentModel = this.getModel();
+    const reportRunId = uuidv4();
+    const reportMessageId = uuidv4();
     let response: any;
+    void this.gateway.sendStreamEvent(sessionId, {
+      type: 'assistant_start', runId: reportRunId, messageId: reportMessageId
+    });
     if (currentModel.generateStream) {
       let streamedAnyChunk = false;
+      let fullStreamContent = '';
       response = await currentModel.generateStream(prompt, finalSystemPrompt, [], (chunk) => {
         if (!chunk) return;
         streamedAnyChunk = true;
+        fullStreamContent += chunk;
         void this.gateway.sendStreamChunk(sessionId, chunk);
+        void this.gateway.sendStreamEvent(sessionId, {
+          type: 'assistant_delta', runId: reportRunId, messageId: reportMessageId, text: chunk
+        });
+      });
+      void this.gateway.sendStreamEvent(sessionId, {
+        type: 'assistant_done',
+        runId: reportRunId,
+        messageId: reportMessageId,
+        finalText: streamedAnyChunk ? fullStreamContent : response?.content || ''
       });
       if (!streamedAnyChunk && response?.content) {
         await this.gateway.sendResponse(sessionId, response.content);
       }
     } else {
       response = await currentModel.generate(prompt, finalSystemPrompt, []);
+      void this.gateway.sendStreamEvent(sessionId, {
+        type: 'assistant_done', runId: reportRunId, messageId: reportMessageId, finalText: response?.content || ''
+      });
       await this.gateway.sendResponse(sessionId, response?.content || '');
     }
 

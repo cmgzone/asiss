@@ -13,18 +13,23 @@ export interface TokenUsage {
     sessionId: string;
     timestamp: number;
     estimatedCost: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
 }
 
 export interface ModelPricing {
     inputPerMillion: number;    // USD per million input tokens
     outputPerMillion: number;   // USD per million output tokens
+    cacheReadPerMillion?: number;   // USD per million cached-input (read) tokens
+    cacheWritePerMillion?: number;  // USD per million cache-creation (write) tokens
 }
 
 export interface CostSummary {
     totalInputTokens: number;
     totalOutputTokens: number;
     totalEstimatedCost: number;
-    byModel: Record<string, { input: number; output: number; cost: number; calls: number }>;
+    totalCacheReadTokens: number;
+    byModel: Record<string, { input: number; output: number; cost: number; calls: number; cacheRead: number }>;
     bySession: Record<string, { input: number; output: number; cost: number }>;
     dailyCosts: Array<{ date: string; cost: number; tokens: number }>;
     recentUsage: TokenUsage[];
@@ -133,10 +138,15 @@ export class CostTracker {
     /**
      * Record token usage from a model call.
      */
-    record(model: string, sessionId: string, inputTokens: number, outputTokens: number): TokenUsage {
+    record(model: string, sessionId: string, inputTokens: number, outputTokens: number, cacheReadTokens = 0, cacheWriteTokens = 0): TokenUsage {
         const pricing = this.getPricing(model);
+        const cacheReadRate = pricing.cacheReadPerMillion ?? pricing.inputPerMillion * 0.1;
+        const cacheWriteRate = pricing.cacheWritePerMillion ?? pricing.inputPerMillion * 1.25;
+        const nonCachedInput = Math.max(0, inputTokens - cacheReadTokens);
         const estimatedCost =
-            (inputTokens / 1_000_000) * pricing.inputPerMillion +
+            (nonCachedInput / 1_000_000) * pricing.inputPerMillion +
+            (cacheReadTokens / 1_000_000) * cacheReadRate +
+            (cacheWriteTokens / 1_000_000) * cacheWriteRate +
             (outputTokens / 1_000_000) * pricing.outputPerMillion;
 
         const usage: TokenUsage = {
@@ -145,7 +155,9 @@ export class CostTracker {
             model,
             sessionId,
             timestamp: Date.now(),
-            estimatedCost: Math.round(estimatedCost * 1_000_000) / 1_000_000 // 6 decimal places
+            estimatedCost: Math.round(estimatedCost * 1_000_000) / 1_000_000,
+            cacheReadTokens: cacheReadTokens || undefined,
+            cacheWriteTokens: cacheWriteTokens || undefined
         };
 
         this.data.usage.push(usage);
@@ -197,20 +209,22 @@ export class CostTracker {
     getSummary(days: number = 14): CostSummary {
         const usage = this.data.usage;
 
-        let totalInput = 0, totalOutput = 0, totalCost = 0;
-        const byModel: Record<string, { input: number; output: number; cost: number; calls: number }> = {};
+        let totalInput = 0, totalOutput = 0, totalCost = 0, totalCacheRead = 0;
+        const byModel: Record<string, { input: number; output: number; cost: number; calls: number; cacheRead: number }> = {};
         const bySession: Record<string, { input: number; output: number; cost: number }> = {};
 
         for (const u of usage) {
             totalInput += u.inputTokens;
             totalOutput += u.outputTokens;
             totalCost += u.estimatedCost;
+            totalCacheRead += u.cacheReadTokens ?? 0;
 
-            if (!byModel[u.model]) byModel[u.model] = { input: 0, output: 0, cost: 0, calls: 0 };
+            if (!byModel[u.model]) byModel[u.model] = { input: 0, output: 0, cost: 0, calls: 0, cacheRead: 0 };
             byModel[u.model].input += u.inputTokens;
             byModel[u.model].output += u.outputTokens;
             byModel[u.model].cost += u.estimatedCost;
             byModel[u.model].calls += 1;
+            byModel[u.model].cacheRead += u.cacheReadTokens ?? 0;
 
             if (!bySession[u.sessionId]) bySession[u.sessionId] = { input: 0, output: 0, cost: 0 };
             bySession[u.sessionId].input += u.inputTokens;
@@ -238,6 +252,7 @@ export class CostTracker {
             totalInputTokens: totalInput,
             totalOutputTokens: totalOutput,
             totalEstimatedCost: Math.round(totalCost * 10000) / 10000,
+            totalCacheReadTokens: totalCacheRead,
             byModel,
             bySession,
             dailyCosts,

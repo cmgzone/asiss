@@ -1,9 +1,13 @@
 import fs from 'fs';
 import path from 'path';
+import { ModelLevel, ModelRegistry } from './models';
+import { selectProviderForLevel } from './model-level';
 
 /**
  * Model Router — Classifies request complexity and routes to the appropriate model.
  * Simple queries → fast/cheap model, complex tasks → powerful model.
+ * Routing is either explicit (`rules`: complexity → modelId) or level-aware
+ * (`levelMap`: complexity → ModelLevel, resolved against registered providers).
  */
 
 export type ComplexityLevel = 'simple' | 'medium' | 'complex';
@@ -17,6 +21,7 @@ interface RouterConfig {
     enabled: boolean;
     rules: RoutingRule[];
     defaultModelId: string;
+    levelMap?: Partial<Record<ComplexityLevel, ModelLevel>>;
 }
 
 // Heuristic patterns for complexity classification
@@ -39,6 +44,12 @@ const COMPLEX_PATTERNS = [
     /write\s+(a\s+)?(full|complete|entire|whole)\b/i,
 ];
 
+const COMPLEXITY_TO_LEVEL: Record<ComplexityLevel, ModelLevel> = {
+    simple: 'low',
+    medium: 'medium',
+    complex: 'high',
+};
+
 export class ModelRouter {
     private config: RouterConfig;
 
@@ -58,11 +69,15 @@ export class ModelRouter {
             if (fs.existsSync(configPath)) {
                 const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
                 if (raw.modelRouter) {
-                    return {
+                    const cfg: RouterConfig = {
                         enabled: raw.modelRouter.enabled ?? false,
                         defaultModelId: raw.modelRouter.defaultModelId || '',
                         rules: Array.isArray(raw.modelRouter.rules) ? raw.modelRouter.rules : []
                     };
+                    if (raw.modelRouter.levelMap && typeof raw.modelRouter.levelMap === 'object') {
+                        cfg.levelMap = raw.modelRouter.levelMap;
+                    }
+                    return cfg;
                 }
             }
         } catch (e) {
@@ -109,8 +124,17 @@ export class ModelRouter {
     }
 
     /**
+     * Resolve the ModelLevel to use for a complexity bucket, honoring config.
+     */
+    private levelForComplexity(complexity: ComplexityLevel): ModelLevel {
+        return this.config.levelMap?.[complexity] || COMPLEXITY_TO_LEVEL[complexity];
+    }
+
+    /**
      * Get the recommended model ID based on message complexity.
-     * Returns null if routing is disabled or no matching rule exists.
+     * Level-aware routing picks the best registered provider for the desired
+     * level; explicit rules always win when present for that complexity.
+     * Returns null if routing is disabled or nothing matches.
      */
     selectModelId(message: string): string | null {
         if (!this.config.enabled || this.config.rules.length === 0) {
@@ -119,9 +143,34 @@ export class ModelRouter {
 
         const complexity = this.classifyComplexity(message);
         const rule = this.config.rules.find(r => r.level === complexity);
+        if (rule && rule.modelId) return rule.modelId;
 
-        if (rule) return rule.modelId;
+        const desired = this.levelForComplexity(complexity);
+        const provider = selectProviderForLevel(ModelRegistry.getAll(), desired);
+        if (provider) return provider.id;
+
         return this.config.defaultModelId || null;
+    }
+
+    /**
+     * Level-only selection: no explicit rules needed, pure capability routing.
+     */
+    selectModelIdByLevel(message: string): string | null {
+        if (!this.config.enabled) return null;
+
+        const complexity = this.classifyComplexity(message);
+        const desired = this.levelForComplexity(complexity);
+        const provider = selectProviderForLevel(ModelRegistry.getAll(), desired);
+        if (provider) return provider.id;
+        return this.config.defaultModelId || null;
+    }
+
+    /**
+     * What level would this message route to, without resolving providers.
+     */
+    desiredLevelFor(message: string): ModelLevel | null {
+        if (!this.config.enabled) return null;
+        return this.levelForComplexity(this.classifyComplexity(message));
     }
 
     /**
@@ -132,10 +181,17 @@ export class ModelRouter {
     }
 
     /**
+     * True when level-aware routing is possible (enabled + registered providers).
+     */
+    hasProviders(): boolean {
+        return this.config.enabled && ModelRegistry.getAll().length > 0;
+    }
+
+    /**
      * Get current configuration for display.
      */
     getConfig(): RouterConfig {
-        return { ...this.config };
+        return { ...this.config, levelMap: { ...(this.config.levelMap || {}) } };
     }
 }
 

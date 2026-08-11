@@ -8,6 +8,8 @@ interface PatchResult {
     newPath?: string;
     success: boolean;
     error?: string;
+    added?: number;
+    removed?: number;
 }
 
 export class ApplyPatchSkill implements Skill {
@@ -34,7 +36,14 @@ export class ApplyPatchSkill implements Skill {
 
     async execute(params: any): Promise<any> {
         const input = String(params?.input || '');
-        const basePath = String(params?.basePath || process.cwd());
+        const projectId = typeof params?.__projectId === 'string' ? params.__projectId.trim() : '';
+        const workspacePath = typeof params?.__workspacePath === 'string' ? params.__workspacePath.trim() : '';
+        if (projectId && (!workspacePath || !fs.existsSync(workspacePath) || !fs.statSync(workspacePath).isDirectory())) {
+            return {
+                error: 'Project workspace required. Open Projects, then choose Create workspace or Browse folders.'
+            };
+        }
+        const basePath = projectId ? workspacePath : String(params?.basePath || process.cwd());
         const dryRun = Boolean(params?.dryRun);
 
         if (!input.includes('*** Begin Patch') || !input.includes('*** End Patch')) {
@@ -69,6 +78,8 @@ export class ApplyPatchSkill implements Skill {
                 total: results.length,
                 success: results.filter(r => r.success).length,
                 failed: results.filter(r => !r.success).length,
+                added: results.reduce((sum, r) => sum + (r.success ? Number(r.added || 0) : 0), 0),
+                removed: results.reduce((sum, r) => sum + (r.success ? Number(r.removed || 0) : 0), 0),
             },
         };
     }
@@ -131,14 +142,22 @@ export class ApplyPatchSkill implements Skill {
         basePath: string,
         dryRun: boolean
     ): Promise<PatchResult> {
-        const fullPath = path.resolve(basePath, block.path);
+        const resolvedBase = path.resolve(basePath);
+        const resolveInsideBase = (candidate: string) => {
+            const resolved = path.resolve(resolvedBase, candidate);
+            const relative = path.relative(resolvedBase, resolved);
+            if (relative.startsWith('..') || path.isAbsolute(relative)) {
+                throw new Error(`Patch path escapes the workspace: ${candidate}`);
+            }
+            return resolved;
+        };
+        const fullPath = resolveInsideBase(block.path);
 
         if (block.operation === 'add') {
-            const fileContent = block.content
+            const addedLines = block.content
                 .split('\n')
-                .filter(line => line.startsWith('+'))
-                .map(line => line.slice(1))
-                .join('\n');
+                .filter(line => line.startsWith('+'));
+            const fileContent = addedLines.map(line => line.slice(1)).join('\n');
 
             if (!dryRun) {
                 const dir = path.dirname(fullPath);
@@ -147,16 +166,17 @@ export class ApplyPatchSkill implements Skill {
                 }
                 fs.writeFileSync(fullPath, fileContent);
             }
-            return { operation: 'add', path: block.path, success: true };
+            return { operation: 'add', path: block.path, success: true, added: addedLines.length, removed: 0 };
         }
 
         if (block.operation === 'delete') {
+            const removed = fs.existsSync(fullPath) ? fs.readFileSync(fullPath, 'utf-8').split('\n').length : 0;
             if (!dryRun) {
                 if (fs.existsSync(fullPath)) {
                     fs.unlinkSync(fullPath);
                 }
             }
-            return { operation: 'delete', path: block.path, success: true };
+            return { operation: 'delete', path: block.path, success: true, added: 0, removed };
         }
 
         if (block.operation === 'update' || block.operation === 'move') {
@@ -165,64 +185,91 @@ export class ApplyPatchSkill implements Skill {
             }
 
             const existingContent = fs.readFileSync(fullPath, 'utf-8');
-            const newContent = this.applyHunks(existingContent, block.content);
+            const { content: newContent, added, removed } = this.applyHunks(existingContent, block.content);
 
             if (!dryRun) {
                 if (block.operation === 'move' && block.newPath) {
-                    const newFullPath = path.resolve(basePath, block.newPath);
+                    const newFullPath = resolveInsideBase(block.newPath);
                     const newDir = path.dirname(newFullPath);
                     if (!fs.existsSync(newDir)) {
                         fs.mkdirSync(newDir, { recursive: true });
                     }
                     fs.writeFileSync(newFullPath, newContent);
                     fs.unlinkSync(fullPath);
-                    return { operation: 'move', path: block.path, newPath: block.newPath, success: true };
+                    return { operation: 'move', path: block.path, newPath: block.newPath, success: true, added, removed };
                 } else {
                     fs.writeFileSync(fullPath, newContent);
                 }
             }
-            return { operation: block.operation, path: block.path, newPath: block.newPath, success: true };
+            return { operation: block.operation, path: block.path, newPath: block.newPath, success: true, added, removed };
         }
 
         return { operation: block.operation, path: block.path, success: false, error: 'Unknown operation' };
     }
 
-    private applyHunks(original: string, hunksContent: string): string {
-        const lines = original.split('\n');
-        const hunkBlocks = hunksContent.split('@@').filter(h => h.trim());
+    private applyHunks(original: string, hunksContent: string): { content: string; added: number; removed: number } {
+        let added = 0;
+        let removed = 0;
+        let lines = original.replace(/\r\n/g, '\n').split('\n');
+        const rawLines = hunksContent.replace(/\r\n/g, '\n').split('\n');
+        const hunks: string[][] = [];
+        let current: string[] | null = null;
 
-        for (const hunkBlock of hunkBlocks) {
-            const hunkLines = hunkBlock.split('\n').filter(l => l.startsWith('-') || l.startsWith('+') || l.trim() === '');
-
-            const removals: string[] = [];
-            const additions: string[] = [];
-
-            for (const hunkLine of hunkLines) {
-                if (hunkLine.startsWith('-')) {
-                    removals.push(hunkLine.slice(1));
-                } else if (hunkLine.startsWith('+')) {
-                    additions.push(hunkLine.slice(1));
-                }
+        for (const line of rawLines) {
+            if (line.startsWith('@@')) {
+                if (current) hunks.push(current);
+                current = [];
+                continue;
             }
-
-            // Find and replace the first occurrence
-            if (removals.length > 0) {
-                const removalPattern = removals.join('\n');
-                const originalJoined = lines.join('\n');
-                const idx = originalJoined.indexOf(removalPattern);
-                if (idx !== -1) {
-                    const before = originalJoined.slice(0, idx);
-                    const after = originalJoined.slice(idx + removalPattern.length);
-                    const replaced = before + additions.join('\n') + after;
-                    lines.length = 0;
-                    lines.push(...replaced.split('\n'));
-                }
-            } else if (additions.length > 0) {
-                // Pure addition at end
-                lines.push(...additions);
+            if (!current) continue;
+            if (line.startsWith(' ') || line.startsWith('+') || line.startsWith('-')) {
+                current.push(line);
             }
         }
+        if (current) hunks.push(current);
+        if (hunks.length === 0) {
+            throw new Error('Update patch must include at least one @@ hunk.');
+        }
 
-        return lines.join('\n');
+        let searchFrom = 0;
+        for (const hunk of hunks) {
+            const oldLines = hunk
+                .filter(line => !line.startsWith('+'))
+                .map(line => line.slice(1));
+            const newLines = hunk
+                .filter(line => !line.startsWith('-'))
+                .map(line => line.slice(1));
+            added += hunk.filter(line => line.startsWith('+')).length;
+            removed += hunk.filter(line => line.startsWith('-')).length;
+            if (oldLines.length === 0) {
+                throw new Error('Pure additions in an update hunk need at least one context line.');
+            }
+
+            const matchAt = (start: number) => oldLines.every((line, offset) => lines[start + offset] === line);
+            let matchIndex = -1;
+            for (let index = searchFrom; index <= lines.length - oldLines.length; index += 1) {
+                if (matchAt(index)) {
+                    matchIndex = index;
+                    break;
+                }
+            }
+            if (matchIndex < 0 && searchFrom > 0) {
+                for (let index = 0; index < searchFrom; index += 1) {
+                    if (matchAt(index)) {
+                        matchIndex = index;
+                        break;
+                    }
+                }
+            }
+            if (matchIndex < 0) {
+                const preview = oldLines.slice(0, 4).join('\\n');
+                throw new Error(`Patch context not found: ${preview}`);
+            }
+
+            lines.splice(matchIndex, oldLines.length, ...newLines);
+            searchFrom = matchIndex + newLines.length;
+        }
+
+        return { content: lines.join('\n'), added, removed };
     }
 }

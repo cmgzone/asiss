@@ -4,7 +4,6 @@ import net from 'net';
 import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
-import { chromium } from 'playwright';
 
 const dnsLookupAll = dns.promises.lookup;
 
@@ -53,12 +52,15 @@ const ensureDir = (dir: string) => {
 
 export class PlaywrightSkill implements Skill {
   name = 'playwright';
-  description = 'Automate a browser for screenshots and text extraction. Can run headful (visible) mode. Blocks localhost/private networks by default.';
+  description = 'Automate a browser for screenshots, web search, and text extraction. Can run headful (visible) mode. Blocks localhost/private networks by default. Use the "search" action as a fallback web search (no API key needed) and "extract_text" to read any public page.';
+  capabilities = ['web_search', 'web_fetch'];
   inputSchema = {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['screenshot', 'extract_text', 'diagnose'] },
+      action: { type: 'string', enum: ['screenshot', 'extract_text', 'search', 'diagnose'] },
       url: { type: 'string', description: 'http/https URL (required for screenshot/extract_text)' },
+      query: { type: 'string', description: 'Search query (required for search action)' },
+      maxResults: { type: 'number', description: 'Max search results (default 5)' },
       fullPage: { type: 'boolean', description: 'Full page screenshot (default true)' },
       selector: { type: 'string', description: 'CSS selector for extract_text (optional)' },
       timeoutMs: { type: 'number', description: 'Navigation timeout ms (default 20000)' },
@@ -72,6 +74,10 @@ export class PlaywrightSkill implements Skill {
   };
 
   async execute(params: any): Promise<any> {
+    // Playwright is one of the heaviest dependencies in the process. Load it
+    // only when the browser skill is actually used instead of delaying every
+    // chat/channel startup.
+    const { chromium } = await import('playwright');
     const action = String(params?.action || '').trim();
     const url = typeof params?.url === 'string' ? params.url.trim() : '';
     const timeoutMs = typeof params?.timeoutMs === 'number' ? params.timeoutMs : 20000;
@@ -95,8 +101,7 @@ export class PlaywrightSkill implements Skill {
       };
     }
 
-    if (!url) return { error: 'url is required' };
-    const safeUrl = await ensureSafeUrl(url);
+    if (!url && action !== 'search') return { error: 'url is required' };
     const artifactsDir = path.join(process.cwd(), 'artifacts', 'playwright');
     ensureDir(artifactsDir);
 
@@ -134,6 +139,46 @@ export class PlaywrightSkill implements Skill {
     }
     const page = context.pages?.()?.[0] || await context.newPage();
     try {
+      if (action === 'search') {
+        const query = String(params?.query || '').trim();
+        if (!query) return { error: 'query is required for search action' };
+        const maxResults = typeof params?.maxResults === 'number' ? params.maxResults : 5;
+        const searchUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+
+        const links: Array<{ title: string; href: string }> = await page.$$eval(
+          'a.result__a',
+          (as: any[]) => as.slice(0, 10).map((a) => ({ title: (a.textContent || '').trim(), href: a.getAttribute('href') || '' }))
+        ).catch(() => []);
+
+        const results: Array<{ title: string; url: string; snippet: string }> = [];
+        for (const link of links.slice(0, maxResults)) {
+          let resultUrl = link.href;
+          try {
+            const parsed = new URL(resultUrl, 'https://duckduckgo.com');
+            const uddg = parsed.searchParams.get('uddg');
+            if (uddg) resultUrl = decodeURIComponent(uddg);
+          } catch { /* keep as-is */ }
+          let snippet = '';
+          try {
+            snippet = await page.evaluate((href: string) => {
+              const anchor = document.querySelector(`a.result__a[href="${href}"]`) as any;
+              const resultEl = anchor?.closest('.result');
+              return (resultEl?.querySelector('.result__snippet')?.textContent || '').trim();
+            }, link.href);
+          } catch { /* snippet optional */ }
+          if (resultUrl) results.push({ title: link.title || '', url: resultUrl, snippet: (snippet || '').trim() });
+        }
+        return {
+          query,
+          source: 'playwright+duckduckgo',
+          results,
+          count: results.length,
+          _synthesisInstructions: 'You MUST now write a comprehensive, professional research report based on these results. Include: Executive Summary, Key Findings with data points, Detailed Analysis, and numbered source citations. Do NOT just list these links.'
+        };
+      }
+
+      const safeUrl = await ensureSafeUrl(url);
       await page.goto(safeUrl.toString(), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
 
       if (action === 'screenshot') {

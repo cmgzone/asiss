@@ -57,11 +57,13 @@ export class TelegramChannel implements ChannelAdapter {
         try {
           await this.bot.telegram.deleteWebhook({ drop_pending_updates: true });
         } catch (e) {
+          console.warn('[TelegramChannel] Failed to clear webhook (continuing):', e);
         }
         try {
           const me = await this.bot.telegram.getMe();
           console.log(`[TelegramChannel] Using bot @${me.username} (${me.id})`);
         } catch (e) {
+          console.warn('[TelegramChannel] getMe failed (continuing):', e);
         }
         try {
           await this.bot.launch();
@@ -80,6 +82,11 @@ export class TelegramChannel implements ChannelAdapter {
 
   async send(userId: string, text: string) {
     const chatId: any = /^\d+$/.test(userId) ? Number(userId) : userId;
+
+    // Skip when this exact text was already delivered as the tail of a stream
+    // (avoids a duplicate final message after streaming).
+    const streamState = this.streamByUserId.get(userId);
+    if (streamState && streamState.lastSentText && streamState.lastSentText === text) return;
 
     // Send typing action
     try {
@@ -182,9 +189,6 @@ export class TelegramChannel implements ChannelAdapter {
     }
 
     state.buffer += chunk;
-    if (state.buffer.length > 20000) {
-      state.buffer = state.buffer.slice(state.buffer.length - 20000);
-    }
 
     if (state.timer) clearTimeout(state.timer);
     state.timer = setTimeout(() => {

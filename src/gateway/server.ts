@@ -1,13 +1,22 @@
-import { ChannelAdapter, Message, Session, MediaPayload } from '../core/types';
+import { ChannelAdapter, Message, Session, MediaPayload, StreamEventPayload } from '../core/types';
 import { AgentRunner } from '../agents/runner';
 import { elevatedManager } from '../core/elevated';
 import { thinkingManager } from '../core/thinking';
 import { planModeManager } from '../core/plan-mode';
-import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { scratchpad } from '../core/scratchpad';
 import { stripShellStreamMarker } from '../core/stream-markers';
+
+export const buildStableSessionId = (userId: string, channel: string): string => {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${channel}:${userId}`)
+    .digest('hex')
+    .slice(0, 24);
+  return `session_${digest}`;
+};
 
 export class Gateway {
   private channels: Map<string, ChannelAdapter> = new Map();
@@ -39,11 +48,16 @@ export class Gateway {
   private async handleMessage(msg: Message) {
     console.log(`[Gateway] Received from ${msg.channel}: ${msg.content}`);
 
-    let sessionId = this.findSession(msg.senderId);
+    let sessionId = this.findSession(msg.senderId, msg.channel);
     if (!sessionId) {
       sessionId = this.createSession(msg.senderId, msg.channel);
     }
 
+    // API requests (OpenAI-compat/batch/connector/editor) mint a fresh session per
+    // call; tear it down on every exit path (including the directive early
+    // returns below) so the sessions map cannot grow unbounded.
+    const isEphemeralApiSession = Boolean(msg.metadata?.api);
+    try {
     // Initialize elevated session state
     elevatedManager.initSession(sessionId, msg.senderId, msg.channel);
 
@@ -75,18 +89,23 @@ export class Gateway {
 
           config.filesystemMode = mode;
 
-          // Update MCP args
+          // Update MCP args (guard against an empty args array)
           if (config.mcpServers && config.mcpServers.filesystem) {
             const fsArgs = config.mcpServers.filesystem.args;
-            if (mode === 'full') {
-              const platformRoot = path.parse(process.cwd()).root || '/';
-              fsArgs[fsArgs.length - 1] = platformRoot;
-            } else {
-              fsArgs[fsArgs.length - 1] = './';
+            if (Array.isArray(fsArgs) && fsArgs.length > 0) {
+              if (mode === 'full') {
+                const platformRoot = path.parse(process.cwd()).root || '/';
+                fsArgs[fsArgs.length - 1] = platformRoot;
+              } else {
+                fsArgs[fsArgs.length - 1] = './';
+              }
             }
           }
 
-          fs.writeFileSync('config.json', JSON.stringify(config, null, 2));
+          // Atomic write so a crash mid-save cannot corrupt config.json
+          const tmpPath = 'config.json.tmp';
+          fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
+          fs.renameSync(tmpPath, 'config.json');
           await this.sendResponse(sessionId, `✅ Filesystem mode set to **${mode}**.\n\n⚠️ **Restart Required**: Please restart the application to apply changes.`);
         } catch (e: any) {
           await this.sendResponse(sessionId, `❌ Failed to update config: ${e.message}`);
@@ -160,24 +179,67 @@ export class Gateway {
       return;
     }
 
-    await this.agentRunner.processMessage(sessionId, msg);
+    try {
+      await this.agentRunner.processMessage(sessionId, msg);
+    } catch (error: any) {
+      const status = Number(error?.status || error?.code || 0);
+      const cleanDetail = String(error?.message || '').trim().replace(/\s+/g, ' ');
+      const strippedDetail = cleanDetail
+        .replace(/^All configured model providers failed\.\s*/i, '')
+        .replace(/^all configured model providers failed\.\s*/i, 'All model providers failed: ');
+      const hasDetail = strippedDetail.length > 2;
+      let errorText: string;
+      if (status === 429) {
+        errorText = 'The AI provider has reached its current rate limit. Switch to another configured model or try again after the quota resets.';
+      } else if (hasDetail) {
+        errorText = `I ran into a problem while working on that request: ${strippedDetail.length > 280 ? `${strippedDetail.slice(0, 280).trimEnd()}…` : strippedDetail}`;
+      } else {
+        errorText = 'I hit an unexpected error while working on that request. The task stopped safely instead of leaving the interface waiting.';
+      }
+      console.error('[Gateway] Agent request failed:', error);
+      if (this.supportsStructuredStreaming(sessionId)) {
+        await this.sendStreamEvent(sessionId, {
+          type: 'assistant_error',
+          runId: `error-${Date.now()}`,
+          messageId: `error-${Date.now()}`,
+          error: errorText,
+          text: errorText,
+          status: 'failed'
+        });
+      } else {
+        await this.sendResponse(sessionId, errorText);
+      }
+    }
+    } finally {
+      if (isEphemeralApiSession) {
+        this.sessions.delete(sessionId);
+      }
+    }
   }
 
-  private findSession(userId: string): string | undefined {
+  private findSession(userId: string, channel: string): string | undefined {
     for (const [id, session] of this.sessions.entries()) {
-      if (session.userId === userId) return id;
+      if (session.userId === userId && session.channel === channel) return id;
     }
     return undefined;
   }
 
   private createSession(userId: string, channel: string): string {
-    const id = uuidv4();
+    // Session IDs must survive process restarts or the durable memory rows become
+    // unreachable on every launch. Channel + sender is stable for console,
+    // messaging users, and project-scoped web chats.
+    const id = buildStableSessionId(userId, channel);
     this.sessions.set(id, {
       id,
       userId,
       channel,
       context: []
     });
+    // Hard cap: evict the oldest session if the map ever grows too large.
+    if (this.sessions.size > 2000) {
+      const oldest = this.sessions.keys().next().value;
+      if (oldest) this.sessions.delete(oldest);
+    }
     console.log(`[Gateway] Created new session ${id} for user ${userId}`);
     return id;
   }
@@ -231,9 +293,6 @@ export class Gateway {
           this.streamFallbackBySessionId.set(sessionId, state);
         }
         state.buffer += cleaned;
-        if (state.buffer.length > 12000) {
-          state.buffer = state.buffer.slice(state.buffer.length - 12000);
-        }
         if (state.timer) clearTimeout(state.timer);
         state.timer = setTimeout(() => {
           const text = state?.buffer || '';
@@ -247,6 +306,22 @@ export class Gateway {
         }, 1000);
       }
     }
+  }
+
+  async sendStreamEvent(sessionId: string, event: StreamEventPayload) {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      const channel = this.channels.get(session.channel);
+      if (channel && channel.sendStreamEvent) {
+        channel.sendStreamEvent(session.userId, event);
+      }
+    }
+  }
+
+  supportsStructuredStreaming(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    return Boolean(this.channels.get(session.channel)?.sendStreamEvent);
   }
 
   listSessionIds(): string[] {

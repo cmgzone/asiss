@@ -1,6 +1,58 @@
+# Dependencies / build output
 node_modules
 dist
+
+# Secrets
 .env
+users.json
+
+# Runtime logs & state
+logs/
+*.log
+app.log
+app.err
+agent_runs.json
+analytics_data.json
+background_goals.json
+cost_data.json
+dynamic_tools.json
+main_goals.json
+main_goals.json.corrupted.bak
+memory.sqlite
+notification_queue.json
+projects_data.json
+scheduler.json
+swarm_data.json
+learning/
+
+# Personal / agent memory (never push to shared repos)
+memory/
+MEMORY.md
+notes.md
+
+# Auth / browser session data
 .wwebjs_auth
+.wwebjs_cache
+
+# Local editor / tooling
+.freebuff
+.trae
+nclaw-*
+
+# Runtime artifacts
+artifacts/
+
+# Separate app, not part of the gitu harness
+ai-news-daily-cup/
+
+# Misc
 npm-debug.log
 memory.json
+screenshot_confirmation.txt
+
+# Broken git stub (renamed from .git) + generated content
+.git.stub.bak/
+2026-business-opportunities-report.md
+AI_NEWS_2026-07-14.md
+ai-news-youtube-script.md
+

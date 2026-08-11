@@ -1,14 +1,19 @@
-import { ModelProvider, ModelResponse, Tool, StreamCallback } from '../core/models';
+import { ModelProvider, ModelResponse, Tool, StreamCallback, ModelAttachment, ModelLevel } from '../core/models';
+import { inferModelLevel } from '../core/model-level';
 import OpenAI from 'openai';
 
 export class NvidiaProvider implements ModelProvider {
-  id = 'nvidia';
-  name = 'NVIDIA';
+  id: string;
+  name: string;
+  level?: ModelLevel;
   private client: OpenAI;
   private modelName: string;
   private enableThinking: boolean;
 
-  constructor(apiKey: string, modelName: string, enableThinking: boolean = true) {
+  constructor(apiKey: string, modelName: string, enableThinking: boolean = true, id: string = 'nvidia') {
+    this.id = id;
+    this.name = `NVIDIA · ${modelName}`;
+    this.level = inferModelLevel(modelName, 'nvidia');
     this.client = new OpenAI({
       baseURL: 'https://integrate.api.nvidia.com/v1',
       apiKey: apiKey,
@@ -17,11 +22,11 @@ export class NvidiaProvider implements ModelProvider {
     this.enableThinking = enableThinking;
   }
 
-  async generate(prompt: string, systemPrompt?: string, tools?: Tool[]): Promise<ModelResponse> {
-    return this.generateStream(prompt, systemPrompt, tools);
+  async generate(prompt: string, systemPrompt?: string, tools?: Tool[], attachments?: ModelAttachment[]): Promise<ModelResponse> {
+    return this.generateStream(prompt, systemPrompt, tools, undefined, attachments);
   }
 
-  async generateStream(prompt: string, systemPrompt?: string, tools?: Tool[], onChunk?: StreamCallback): Promise<ModelResponse> {
+  async generateStream(prompt: string, systemPrompt?: string, tools?: Tool[], onChunk?: StreamCallback, attachments?: ModelAttachment[]): Promise<ModelResponse> {
     try {
       const messages: any[] = [];
 
@@ -29,7 +34,10 @@ export class NvidiaProvider implements ModelProvider {
         messages.push({ role: 'system', content: systemPrompt });
       }
 
-      messages.push({ role: 'user', content: prompt });
+      messages.push({ role: 'user', content: attachments?.length ? [
+        { type: 'text', text: prompt },
+        ...attachments.map(item => ({ type: 'image_url', image_url: { url: item.dataUrl } }))
+      ] : prompt });
 
       let openAiTools: any[] | undefined;
       if (tools && tools.length > 0) {
@@ -126,9 +134,10 @@ export class NvidiaProvider implements ModelProvider {
         hint ? `hint=${hint}` : null
       ].filter(Boolean);
 
-      const errorMsg = parts.join(' ');
-      if (onChunk) onChunk(errorMsg);
-      return { content: errorMsg };
+      const wrapped: any = new Error(parts.join(' '));
+      wrapped.status = status;
+      wrapped.requestId = requestId;
+      throw wrapped;
     }
   }
 }

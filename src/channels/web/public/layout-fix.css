@@ -1,0 +1,54 @@
+html,
+body,
+#app,
+.app {
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.workspace,
+.view,
+.chat-shell,
+.chat-main,
+.canvas {
+  min-height: 0;
+}
+
+.workspace,
+.view {
+  max-height: 100vh;
+  overflow: hidden;
+}
+
+.view.active {
+  height: 100%;
+}
+
+.chat-shell {
+  flex: 1 1 auto;
+  height: calc(100% - 74px);
+  overflow: hidden;
+}
+
+.chat-main,
+.messages,
+.canvas,
+.canvas-body {
+  max-height: 100%;
+}
+
+.messages,
+.canvas-body {
+  overscroll-behavior: contain;
+}
+
+.composer-wrap {
+  z-index: 7;
+}
+
+@media (max-width: 800px) {
+  .canvas {
+    max-height: calc(100vh - 74px);
+  }
+}

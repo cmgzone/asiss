@@ -5,10 +5,22 @@ type BetterSqliteModule = typeof import('better-sqlite3');
 type BetterSqliteDatabase = import('better-sqlite3').Database;
 
 export interface Memory {
+  id?: number;
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
   metadata?: any;
+  semanticScore?: number;
+}
+
+interface SemanticMemoryConfig {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  apiKeyEnv: string;
+  maxChars: number;
+  maxIndexPerSearch: number;
+  minScore: number;
 }
 
 export class MemoryManager {
@@ -22,13 +34,13 @@ export class MemoryManager {
     this.dbPath = path.join(process.cwd(), filename);
     this.jsonPath = path.join(process.cwd(), 'memory.json');
 
+    const dbExists = fs.existsSync(this.dbPath);
     const sqliteLoaded = this.initSqlite();
     if (!sqliteLoaded) {
       this.loadJson();
       return;
     }
 
-    const dbExists = fs.existsSync(this.dbPath);
     this.initSqliteSchema();
 
     if (!dbExists) {
@@ -71,6 +83,8 @@ export class MemoryManager {
 
   private initSqliteSchema() {
     if (!this.db) return;
+    // Make message_embeddings.message_id CASCADE actually enforce on delete.
+    this.db.pragma('foreign_keys = ON');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,6 +95,16 @@ export class MemoryManager {
         timestamp INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_session_timestamp ON messages(session_id, timestamp);
+
+      CREATE TABLE IF NOT EXISTS message_embeddings (
+        message_id INTEGER PRIMARY KEY,
+        model TEXT NOT NULL,
+        dimensions INTEGER NOT NULL,
+        vector TEXT NOT NULL,
+        indexed_at INTEGER NOT NULL,
+        FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_embeddings_model ON message_embeddings(model);
     `);
   }
 
@@ -216,6 +240,7 @@ export class MemoryManager {
       }
     }
     return {
+      id: row.id,
       role: row.role,
       content: row.content,
       timestamp: row.timestamp,
@@ -229,7 +254,7 @@ export class MemoryManager {
 
     if (this.mode === 'sqlite' && this.db) {
       try {
-        this.db.prepare(`
+        const info = this.db.prepare(`
           INSERT INTO messages (session_id, role, content, metadata, timestamp)
           VALUES (?, ?, ?, ?, ?)
         `).run(
@@ -238,7 +263,12 @@ export class MemoryManager {
           normalized.content,
           normalized.metadata ? JSON.stringify(normalized.metadata) : null,
           normalized.timestamp
-        );
+        ) as any;
+
+        const messageId = Number(info?.lastInsertRowid);
+        if (Number.isFinite(messageId)) {
+          void this.indexMessageEmbedding(messageId);
+        }
       } catch (err) {
         console.error('[MemoryManager] Failed to save memory:', err);
       }
@@ -264,13 +294,15 @@ export class MemoryManager {
 
     if (this.mode === 'sqlite' && this.db) {
       try {
+        // Escape LIKE wildcards so user queries like "100%" or "a_b" are matched literally.
+        const escaped = query.replace(/[\\%_]/g, '\\$&');
         const rows = this.db.prepare(`
               SELECT role, content, metadata, timestamp
               FROM messages
-              WHERE content LIKE ?
+              WHERE content LIKE ? ESCAPE '\\'
               ORDER BY timestamp DESC
               LIMIT ?
-          `).all(`%${query}%`, limit);
+          `).all(`%${escaped}%`, limit);
         return rows.map(this.mapSqliteRow);
       } catch (err) {
         console.error('[MemoryManager] Search failed:', err);
@@ -293,6 +325,226 @@ export class MemoryManager {
     } catch (err) {
       console.error('[MemoryManager] Search failed:', err);
       return [];
+    }
+  }
+
+  private loadSemanticConfig(): SemanticMemoryConfig {
+    const defaults: SemanticMemoryConfig = {
+      enabled: false,
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'text-embedding-3-small',
+      apiKeyEnv: 'EMBEDDINGS_API_KEY',
+      maxChars: 6000,
+      maxIndexPerSearch: 25,
+      minScore: 0.2
+    };
+
+    let config = { ...defaults };
+    try {
+      const configPath = path.join(process.cwd(), 'config.json');
+      if (fs.existsSync(configPath)) {
+        const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        if (raw.memory?.semantic && typeof raw.memory.semantic === 'object') {
+          config = { ...config, ...raw.memory.semantic };
+        }
+      }
+    } catch {
+      // keep defaults
+    }
+
+    if (process.env.EMBEDDINGS_BASE_URL) config.baseUrl = process.env.EMBEDDINGS_BASE_URL;
+    if (process.env.EMBEDDINGS_MODEL) config.model = process.env.EMBEDDINGS_MODEL;
+
+    config.enabled = Boolean(config.enabled);
+    config.baseUrl = String(config.baseUrl || defaults.baseUrl).replace(/\/+$/, '');
+    config.model = String(config.model || defaults.model);
+    config.apiKeyEnv = String(config.apiKeyEnv || defaults.apiKeyEnv);
+    config.maxChars = Math.max(256, Math.floor(Number(config.maxChars) || defaults.maxChars));
+    config.maxIndexPerSearch = Math.max(0, Math.floor(Number(config.maxIndexPerSearch) || defaults.maxIndexPerSearch));
+    config.minScore = Number.isFinite(Number(config.minScore)) ? Number(config.minScore) : defaults.minScore;
+    return config;
+  }
+
+  private isLocalEmbeddingBaseUrl(baseUrl: string) {
+    try {
+      const url = new URL(baseUrl);
+      const host = url.hostname.toLowerCase();
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    } catch {
+      return false;
+    }
+  }
+
+  private getEmbeddingApiKey(config: SemanticMemoryConfig) {
+    return process.env[config.apiKeyEnv]
+      || process.env.EMBEDDINGS_API_KEY
+      || process.env.OPENAI_API_KEY
+      || '';
+  }
+
+  private async embedText(text: string, config: SemanticMemoryConfig): Promise<number[]> {
+    if (!config.enabled) {
+      throw new Error('Semantic memory is disabled.');
+    }
+
+    const apiKey = this.getEmbeddingApiKey(config);
+    if (!apiKey && !this.isLocalEmbeddingBaseUrl(config.baseUrl)) {
+      throw new Error(`Semantic memory needs an embeddings key. Set ${config.apiKeyEnv} or OPENAI_API_KEY, or configure a local embeddings baseUrl.`);
+    }
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json'
+    };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+    const res = await fetch(`${config.baseUrl}/embeddings`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: config.model,
+        input: String(text || '').slice(0, config.maxChars)
+      })
+    });
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Embeddings request failed (${res.status}): ${detail}`);
+    }
+
+    const data: any = await res.json();
+    const vector = data?.data?.[0]?.embedding || data?.embedding;
+    if (!Array.isArray(vector) || vector.length === 0) {
+      throw new Error('Embeddings response did not contain a vector.');
+    }
+    return vector.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n));
+  }
+
+  private async indexMessageEmbedding(messageId: number, config = this.loadSemanticConfig()) {
+    if (!config.enabled || this.mode !== 'sqlite' || !this.db) return;
+
+    try {
+      const row = this.db.prepare(`
+        SELECT id, content
+        FROM messages
+        WHERE id = ?
+      `).get(messageId) as any;
+      if (!row?.content) return;
+
+      const existing = this.db.prepare(`
+        SELECT message_id
+        FROM message_embeddings
+        WHERE message_id = ? AND model = ?
+      `).get(messageId, config.model);
+      if (existing) return;
+
+      const vector = await this.embedText(row.content, config);
+      if (vector.length === 0) return;
+
+      this.db.prepare(`
+        INSERT OR REPLACE INTO message_embeddings (message_id, model, dimensions, vector, indexed_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(messageId, config.model, vector.length, JSON.stringify(vector), Date.now());
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      if (!message.includes('Semantic memory needs an embeddings key')) {
+        console.warn('[MemoryManager] Semantic indexing skipped:', message);
+      }
+    }
+  }
+
+  private async indexMissingEmbeddings(limit: number, config: SemanticMemoryConfig) {
+    if (!config.enabled || this.mode !== 'sqlite' || !this.db || limit <= 0) return 0;
+    const rows = this.db.prepare(`
+      SELECT m.id
+      FROM messages m
+      LEFT JOIN message_embeddings e
+        ON e.message_id = m.id AND e.model = ?
+      WHERE e.message_id IS NULL
+      ORDER BY m.timestamp DESC
+      LIMIT ?
+    `).all(config.model, limit) as Array<{ id: number }>;
+
+    let indexed = 0;
+    for (const row of rows) {
+      await this.indexMessageEmbedding(Number(row.id), config);
+      indexed += 1;
+    }
+    return indexed;
+  }
+
+  private cosineSimilarity(a: number[], b: number[]) {
+    const len = Math.min(a.length, b.length);
+    if (len === 0) return 0;
+    let dot = 0;
+    let aNorm = 0;
+    let bNorm = 0;
+    for (let i = 0; i < len; i++) {
+      dot += a[i] * b[i];
+      aNorm += a[i] * a[i];
+      bNorm += b[i] * b[i];
+    }
+    if (!aNorm || !bNorm) return 0;
+    return dot / (Math.sqrt(aNorm) * Math.sqrt(bNorm));
+  }
+
+  public async semanticSearch(query: string, limit: number = 5): Promise<{
+    mode: 'semantic' | 'keyword';
+    reason?: string;
+    count: number;
+    results: Memory[];
+  }> {
+    const config = this.loadSemanticConfig();
+    if (!config.enabled) {
+      const results = this.search(query, limit);
+      return { mode: 'keyword', reason: 'Semantic memory is disabled.', count: results.length, results };
+    }
+
+    if (this.mode !== 'sqlite' || !this.db) {
+      const results = this.search(query, limit);
+      return { mode: 'keyword', reason: 'Semantic memory requires SQLite; using keyword fallback.', count: results.length, results };
+    }
+
+    try {
+      const queryVector = await this.embedText(query, config);
+      await this.indexMissingEmbeddings(config.maxIndexPerSearch, config);
+
+      const rows = this.db.prepare(`
+        SELECT m.id, m.role, m.content, m.metadata, m.timestamp, e.vector
+        FROM message_embeddings e
+        JOIN messages m ON m.id = e.message_id
+        WHERE e.model = ?
+      `).all(config.model) as any[];
+
+      const scored = rows
+        .map((row) => {
+          try {
+            const vector = JSON.parse(row.vector);
+            const score = this.cosineSimilarity(queryVector, vector);
+            const memory = this.mapSqliteRow(row);
+            memory.semanticScore = score;
+            return memory;
+          } catch {
+            return null;
+          }
+        })
+        .filter((memory): memory is Memory => !!memory && (memory.semanticScore || 0) >= config.minScore)
+        .sort((a, b) => (b.semanticScore || 0) - (a.semanticScore || 0))
+        .slice(0, Math.max(1, limit));
+
+      if (scored.length === 0) {
+        const fallback = this.search(query, limit);
+        return { mode: 'keyword', reason: 'No semantic matches met the score threshold.', count: fallback.length, results: fallback };
+      }
+
+      return { mode: 'semantic', count: scored.length, results: scored };
+    } catch (err: any) {
+      const fallback = this.search(query, limit);
+      return {
+        mode: 'keyword',
+        reason: err?.message || 'Semantic memory unavailable; using keyword fallback.',
+        count: fallback.length,
+        results: fallback
+      };
     }
   }
 }

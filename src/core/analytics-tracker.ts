@@ -51,6 +51,14 @@ export interface AnalyticsOverview {
     uptimeMs: number;
 }
 
+export interface ToolUsageStat {
+    toolName: string;
+    calls: number;
+    successes: number;
+    failures: number;
+    lastUsed: number;
+}
+
 interface AnalyticsData {
     events: AnalyticsEvent[];
     startedAt: number;
@@ -63,8 +71,8 @@ export class AnalyticsTracker {
     private saveInterval: NodeJS.Timeout | null = null;
     private maxEvents = 5000; // Cap events to prevent unbounded growth
 
-    constructor() {
-        this.filePath = path.join(process.cwd(), 'analytics_data.json');
+    constructor(filePath?: string) {
+        this.filePath = filePath || path.join(process.cwd(), 'analytics_data.json');
         this.data = { events: [], startedAt: Date.now() };
         this.load();
 
@@ -145,6 +153,15 @@ export class AnalyticsTracker {
         this.record({ type: 'tool_call', sessionId, metadata: { toolName } });
     }
 
+    /** Record the outcome of a tool call (ok/error) for per-tool usage stats. */
+    public recordToolCallResult(sessionId: string, toolName: string, success: boolean): void {
+        this.record({
+            type: 'tool_call',
+            sessionId,
+            metadata: { toolName, result: success ? 'ok' : 'error' }
+        });
+    }
+
     public recordMessage(sessionId: string): void {
         this.record({ type: 'message', sessionId });
     }
@@ -186,6 +203,30 @@ export class AnalyticsTracker {
         }
 
         return result;
+    }
+
+    public getToolUsageStats(): ToolUsageStat[] {
+        const byName = new Map<string, ToolUsageStat>();
+
+        for (const event of this.data.events) {
+            if (event.type !== 'tool_call') continue;
+            const toolName = String(event.metadata?.toolName || '').trim();
+            if (!toolName) continue;
+
+            let entry = byName.get(toolName);
+            if (!entry) {
+                entry = { toolName, calls: 0, successes: 0, failures: 0, lastUsed: 0 };
+                byName.set(toolName, entry);
+            }
+            entry.calls += 1;
+            const result = event.metadata?.result;
+            if (result === 'ok') entry.successes += 1;
+            else if (result === 'error') entry.failures += 1;
+            if (event.timestamp > entry.lastUsed) entry.lastUsed = event.timestamp;
+        }
+
+        return Array.from(byName.values())
+            .sort((a, b) => b.calls - a.calls || b.lastUsed - a.lastUsed);
     }
 
     public getAgentPerformance(): AgentPerformance[] {

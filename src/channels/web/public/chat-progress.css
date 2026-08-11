@@ -1,0 +1,542 @@
+.chat-shell,
+.chat-shell.canvas-closed {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.canvas,
+#canvasToggle,
+.work-message {
+  display: none !important;
+}
+
+.composer-wrap {
+  right: 0 !important;
+}
+
+.message.update {
+  margin-top: 2px;
+  margin-bottom: 18px;
+  animation: conversation-fade .32s ease both;
+}
+
+.message.update .update-rail,
+.message.activity-message .activity-spacer {
+  width: 31px;
+}
+
+.message.update .message-body {
+  color: #dfe3eb;
+  line-height: 1.65;
+}
+
+.message.update .message-body p:last-child {
+  margin-bottom: 0;
+}
+
+.message.activity-message {
+  margin-top: -5px;
+  margin-bottom: 24px;
+  animation: conversation-fade .28s ease both;
+}
+
+.tool-summary {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  color: #7e8799;
+  font-size: 12px;
+  font-weight: 520;
+  transition: color .2s ease, opacity .2s ease;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.activity-stack {
+  min-width: 0;
+  width: min(100%, 760px);
+}
+
+.tool-summary:hover,
+.tool-summary:focus-visible {
+  color: var(--soft);
+}
+
+.tool-summary:focus-visible {
+  outline: 2px solid rgba(139, 124, 255, .45);
+  outline-offset: 5px;
+  border-radius: 5px;
+}
+
+.tool-summary-caret {
+  width: 7px;
+  height: 7px;
+  margin-left: 2px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform .2s ease;
+}
+
+.tool-summary[aria-expanded="true"] .tool-summary-caret {
+  transform: rotate(225deg) translate(-2px, -1px);
+}
+
+.tool-detail {
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid #252c39;
+  border-radius: 12px;
+  background: #0b0e14;
+  animation: detail-open .22s ease both;
+}
+
+.tool-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid #202633;
+  color: #7d8799;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.tool-detail-status {
+  color: var(--accent2);
+}
+
+.tool-detail pre {
+  max-height: 300px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  color: #b9c1cf;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.6 Consolas, "SFMono-Regular", monospace;
+}
+
+.skill-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 18px;
+}
+
+.skill-metric {
+  display: grid;
+  gap: 3px;
+  padding: 15px 16px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: rgba(20, 24, 32, .72);
+}
+
+.skill-metric span,
+.skill-metric small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.skill-metric strong {
+  color: var(--soft);
+  font-size: 19px;
+}
+
+.skill-list {
+  display: grid;
+  gap: 11px;
+}
+
+.skill-card,
+.skill-empty {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: rgba(18, 22, 30, .76);
+  transition: border-color .2s ease, opacity .2s ease, transform .2s ease;
+}
+
+.skill-card:hover {
+  border-color: #394254;
+  transform: translateY(-1px);
+}
+
+.skill-card.disabled {
+  opacity: .58;
+}
+
+.skill-card-top,
+.skill-meta,
+.skill-actions {
+  display: flex;
+  align-items: center;
+}
+
+.skill-card-top {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.skill-card h3,
+.skill-empty h3 {
+  margin: 5px 0 0;
+  color: var(--soft);
+}
+
+.skill-card p,
+.skill-empty p {
+  color: var(--muted);
+}
+
+.skill-state {
+  color: #768197;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.skill-state-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--accent2);
+  box-shadow: 0 0 0 4px rgba(67, 211, 180, .08);
+}
+
+.skill-card.disabled .skill-state-dot {
+  background: #596276;
+  box-shadow: none;
+}
+
+.skill-actions {
+  gap: 7px;
+}
+
+.skill-actions button:disabled {
+  cursor: not-allowed;
+  opacity: .35;
+}
+
+.skill-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.skill-tags span {
+  padding: 3px 7px;
+  border: 1px solid #2e3644;
+  border-radius: 999px;
+  color: #8993a5;
+  font-size: 10px;
+}
+
+.skill-source {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.skill-source summary {
+  color: #929bad;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.skill-source pre {
+  max-height: 360px;
+  margin: 10px 0 0;
+  padding: 13px;
+  overflow: auto;
+  border: 1px solid #252c39;
+  border-radius: 11px;
+  background: #0a0d12;
+  color: #aeb7c6;
+  white-space: pre-wrap;
+  font: 11px/1.55 Consolas, monospace;
+}
+
+.skill-meta {
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 13px;
+  color: #5f697b;
+  font-size: 10px;
+}
+
+.skill-empty {
+  padding: 44px 24px;
+  text-align: center;
+}
+
+.skill-empty-mark {
+  width: 42px;
+  height: 42px;
+  margin: 0 auto 12px;
+  border: 1px solid #3b4352;
+  border-radius: 13px;
+  display: grid;
+  place-items: center;
+  color: var(--accent2);
+}
+
+.tool-summary-icon {
+  display: grid;
+  width: 15px;
+  height: 15px;
+  place-items: center;
+  border: 1px solid #41495a;
+  border-radius: 4px;
+  color: #9ca6b8;
+  font: 12px/1 ui-monospace, monospace;
+}
+
+.tool-summary.running {
+  color: #aeb6c5;
+}
+
+.tool-summary.running::after {
+  content: '';
+  width: 52px;
+  height: 2px;
+  margin-left: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #262d3b 5%, var(--accent) 48%, #262d3b 95%);
+  background-size: 220% 100%;
+  animation: summary-shimmer 1.35s linear infinite;
+}
+
+.tool-summary.completed .tool-summary-icon {
+  color: var(--accent2);
+  border-color: rgba(67, 211, 180, .35);
+}
+
+.tool-summary.failed {
+  color: #b98790;
+}
+
+.tool-summary.failed .tool-summary-icon {
+  color: var(--danger);
+  border-color: rgba(255, 103, 120, .35);
+}
+
+.progress-message {
+  margin-top: -10px;
+  margin-bottom: 22px;
+  transition: opacity .38s ease, transform .38s ease, filter .38s ease;
+}
+
+.progress-message .role {
+  background: transparent;
+  color: var(--accent2);
+  border: 1px solid var(--line);
+  box-shadow: none;
+}
+
+.agent-progress {
+  min-width: 0;
+  padding: 3px 0 7px;
+  color: var(--muted);
+}
+
+.progress-sheen {
+  width: min(260px, 72%);
+  height: 3px;
+  margin-bottom: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #1b202b;
+  transition: opacity .25s ease, height .25s ease, margin .25s ease;
+}
+
+.progress-sheen::after {
+  content: '';
+  display: block;
+  width: 42%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--accent), var(--accent2), transparent);
+  animation: progress-glide 1.35s ease-in-out infinite;
+}
+
+.progress-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 22px;
+}
+
+.progress-orb {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 5px rgba(139, 124, 255, .09);
+  animation: progress-pulse 1.2s ease-in-out infinite;
+}
+
+.agent-progress.done .progress-orb {
+  background: var(--accent2);
+  box-shadow: 0 0 0 5px rgba(67, 211, 180, .08);
+}
+
+.agent-progress.failed .progress-orb {
+  background: var(--danger);
+  box-shadow: 0 0 0 5px rgba(255, 103, 120, .08);
+}
+
+.progress-action {
+  color: var(--soft);
+  font-size: 13px;
+  font-weight: 650;
+  transition: opacity .16s ease, transform .16s ease, filter .16s ease;
+}
+
+.progress-detail {
+  min-height: 18px;
+  margin: 3px 0 0 17px;
+  overflow: hidden;
+  color: #667084;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font: 11px/1.5 Consolas, "SFMono-Regular", monospace;
+  transition: opacity .16s ease, transform .16s ease, filter .16s ease;
+}
+
+.agent-progress.swapping .progress-action,
+.agent-progress.swapping .progress-detail {
+  opacity: 0;
+  transform: translateY(4px);
+  filter: blur(3px);
+}
+
+.progress-message.fading {
+  opacity: 0;
+  transform: translateY(-5px);
+  filter: blur(4px);
+}
+
+.thinking {
+  position: relative;
+  display: grid !important;
+  grid-template-columns: minmax(110px, 190px) auto;
+  align-items: center;
+  gap: 10px !important;
+  min-height: 28px;
+}
+
+.thinking .shimmer {
+  width: 100% !important;
+  height: 4px !important;
+  background: linear-gradient(90deg, #1c2230 10%, #7164da 45%, #43d3b4 55%, #1c2230 90%) !important;
+  background-size: 250% 100% !important;
+  animation: shimmer 1.35s linear infinite !important;
+}
+
+.thinking span {
+  font-size: 12px;
+  color: #768095;
+  animation: thinking-fade 1.6s ease-in-out infinite;
+}
+
+.thinking-block {
+  margin: 2px 0 10px;
+  border: 1px solid rgba(114, 100, 218, .28);
+  border-radius: 10px;
+  background: rgba(114, 100, 218, .06);
+  overflow: hidden;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.thinking-block summary {
+  cursor: pointer;
+  padding: 7px 11px;
+  list-style: none;
+  color: #a9a1e8;
+  font-weight: 600;
+  user-select: none;
+}
+
+.thinking-block summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-block summary::before {
+  content: '▶ ';
+  font-size: 10px;
+  color: #8f86d8;
+}
+
+.thinking-block[open] summary::before {
+  content: '▼ ';
+}
+
+.thinking-block > div {
+  padding: 0 12px 10px;
+  color: #9aa3b8;
+  white-space: pre-wrap;
+  word-break: break-word;
+  animation: conversation-fade .18s ease both;
+}
+
+@keyframes progress-glide {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(260%); }
+}
+
+@keyframes progress-pulse {
+  50% { opacity: .4; transform: scale(.72); }
+}
+
+@keyframes thinking-fade {
+  50% { opacity: .42; }
+}
+
+@keyframes conversation-fade {
+  from { opacity: 0; transform: translateY(5px); filter: blur(2px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+
+@keyframes summary-shimmer {
+  from { background-position: 150% 0; }
+  to { background-position: -90% 0; }
+}
+
+@keyframes detail-open {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (max-width: 720px) {
+  .skill-metrics { grid-template-columns: 1fr; }
+  .skill-card-top, .skill-meta { align-items: flex-start; flex-direction: column; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-sheen::after,
+  .progress-orb,
+  .thinking .shimmer,
+  .thinking span {
+    animation: none !important;
+  }
+
+  .tool-summary.running::after {
+    animation: none !important;
+  }
+}

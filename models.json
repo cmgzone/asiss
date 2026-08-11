@@ -1,0 +1,10 @@
+[
+  {
+    "id": "ling",
+    "name": "ling",
+    "provider": "openrouter",
+    "modelName": "inclusionai/ling-3.0-tiny:free",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "enabled": false
+  }
+]

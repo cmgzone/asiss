@@ -4,6 +4,7 @@ import fetch from 'node-fetch';
 export class SerperSkill implements Skill {
     name = 'serper_search';
     description = 'Search the web using Google Search via Serper API. Best for high-quality, up-to-date information. IMPORTANT: Synthesize results into a clear answer (for simple questions) or a professional report (for research requests). Never just list links.';
+    capabilities = ['web_search'];
 
     inputSchema = {
         type: 'object',

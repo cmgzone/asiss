@@ -21,6 +21,7 @@ interface BraveApiResponse {
 export class BraveSearchSkill implements Skill {
   name = 'brave_search';
   description = 'Search the web using Brave Search API. IMPORTANT: After receiving results, you MUST synthesize them into a comprehensive professional report with sections (Executive Summary, Key Findings, Detailed Analysis, Sources). Never just list links — always write a full analytical report.';
+  capabilities = ['web_search'];
   inputSchema = {
     type: 'object',
     properties: {
@@ -69,7 +70,7 @@ export class BraveSearchSkill implements Skill {
         const errorText = await response.text();
         return {
           error: `Brave API error: ${response.status} ${response.statusText}`,
-          details: errorText.slice(0, 500),
+          details: errorText,
         };
       }
 

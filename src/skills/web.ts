@@ -7,6 +7,7 @@ type FetchResult = {
   finalUrl: string;
   status: number;
   contentType: string | null;
+  raw?: string;
   text: string;
 };
 
@@ -51,68 +52,88 @@ const ensureSafeUrl = async (inputUrl: string) => {
   return url;
 };
 
+const decodeHtml = (value: string) => {
+  return value
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+};
+
 const stripHtml = (html: string) => {
   let t = html.replace(/<script[\s\S]*?<\/script>/gi, '');
   t = t.replace(/<style[\s\S]*?<\/style>/gi, '');
   t = t.replace(/<\/(p|div|br|li|h\d)>/gi, '\n');
   t = t.replace(/<[^>]+>/g, ' ');
-  t = t.replace(/&nbsp;/g, ' ');
-  t = t.replace(/&amp;/g, '&');
-  t = t.replace(/&lt;/g, '<');
-  t = t.replace(/&gt;/g, '>');
-  t = t.replace(/&quot;/g, '"');
-  t = t.replace(/&#39;/g, "'");
+  t = decodeHtml(t);
   t = t.replace(/[ \t]+\n/g, '\n');
   t = t.replace(/\n{3,}/g, '\n\n');
   return t.trim();
 };
 
-const fetchText = async (inputUrl: string, timeoutMs: number, maxChars: number): Promise<FetchResult> => {
+const fetchText = async (inputUrl: string, timeoutMs: number, maxChars: number, includeRaw = false): Promise<FetchResult> => {
   const url = await ensureSafeUrl(inputUrl);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url.toString(), {
-      redirect: 'follow',
-      signal: controller.signal,
-      headers: {
-        'user-agent': 'myassis/1.0 (+https://localhost)',
-        'accept': 'text/html,text/plain;q=0.9,*/*;q=0.1',
-      },
-    });
+  let lastError: unknown;
+  // Transient network/DNS failures (EAI_AGAIN, aborts) are common; retry once
+  // with a short backoff before surfacing the error to the agent.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url.toString(), {
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: {
+          'user-agent': 'myassis/1.0 (+https://localhost)',
+          'accept': 'text/html,text/plain;q=0.9,*/*;q=0.1',
+        },
+      });
 
-    const contentType = res.headers.get('content-type');
-    const raw = await res.text();
-    const clipped = raw.length > maxChars ? raw.slice(0, maxChars) : raw;
-    const text = contentType && contentType.toLowerCase().includes('text/html') ? stripHtml(clipped) : clipped.trim();
+      const contentType = res.headers.get('content-type');
+      const raw = await res.text();
+      const extracted = contentType && contentType.toLowerCase().includes('text/html')
+        ? stripHtml(raw)
+        : raw.trim();
+      const text = extracted.length > maxChars ? extracted.slice(0, maxChars) : extracted;
 
-    return {
-      url: url.toString(),
-      finalUrl: res.url || url.toString(),
-      status: res.status,
-      contentType,
-      text,
-    };
-  } finally {
-    clearTimeout(timeout);
+      return {
+        url: url.toString(),
+        finalUrl: res.url || url.toString(),
+        status: res.status,
+        contentType,
+        ...(includeRaw ? { raw } : {}),
+        text,
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) {
+        await new Promise(resolve => setTimeout(resolve, 600));
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+  throw lastError instanceof Error ? lastError : new Error('Fetch failed');
 };
 
 export class WebFetchSkill implements Skill {
   name = 'web_fetch';
   description = 'Fetch a web page (http/https) and return readable text. Blocks localhost/private networks.';
+  capabilities = ['web_fetch'];
   inputSchema = {
     type: 'object',
     properties: {
       url: { type: 'string', description: 'URL to fetch (http/https)' },
-      timeoutMs: { type: 'number', description: 'Timeout in ms (default 10000)' },
+      timeoutMs: { type: 'number', description: 'Timeout in ms (default 20000)' },
       maxChars: { type: 'number', description: 'Max characters to return (default 20000)' },
     },
     required: ['url'],
   };
 
   async execute(params: any): Promise<any> {
-    const timeoutMs = typeof params?.timeoutMs === 'number' ? params.timeoutMs : 10000;
+    const timeoutMs = typeof params?.timeoutMs === 'number' ? params.timeoutMs : 20000;
     const maxChars = typeof params?.maxChars === 'number' ? params.maxChars : 20000;
     const result = await fetchText(String(params?.url || ''), timeoutMs, maxChars);
     return result;
@@ -121,7 +142,8 @@ export class WebFetchSkill implements Skill {
 
 export class WebSearchSkill implements Skill {
   name = 'web_search';
-  description = 'Search the web via DuckDuckGo HTML and return top results. IMPORTANT: After receiving results, you MUST synthesize them into a comprehensive professional report — never just list links. Write with sections, analysis, and source citations.';
+  description = 'Search the web via DuckDuckGo HTML and return candidate sources. No API key required. For research, fetch the strongest sources and report only claims supported by their returned text. Cite the source URLs and never invent missing facts, dates, metrics, model names, or quotations.';
+  capabilities = ['web_search'];
   inputSchema = {
     type: 'object',
     properties: {
@@ -137,18 +159,49 @@ export class WebSearchSkill implements Skill {
     if (!q) return { results: [] };
 
     const searchUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
-    const fetched = await fetchText(searchUrl, 12000, 40000);
+    const fetched = await fetchText(searchUrl, 20000, 40000, true);
+
+    const extractResultUrl = (href: string): string | null => {
+      const decodedHref = decodeHtml(href || '').trim();
+      if (!decodedHref) return null;
+      const absolute = decodedHref.startsWith('//')
+        ? `https:${decodedHref}`
+        : decodedHref.startsWith('/')
+          ? `https://duckduckgo.com${decodedHref}`
+          : decodedHref;
+
+      try {
+        const parsed = new URL(absolute);
+        const duckHost = parsed.hostname.toLowerCase().includes('duckduckgo.com');
+        const uddg = parsed.searchParams.get('uddg');
+        if (uddg) return uddg;
+        if (duckHost) return null;
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.toString();
+      } catch {
+        return null;
+      }
+      return null;
+    };
 
     const results: Array<{ title: string; url: string }> = [];
-    const html = fetched.text;
-    const linkRe = /href="(https?:\/\/[^"]+)"[^>]*>([^<]{2,200})<\/a>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = linkRe.exec(html)) && results.length < maxResults) {
-      const url = m[1];
-      const title = m[2].replace(/\s+/g, ' ').trim();
-      if (!url.includes('duckduckgo.com') && title) {
-        results.push({ title, url });
+    const seen = new Set<string>();
+    const html = fetched.raw || fetched.text;
+    const patterns = [
+      /<a[^>]+class=["'][^"']*result__a[^"']*["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+      /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
+    ];
+
+    for (const linkRe of patterns) {
+      let m: RegExpExecArray | null;
+      while ((m = linkRe.exec(html)) && results.length < maxResults) {
+        const url = extractResultUrl(m[1]);
+        const title = stripHtml(m[2]).replace(/\s+/g, ' ').trim();
+        if (url && title && !seen.has(url)) {
+          seen.add(url);
+          results.push({ title, url });
+        }
       }
+      if (results.length >= maxResults) break;
     }
 
     return { query: q, results, source: fetched.finalUrl };

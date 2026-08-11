@@ -3,13 +3,13 @@ import { MemoryManager } from '../core/memory';
 
 export class MemorySkill implements Skill {
     name = 'memory';
-    description = 'Search and retrieve past memories and conversations from the long-term memory database.';
+    description = 'Search and retrieve past memories and conversations from the long-term memory database. Supports keyword and semantic search when embeddings are configured.';
     inputSchema = {
         type: 'object',
         properties: {
             action: {
                 type: 'string',
-                enum: ['search', 'get_recent'],
+                enum: ['search', 'semantic_search', 'get_recent'],
                 description: 'Action to perform'
             },
             query: {
@@ -41,10 +41,27 @@ export class MemorySkill implements Skill {
             if (!query) return { error: 'Query is required for search' };
             const results = this.memory.search(query, limit);
             return {
+                mode: 'keyword',
                 count: results.length,
                 results: results.map(r => ({
                     timestamp: new Date(r.timestamp).toISOString(),
                     role: r.role,
+                    content: r.content
+                }))
+            };
+        }
+
+        if (action === 'semantic_search') {
+            if (!query) return { error: 'Query is required for semantic_search' };
+            const search = await this.memory.semanticSearch(query, limit);
+            return {
+                mode: search.mode,
+                reason: search.reason,
+                count: search.count,
+                results: search.results.map(r => ({
+                    timestamp: new Date(r.timestamp).toISOString(),
+                    role: r.role,
+                    score: typeof r.semanticScore === 'number' ? Number(r.semanticScore.toFixed(4)) : undefined,
                     content: r.content
                 }))
             };

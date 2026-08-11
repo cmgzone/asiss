@@ -2,6 +2,10 @@ import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
+// Node.js clamps setTimeout delays above this value (2^31-1 ms ~ 24.8 days) to 1 ms,
+// which would make far-future jobs fire immediately. Keep every delay under it.
+const MAX_TIMEOUT_MS = 2147483647;
+
 export type ScheduledJobType = 'agent_prompt';
 
 export type ScheduledJob = {
@@ -41,8 +45,11 @@ export class SchedulerManager {
 
   private save() {
     try {
-      fs.writeFileSync(this.filePath, JSON.stringify(this.jobs, null, 2));
-    } catch {
+      const tmpPath = `${this.filePath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(this.jobs, null, 2));
+      fs.renameSync(tmpPath, this.filePath);
+    } catch (e) {
+      console.error('[Scheduler] Failed to save jobs:', e);
     }
   }
 
@@ -61,14 +68,23 @@ export class SchedulerManager {
 
   create(params: { sessionId: string; prompt: string; runAt?: number; delayMs?: number; intervalMs?: number }) {
     const now = Date.now();
-    const runAt = typeof params.runAt === 'number' ? params.runAt : now + (typeof params.delayMs === 'number' ? params.delayMs : 0);
+    const rawRunAt = typeof params.runAt === 'number' ? params.runAt : now + (typeof params.delayMs === 'number' ? params.delayMs : 0);
+    // Clamp to the longest timeout Node supports so far-future jobs degrade to
+    // a scheduled run instead of firing immediately (setTimeout overflow).
+    const runAt = Math.min(Math.max(now + 1, rawRunAt), now + MAX_TIMEOUT_MS);
+    if (rawRunAt > runAt) {
+      console.warn(`[Scheduler] Job run time was beyond the maximum supported delay (${Math.round(MAX_TIMEOUT_MS / 86400000)} days); clamped to ${new Date(runAt).toISOString()}.`);
+    }
+    const intervalMs = typeof params.intervalMs === 'number'
+      ? Math.min(Math.max(1, Math.floor(params.intervalMs)), MAX_TIMEOUT_MS)
+      : undefined;
     const job: ScheduledJob = {
       id: uuidv4(),
       type: 'agent_prompt',
       sessionId: params.sessionId,
       prompt: params.prompt,
-      runAt: Math.max(now + 1, runAt),
-      intervalMs: typeof params.intervalMs === 'number' ? params.intervalMs : undefined,
+      runAt,
+      intervalMs,
       enabled: true,
       createdAt: now,
       runCount: 0,
@@ -97,7 +113,7 @@ export class SchedulerManager {
       clearTimeout(existing);
       this.timers.delete(job.id);
     }
-    const delay = Math.max(0, job.runAt - Date.now());
+    const delay = Math.max(0, Math.min(job.runAt - Date.now(), MAX_TIMEOUT_MS));
     const t = setTimeout(async () => {
       await this.runJob(job.id);
     }, delay);

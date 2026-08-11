@@ -10,6 +10,8 @@ export interface McpServerConfig {
   args?: string[];
   env?: Record<string, string>;
   url?: string;
+  allowedTools?: string[];
+  blockedTools?: string[];
 }
 
 export class McpManager {
@@ -17,11 +19,13 @@ export class McpManager {
   private transports: Map<string, StdioClientTransport | SSEClientTransport> = new Map();
   // Cache tools to avoid redundant network calls and ambiguous routing
   private toolCache: Map<string, string> = new Map(); // toolName -> serverName
+  private configs: Map<string, McpServerConfig> = new Map();
 
   constructor() {}
 
   async connect(name: string, config: McpServerConfig) {
     try {
+      if (this.clients.has(name)) await this.disconnect(name);
       console.log(`[McpManager] Connecting to ${name}...`);
       
       let transport: StdioClientTransport | SSEClientTransport;
@@ -30,13 +34,13 @@ export class McpManager {
           transport = new SSEClientTransport(new URL(config.url));
       } else {
           // Default to stdio
-          const env: Record<string, string> = { ...config.env };
-          // Copy process.env but ensure string values
-          for (const key in process.env) {
-              const val = process.env[key];
-              if (val !== undefined) {
-                  env[key] = val;
-              }
+          const env: Record<string, string> = {};
+          for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'LANG']) {
+            const value = process.env[key];
+            if (value !== undefined) env[key] = value;
+          }
+          for (const [key, value] of Object.entries(config.env || {})) {
+            if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && typeof value === 'string') env[key] = value;
           }
 
           if (!config.command) {
@@ -74,14 +78,17 @@ export class McpManager {
       
       this.clients.set(name, client);
       this.transports.set(name, transport);
+      this.configs.set(name, { ...config });
       
       console.log(`[McpManager] Connected to ${name}`);
       
       // Initial cache population
       await this.refreshToolCache(name);
+      return { success: true, name };
 
-    } catch (error) {
+    } catch (error: any) {
       console.error(`[McpManager] Failed to connect to ${name}:`, error);
+      return { success: false, name, error: error?.message || String(error) };
     }
   }
 
@@ -96,7 +103,7 @@ export class McpManager {
         );
         
         if (result.tools) {
-            result.tools.forEach((tool: any) => {
+            result.tools.filter((tool: any) => this.isToolAllowed(serverName, tool.name)).forEach((tool: any) => {
                 this.toolCache.set(tool.name, serverName);
             });
         }
@@ -116,7 +123,7 @@ export class McpManager {
         );
         
         if (result.tools) {
-            result.tools.forEach((tool: any) => {
+            result.tools.filter((tool: any) => this.isToolAllowed(name, tool.name)).forEach((tool: any) => {
                 allTools.push({
                     ...tool,
                     source: name // Tag the tool with its source server
@@ -134,7 +141,7 @@ export class McpManager {
 
   async callTool(name: string, args: any, sourceServer?: string) {
     // 1. Try explicit source
-    if (sourceServer && this.clients.has(sourceServer)) {
+    if (sourceServer && this.clients.has(sourceServer) && this.isToolAllowed(sourceServer, name)) {
         return this.executeToolCall(this.clients.get(sourceServer)!, name, args);
     }
 
@@ -155,7 +162,7 @@ export class McpManager {
                 ListToolsResultSchema
             );
             
-            if (tools.tools.find((t: any) => t.name === name)) {
+            if (tools.tools.find((t: any) => t.name === name) && this.isToolAllowed(serverName, name)) {
                 this.toolCache.set(name, serverName);
                 return this.executeToolCall(client, name, args);
             }
@@ -202,5 +209,45 @@ export class McpManager {
             await client.close();
         } catch (e) { /* ignore */ }
     }
+  }
+
+  async disconnect(name: string) {
+    const client = this.clients.get(name);
+    if (!client) return { success: false, error: `MCP server is not connected: ${name}` };
+    try {
+      await client.close();
+    } finally {
+      this.clients.delete(name);
+      this.transports.delete(name);
+      this.configs.delete(name);
+      for (const [toolName, serverName] of this.toolCache.entries()) {
+        if (serverName === name) this.toolCache.delete(toolName);
+      }
+    }
+    return { success: true, name };
+  }
+
+  // Names of tools known from connected servers, from the cache that is
+  // populated on connect and refreshed by listTools(). No network I/O.
+  getKnownToolNames(): string[] {
+    return Array.from(this.toolCache.keys());
+  }
+
+  listServers() {
+    return Array.from(this.configs.entries()).map(([name, config]) => ({
+      name,
+      transport: config.transport || 'stdio',
+      connected: this.clients.has(name),
+      allowedTools: config.allowedTools || [],
+      blockedTools: config.blockedTools || []
+    }));
+  }
+
+  private isToolAllowed(serverName: string, toolName: string): boolean {
+    const config = this.configs.get(serverName) || {};
+    const blocked = new Set((config.blockedTools || []).map(String));
+    if (blocked.has(toolName)) return false;
+    const allowed = (config.allowedTools || []).map(String).filter(Boolean);
+    return allowed.length === 0 || allowed.includes(toolName);
   }
 }

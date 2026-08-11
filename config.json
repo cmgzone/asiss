@@ -1,94 +1,138 @@
 {
   "channels": [
-    "Console (CLI)",
-    "Web Interface (Chat)",
-    "A2A"
+    "Web Interface (Chat)"
   ],
   "model": "OpenRouter",
-  "aiModel": "mistralai/mistral-7b-instruct:free",
-  "createdAt": "2026-02-08T09:51:26.432Z",
-  "proactive": {
+  "aiModel": "inclusionai/ling-3.0-tiny:free",
+  "createdAt": "2026-07-03T10:21:09.886Z",
+  "llm": {
+    "provider": "OpenRouter",
+    "model": "inclusionai/ling-3.0-tiny:free"
+  },
+  "modelResilience": {
     "enabled": true,
-    "maxSuggestionsPerDay": 5,
-    "idleMs": 300000,
-    "minGapMs": 600000,
-    "everyMs": 60000
+    "cooldownMs": 300000,
+    "includeAllEnabledModels": true,
+    "fallbackModelIds": [],
+    "openRouterModels": [],
+    "nvidiaModels": []
+  },
+  "checkpoints": {
+    "enabled": true,
+    "required": false,
+    "automaticBeforePatch": true,
+    "automaticBeforeDestructiveShell": true,
+    "maxPerWorkspace": 100
+  },
+  "execution": {
+    "backend": "local",
+    "allowProcessCwd": false,
+    "envAllowlist": [],
+    "docker": {
+      "image": "node:22-bookworm",
+      "network": "none",
+      "cpus": 2,
+      "memoryMb": 4096,
+      "readOnlyRoot": true,
+      "extraArgs": []
+    },
+    "ssh": {
+      "host": "",
+      "user": "",
+      "port": 22,
+      "identityFile": "",
+      "remoteWorkspace": ""
+    }
+  },
+  "agent": {
+    "unlimitedTools": true,
+    "maxTurns": 100000,
+    "maxToolCalls": 100000,
+    "maxPrematureCompletions": 1000,
+    "autoContinue": {
+      "enabled": true,
+      "maxBatches": 0,
+      "notify": false
+    },
+    "autoCompact": {
+      "enabled": true,
+      "minMessages": 80,
+      "keepLast": 20,
+      "minNewMessages": 30
+    },
+    "repetitionGuard": {
+      "maxRepeatedToolBatches": 3,
+      "maxExplorationBatches": 6
+    }
   },
   "guardrails": {
-    "enabled": true
+    "enabled": false
   },
-  "costTracker": {
-    "alertThresholdUsd": 10.0
-  },
-  "modelRouter": {
-    "enabled": false,
-    "rules": [
-      {
-        "level": "simple",
-        "modelId": "gpt-4o-mini"
-      },
-      {
-        "level": "medium",
-        "modelId": "gpt-4o"
-      },
-      {
-        "level": "complex",
-        "modelId": "claude-3-5-sonnet"
-      }
-    ]
-  },
-  "dnd": {
-    "enabled": true,
-    "quietHoursStart": 22,
-    "quietHoursEnd": 8,
-    "allowUrgent": true
-  },
-  "backgroundWorker": {
-    "enabled": true,
-    "alwaysOn": true,
-    "maxConcurrentGoals": 1,
-    "idleThresholdMs": 300000,
-    "checkIntervalMs": 60000,
-    "respectDND": true,
-    "reportOnCompletion": true,
-    "reportIntervalMs": 900000,
-    "autoGenerate": {
-      "enabled": true,
-      "intervalMs": 1800000,
-      "maxPending": 3,
-      "maxGoalsPerRun": 2,
-      "recentMessages": 12
-    }
+  "proactive": {
+    "enabled": false
   },
   "learning": {
     "enabled": true,
-    "mode": "strong",
+    "mode": "medium",
     "selfReview": {
       "enabled": true,
-      "maxPerHour": 10
+      "maxPerHour": 4
     },
     "external": {
-      "enabled": true,
+      "enabled": false,
       "intervalMs": 1800000,
-      "maxTopics": 2,
-      "maxSources": 4,
-      "maxCharsPerSource": 4000,
+      "maxTopics": 1,
+      "maxSources": 3,
+      "maxCharsPerSource": 3000,
       "recentMessages": 12
     },
-    "report": true,
+    "report": false,
     "summaryMaxEntries": 200,
     "autoGoals": {
-      "enabled": true,
+      "enabled": false,
       "includeSelfReview": true,
-      "includeExternal": true,
-      "maxPerEntry": 2,
-      "priority": "normal"
+      "includeExternal": false,
+      "maxPerEntry": 1,
+      "priority": "low"
     },
     "autoUpdate": {
+      "enabled": false,
+      "target": "AGENTS.md",
+      "maxPerEntry": 1,
+      "maxPerDay": 2
+    },
+    "skillCreation": {
       "enabled": true,
-      "target": "USER.md",
-      "maxPerEntry": 2,
-      "maxPerDay": 5
+      "includeSelfReview": true,
+      "includeExternal": false,
+      "maxPerEntry": 1,
+      "minActionChars": 24,
+      "executable": {
+        "enabled": true,
+        "maxSteps": 6,
+        "allowedTools": [
+          "system_info",
+          "current_time",
+          "web_search",
+          "web_fetch",
+          "brave_search",
+          "serper_search",
+          "notes",
+          "memory",
+          "task_memory"
+        ]
+      }
+    },
+    "approval": {
+      "enabled": false
+    },
+    "selfTraining": {
+      "enabled": true,
+      "minConfidence": 0.66,
+      "minSuccesses": 1,
+      "maxPromptLessons": 8,
+      "exportPath": "learning/training_examples.jsonl",
+      "includeFailures": false
     },
     "dailySummary": {
       "enabled": true,
@@ -98,14 +142,53 @@
       "includeGoals": true
     }
   },
-  "marketplace": {
+  "backgroundWorker": {
     "enabled": true,
-    "manifestUrl": "",
-    "publicKey": "",
-    "allowList": [],
-    "requireSignature": true,
-    "autoEnableOnInstall": false
+    "alwaysOn": false,
+    "maxConcurrentGoals": 1,
+    "idleThresholdMs": 60000,
+    "checkIntervalMs": 15000,
+    "respectDND": true,
+    "reportOnCompletion": true,
+    "reportIntervalMs": 0,
+    "maxRetries": 1,
+    "retryDelayMs": 120000,
+    "recoverInProgress": true,
+    "staleInProgressMs": 900000,
+    "autoGenerate": {
+      "enabled": false,
+      "intervalMs": 1800000,
+      "maxPending": 3,
+      "maxGoalsPerRun": 1,
+      "recentMessages": 12
+    }
   },
+  "costTracker": {
+    "alertThresholdUsd": 10
+  },
+  "modelRouter": {
+    "enabled": true,
+    "rules": [
+      {
+        "level": "simple",
+        "modelId": ""
+      },
+      {
+        "level": "medium",
+        "modelId": ""
+      },
+      {
+        "level": "complex",
+        "modelId": ""
+      }
+    ],
+    "levelMap": {
+      "simple": "low",
+      "medium": "medium",
+      "complex": "high"
+    }
+  },
+  "name": "Gitu",
   "filesystemMode": "full",
   "mcpServers": {
     "filesystem": {
@@ -113,70 +196,8 @@
       "args": [
         "-y",
         "@modelcontextprotocol/server-filesystem",
-        "c:/"
+        "."
       ]
     }
-  },
-  "tools": {
-    "elevated": {
-      "enabled": true,
-      "default": "full",
-      "allowFrom": {
-        "console": [
-          "*"
-        ],
-        "web": [
-          "*"
-        ],
-        "telegram": [
-          "*"
-        ],
-        "whatsapp": [
-          "*"
-        ],
-        "discord": [
-          "*"
-        ],
-        "slack": [
-          "*"
-        ]
-      }
-    }
-  },
-  "trustedActions": {
-    "enabled": true,
-    "allow": [
-      "send_telegram"
-    ],
-    "allowAll": false,
-    "log": true
-  },
-  "agent": {
-    "maxTurns": 0,
-    "autoContinue": {
-      "enabled": true,
-      "maxBatches": 3,
-      "notify": true
-    },
-    "autoRunAgents": true,
-    "autoCompact": {
-      "enabled": true,
-      "minMessages": 80,
-      "minNewMessages": 30,
-      "keepLast": 20,
-      "maxChars": 18000,
-      "perMessageMaxChars": 1200
-    }
-  },
-  "a2a": {
-    "enabled": true,
-    "port": 3210,
-    "rpcPath": "/a2a",
-    "protocolVersion": "0.3.0",
-    "authTokenEnv": "A2A_AUTH_TOKEN",
-    "protectAgentCard": false,
-    "maxHistory": 50,
-    "blockingTimeoutMs": 60000,
-    "peers": []
   }
 }

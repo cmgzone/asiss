@@ -22,11 +22,30 @@ export interface MediaPayload {
   filename?: string;
 }
 
+export type StreamEventType = 'assistant_start' | 'assistant_delta' | 'assistant_done' | 'assistant_error' | 'assistant_update' | 'tool_start' | 'tool_delta' | 'tool_done';
+
+export interface StreamEventPayload {
+  type: StreamEventType;
+  runId: string;
+  messageId: string;
+  text?: string;
+  finalText?: string;
+  ok?: boolean;
+  progress?: boolean;
+  reasoning?: string;
+  toolCallId?: string;
+  name?: string;
+  output?: string;
+  status?: string;
+  error?: string;
+}
+
 export interface ChannelAdapter {
   name: string;
   start(): void;
   send(userId: string, text: string): void;
-  sendStream?(userId: string, chunk: string): void; // New method for streaming
+  sendStream?(userId: string, chunk: string): void;
+  sendStreamEvent?(userId: string, event: StreamEventPayload): void;
   sendMedia?(userId: string, media: MediaPayload): void;
-  onMessage(handler: (msg: Message) => void): void;
+  onMessage(handler: (msg: Message) => void | Promise<void>): void;
 }

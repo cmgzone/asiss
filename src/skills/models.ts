@@ -33,6 +33,10 @@ export class ModelsSkill {
             apiKey: {
                 type: 'string',
                 description: 'API Key (optional for Ollama)'
+            },
+            maxOutputTokens: {
+                type: 'number',
+                description: 'Optional output token cap. Leave unset or <= 0 for no explicit cap.'
             }
         },
         required: ['action']
@@ -67,7 +71,8 @@ export class ModelsSkill {
                 provider: args.provider,
                 modelName: args.modelId,
                 baseUrl: args.baseUrl || (args.provider === 'ollama' ? 'http://localhost:11434/v1' : 'https://api.openai.com/v1'),
-                apiKey: args.apiKey
+                apiKey: args.apiKey,
+                maxOutputTokens: typeof args.maxOutputTokens === 'number' ? args.maxOutputTokens : undefined
             };
 
             if (modelManager.addModel(config)) {
@@ -77,7 +82,10 @@ export class ModelsSkill {
                     config.name,
                     config.baseUrl,
                     config.apiKey || '',
-                    config.modelName
+                    config.modelName,
+                    config.contextWindow,
+                    config.maxOutputTokens,
+                    config.level
                 );
                 ModelRegistry.register(provider);
 

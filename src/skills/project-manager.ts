@@ -3,6 +3,8 @@ import path from 'path';
 import { Skill } from '../core/skills';
 import { v4 as uuidv4 } from 'uuid';
 import { agentSwarm } from '../core/agent-swarm';
+import { agentRunManager } from '../core/agent-run-manager';
+import { workspaceManager } from '../core/workspace-manager';
 
 // ===== DATA TYPES =====
 
@@ -11,6 +13,7 @@ interface Project {
     name: string;
     description?: string;
     deadline?: string;
+    workspacePath?: string;
     status: 'active' | 'completed' | 'on-hold';
     createdAt: string;
 }
@@ -89,8 +92,8 @@ AGENT TEAM ACTIONS:
 - agent_list
 - agent_delete (agentId)
 - agent_assign_task (agentId, taskDescription)
-- agent_run (agentId) - execute agent's tasks
-- agent_run_all - run all agents in parallel
+- agent_run (agentId) - execute agent's tasks and return structured AgentRunManager reports
+- agent_run_all - run all agents in parallel and return structured AgentRunManager reports
 - agent_replicate (agentId, count) - clone agent for parallel work
 - agent_status (agentId?)
 - agent_collaborate (agentNames: comma-separated, goal) - multi-agent collaboration
@@ -137,6 +140,7 @@ AGENT TEAM ACTIONS:
             name: { type: "string" },
             description: { type: "string" },
             deadline: { type: "string" },
+            workspacePath: { type: "string", description: "Optional local folder path for this project's workspace" },
             // Task params
             taskId: { type: "string" },
             title: { type: "string" },
@@ -199,6 +203,10 @@ AGENT TEAM ACTIONS:
             agentId,
             agentName
         }));
+    }
+
+    private getAgentRunReports(agentId: string, limit: number = 20) {
+        return agentRunManager.listReports({ agentId, limit });
     }
 
     private normalizeAction(action: unknown, params: any): string {
@@ -287,10 +295,24 @@ AGENT TEAM ACTIONS:
                     const name = this.normalizeString(params.name || 'Untitled Project');
                     const description = this.normalizeString(params.description || '');
                     const deadline = this.normalizeString(params.deadline || '') || undefined;
+                    const requestedWorkspace = typeof params.workspacePath === 'string'
+                        ? params.workspacePath.trim()
+                        : '';
 
                     const existing = this.findExactDuplicateProject(name, description, deadline);
                     if (existing) {
                         return { success: true, message: `Project "${existing.name}" already exists`, project: existing, deduped: true };
+                    }
+
+                    let workspacePath: string;
+                    if (requestedWorkspace) {
+                        workspacePath = path.resolve(requestedWorkspace);
+                        workspaceManager.assertAllowed(workspacePath);
+                        if (!workspaceManager.isExistingDirectory(workspacePath)) {
+                            throw new Error('Requested workspace folder does not exist.');
+                        }
+                    } else {
+                        workspacePath = workspaceManager.createProjectWorkspace(name);
                     }
 
                     const project: Project = {
@@ -298,6 +320,7 @@ AGENT TEAM ACTIONS:
                         name,
                         description: description || undefined,
                         deadline,
+                        workspacePath,
                         status: 'active',
                         createdAt: new Date().toISOString()
                     };
@@ -401,11 +424,13 @@ AGENT TEAM ACTIONS:
                         const raw = await agentSwarm.runAgent(params.agentId);
                         results = this.decorateAgentResults(params.agentId, raw);
                     }
+                    const reports = results ? this.getAgentRunReports(params.agentId, Math.max(results.length, 1)) : undefined;
                     return {
                         success: true,
                         message: `Task assigned to agent "${agent.name}"`,
                         autoRun,
-                        results
+                        results,
+                        reports
                     };
                 }
 
@@ -494,34 +519,39 @@ AGENT TEAM ACTIONS:
                         const raw = await agentSwarm.runAgent(params.agentId);
                         results = this.decorateAgentResults(params.agentId, raw);
                     }
+                    const reports = results ? this.getAgentRunReports(params.agentId, Math.max(results.length, 1)) : undefined;
                     return {
                         success: true,
                         message: `Task assigned to ${agent.name}`,
                         task,
                         autoRun,
-                        results
+                        results,
+                        reports
                     };
                 }
 
                 case 'agent_run': {
                     const raw = await agentSwarm.runAgent(params.agentId);
                     const results = this.decorateAgentResults(params.agentId, raw);
+                    const reports = this.getAgentRunReports(params.agentId, Math.max(results.length, 1));
                     return {
                         success: true,
                         message: `Agent completed ${results.length} tasks`,
-                        results
+                        results,
+                        reports
                     };
                 }
 
                 case 'agent_run_all': {
                     const resultsMap = await agentSwarm.runAllAgents();
                     const summary: { agentId: string; taskCount: number }[] = [];
-                    const resultsByAgent: { agentId: string; agentName?: string; results: any[] }[] = [];
+                    const resultsByAgent: { agentId: string; agentName?: string; results: any[]; reports: any[] }[] = [];
                     resultsMap.forEach((results, agentId) => {
                         const agent = agentSwarm.getAgent(agentId);
                         const decorated = this.decorateAgentResults(agentId, results);
+                        const reports = this.getAgentRunReports(agentId, Math.max(decorated.length, 1));
                         summary.push({ agentId, taskCount: decorated.length });
-                        resultsByAgent.push({ agentId, agentName: agent?.name, results: decorated });
+                        resultsByAgent.push({ agentId, agentName: agent?.name, results: decorated, reports });
                     });
                     return {
                         success: true,
@@ -565,7 +595,7 @@ AGENT TEAM ACTIONS:
                         result: session.result,
                         messages: session.messages.map(m => ({
                             from: m.fromAgentName,
-                            content: m.content.slice(0, 500)
+                            content: m.content
                         }))
                     };
                 }

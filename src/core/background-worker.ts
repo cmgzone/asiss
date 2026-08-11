@@ -14,7 +14,8 @@ import { dndManager } from './dnd';
  */
 
 export type GoalPriority = 'low' | 'normal' | 'high' | 'urgent';
-export type GoalStatus = 'pending' | 'in-progress' | 'completed' | 'failed' | 'paused';
+export type GoalStatus = 'pending' | 'in-progress' | 'completed' | 'failed' | 'paused' | 'cancelled';
+export type ProjectStatus = 'active' | 'completed' | 'paused' | 'cancelled' | 'blocked';
 
 export interface BackgroundGoal {
     id: string;
@@ -23,15 +24,88 @@ export interface BackgroundGoal {
     priority: GoalPriority;
     status: GoalStatus;
     sessionId: string;
+    projectId?: string;
+    parentId?: string;
+    milestoneId?: string;
+    dependencies: string[];
+    blockedReason?: string;
     createdAt: number;
     startedAt?: number;
     completedAt?: number;
+    nextRunAt?: number;
+    lastAttemptAt?: number;
+    attempts: number;
+    maxRetries: number;
+    retryDelayMs: number;
     progress: number;        // 0-100
     progressNotes: string[];
+    checkpoint?: {
+        note: string;
+        updatedAt: number;
+        data?: any;
+    };
     result?: string;
     error?: string;
     estimatedMinutes?: number;
+    filesTouched: string[];
+    decisions: string[];
+    successScore?: number;
+    duplicateCount: number;
+    lastDuplicateAt?: number;
     tags: string[];
+    metadata?: Record<string, any>;
+}
+
+export interface BackgroundProjectMilestone {
+    id: string;
+    title: string;
+    description: string;
+    status: GoalStatus;
+    goalIds: string[];
+    createdAt: number;
+    completedAt?: number;
+}
+
+export interface BackgroundProjectMemory {
+    notes: string[];
+    filesTouched: string[];
+    decisions: string[];
+    updatedAt?: number;
+}
+
+export interface BackgroundProject {
+    id: string;
+    title: string;
+    description: string;
+    sessionId: string;
+    status: ProjectStatus;
+    createdAt: number;
+    updatedAt: number;
+    completedAt?: number;
+    milestoneIds: string[];
+    milestones: Record<string, BackgroundProjectMilestone>;
+    rootGoalIds: string[];
+    memory: BackgroundProjectMemory;
+    tags: string[];
+    duplicateCount: number;
+    lastDuplicateAt?: number;
+}
+
+export interface ProjectTaskPlan {
+    title: string;
+    description?: string;
+    priority?: GoalPriority;
+    estimatedMinutes?: number;
+    tags?: string[];
+    dependencies?: string[];
+    subtasks?: ProjectTaskPlan[];
+    strategy?: string;
+}
+
+export interface ProjectMilestonePlan {
+    title: string;
+    description?: string;
+    tasks?: ProjectTaskPlan[];
 }
 
 export interface BackgroundWorkerConfig {
@@ -43,6 +117,10 @@ export interface BackgroundWorkerConfig {
     respectDND: boolean;          // Pause non-urgent work during quiet hours
     reportOnCompletion: boolean;  // Send message when goal completes
     reportIntervalMs: number;     // Periodic status updates (0 disables)
+    maxRetries: number;
+    retryDelayMs: number;
+    recoverInProgress: boolean;
+    staleInProgressMs: number;
     autoGenerate: {
         enabled: boolean;
         intervalMs: number;
@@ -64,8 +142,10 @@ type GoalExecutor = (goal: BackgroundGoal, progressCallback: (percent: number, n
 
 export class BackgroundWorker {
     private goalsPath: string;
+    private projectsPath: string;
     private configPath: string;
     private goals: Record<string, BackgroundGoal> = {};
+    private projects: Record<string, BackgroundProject> = {};
     private config: BackgroundWorkerConfig;
     private checkInterval: NodeJS.Timeout | null = null;
     private activeGoals: Set<string> = new Set();
@@ -79,6 +159,7 @@ export class BackgroundWorker {
 
     constructor() {
         this.goalsPath = path.join(process.cwd(), 'background_goals.json');
+        this.projectsPath = path.join(process.cwd(), 'background_projects.json');
         this.configPath = path.join(process.cwd(), 'config.json');
         this.config = {
             enabled: false,
@@ -89,6 +170,10 @@ export class BackgroundWorker {
             respectDND: true,
             reportOnCompletion: true,
             reportIntervalMs: 0,
+            maxRetries: 1,
+            retryDelayMs: 5 * 60 * 1000,
+            recoverInProgress: true,
+            staleInProgressMs: 15 * 60 * 1000,
             autoGenerate: {
                 enabled: false,
                 intervalMs: 30 * 60 * 1000, // 30 minutes
@@ -116,14 +201,149 @@ export class BackgroundWorker {
             }
         }
 
+        // Load projects
+        if (fs.existsSync(this.projectsPath)) {
+            try {
+                const raw = JSON.parse(fs.readFileSync(this.projectsPath, 'utf-8')) || {};
+                this.projects = {};
+                for (const [id, value] of Object.entries(raw)) {
+                    const project = this.normalizeProject({ ...(value as any), id });
+                    this.projects[project.id] = project;
+                }
+            } catch {
+                this.projects = {};
+            }
+        }
+
         // Load goals
         if (fs.existsSync(this.goalsPath)) {
             try {
-                this.goals = JSON.parse(fs.readFileSync(this.goalsPath, 'utf-8')) || {};
+                const raw = JSON.parse(fs.readFileSync(this.goalsPath, 'utf-8')) || {};
+                this.goals = {};
+                for (const [id, value] of Object.entries(raw)) {
+                    const goal = this.normalizeGoal({ ...(value as any), id });
+                    this.goals[goal.id] = goal;
+                }
+                if (this.config.recoverInProgress) {
+                    this.recoverStaleInProgressGoals();
+                }
             } catch {
                 this.goals = {};
             }
         }
+    }
+
+    private normalizeProject(raw: any): BackgroundProject {
+        const now = Date.now();
+        const status: ProjectStatus = ['active', 'completed', 'paused', 'cancelled', 'blocked'].includes(raw?.status)
+            ? raw.status
+            : 'active';
+        const milestones: Record<string, BackgroundProjectMilestone> = {};
+        const rawMilestones = raw?.milestones && typeof raw.milestones === 'object' ? raw.milestones : {};
+        for (const [id, value] of Object.entries(rawMilestones)) {
+            const milestoneRaw = value as any;
+            const milestoneStatus: GoalStatus = ['pending', 'in-progress', 'completed', 'failed', 'paused', 'cancelled'].includes(milestoneRaw?.status)
+                ? milestoneRaw.status
+                : 'pending';
+            milestones[String(id)] = {
+                id: String(milestoneRaw?.id || id),
+                title: String(milestoneRaw?.title || 'Untitled milestone'),
+                description: String(milestoneRaw?.description || milestoneRaw?.title || 'Untitled milestone'),
+                status: milestoneStatus,
+                goalIds: Array.isArray(milestoneRaw?.goalIds) ? milestoneRaw.goalIds.map((g: any) => String(g)).filter(Boolean) : [],
+                createdAt: Number(milestoneRaw?.createdAt) || now,
+                completedAt: Number(milestoneRaw?.completedAt) || undefined
+            };
+        }
+
+        const memoryRaw = raw?.memory && typeof raw.memory === 'object' ? raw.memory : {};
+        return {
+            id: String(raw?.id || uuidv4()),
+            title: String(raw?.title || 'Untitled project'),
+            description: String(raw?.description || raw?.title || 'Untitled project'),
+            sessionId: String(raw?.sessionId || 'default'),
+            status,
+            createdAt: Number(raw?.createdAt) || now,
+            updatedAt: Number(raw?.updatedAt) || now,
+            completedAt: Number(raw?.completedAt) || undefined,
+            milestoneIds: Array.isArray(raw?.milestoneIds) ? raw.milestoneIds.map((m: any) => String(m)).filter(Boolean) : Object.keys(milestones),
+            milestones,
+            rootGoalIds: Array.isArray(raw?.rootGoalIds) ? raw.rootGoalIds.map((g: any) => String(g)).filter(Boolean) : [],
+            memory: {
+                notes: Array.isArray(memoryRaw.notes) ? memoryRaw.notes.map((n: any) => String(n)).filter(Boolean) : [],
+                filesTouched: Array.isArray(memoryRaw.filesTouched) ? memoryRaw.filesTouched.map((f: any) => String(f)).filter(Boolean) : [],
+                decisions: Array.isArray(memoryRaw.decisions) ? memoryRaw.decisions.map((d: any) => String(d)).filter(Boolean) : [],
+                updatedAt: Number(memoryRaw.updatedAt) || undefined
+            },
+            tags: Array.isArray(raw?.tags) ? raw.tags.map((t: any) => String(t)).filter(Boolean) : [],
+            duplicateCount: Math.max(0, Math.floor(Number(raw?.duplicateCount) || 0)),
+            lastDuplicateAt: Number(raw?.lastDuplicateAt) || undefined
+        };
+    }
+
+    private normalizeGoal(raw: any): BackgroundGoal {
+        const now = Date.now();
+        const status: GoalStatus = ['pending', 'in-progress', 'completed', 'failed', 'paused', 'cancelled'].includes(raw?.status)
+            ? raw.status
+            : 'pending';
+        const priority: GoalPriority = ['low', 'normal', 'high', 'urgent'].includes(raw?.priority)
+            ? raw.priority
+            : 'normal';
+
+        return {
+            id: String(raw?.id || uuidv4()),
+            title: String(raw?.title || 'Untitled goal'),
+            description: String(raw?.description || raw?.title || 'Untitled goal'),
+            priority,
+            status,
+            sessionId: String(raw?.sessionId || 'default'),
+            projectId: raw?.projectId ? String(raw.projectId) : undefined,
+            parentId: raw?.parentId ? String(raw.parentId) : undefined,
+            milestoneId: raw?.milestoneId ? String(raw.milestoneId) : undefined,
+            dependencies: Array.isArray(raw?.dependencies) ? raw.dependencies.map((d: any) => String(d)).filter(Boolean) : [],
+            blockedReason: raw?.blockedReason ? String(raw.blockedReason) : undefined,
+            createdAt: Number(raw?.createdAt) || now,
+            startedAt: Number(raw?.startedAt) || undefined,
+            completedAt: Number(raw?.completedAt) || undefined,
+            nextRunAt: Number(raw?.nextRunAt) || undefined,
+            lastAttemptAt: Number(raw?.lastAttemptAt) || undefined,
+            attempts: Math.max(0, Math.floor(Number(raw?.attempts) || 0)),
+            maxRetries: Math.max(0, Math.floor(Number(raw?.maxRetries) || this.config.maxRetries || 0)),
+            retryDelayMs: Math.max(0, Math.floor(Number(raw?.retryDelayMs) || this.config.retryDelayMs || 0)),
+            progress: Math.max(0, Math.min(100, Number(raw?.progress) || 0)),
+            progressNotes: Array.isArray(raw?.progressNotes) ? raw.progressNotes.map((n: any) => String(n)) : [],
+            checkpoint: raw?.checkpoint && typeof raw.checkpoint === 'object'
+                ? {
+                    note: String(raw.checkpoint.note || ''),
+                    updatedAt: Number(raw.checkpoint.updatedAt) || now,
+                    data: raw.checkpoint.data
+                }
+                : undefined,
+            result: raw?.result ? String(raw.result) : undefined,
+            error: raw?.error ? String(raw.error) : undefined,
+            estimatedMinutes: Number(raw?.estimatedMinutes) || undefined,
+            filesTouched: Array.isArray(raw?.filesTouched) ? raw.filesTouched.map((f: any) => String(f)).filter(Boolean) : [],
+            decisions: Array.isArray(raw?.decisions) ? raw.decisions.map((d: any) => String(d)).filter(Boolean) : [],
+            successScore: Number.isFinite(Number(raw?.successScore)) ? Number(raw.successScore) : undefined,
+            duplicateCount: Math.max(0, Math.floor(Number(raw?.duplicateCount) || 0)),
+            lastDuplicateAt: Number(raw?.lastDuplicateAt) || undefined,
+            tags: Array.isArray(raw?.tags) ? raw.tags.map((t: any) => String(t)).filter(Boolean) : [],
+            metadata: raw?.metadata && typeof raw.metadata === 'object' ? raw.metadata : undefined
+        };
+    }
+
+    private recoverStaleInProgressGoals() {
+        const now = Date.now();
+        let changed = false;
+        for (const goal of Object.values(this.goals)) {
+            if (goal.status !== 'in-progress') continue;
+            goal.status = 'pending';
+            goal.nextRunAt = now;
+            goal.blockedReason = undefined;
+            goal.progressNotes.push(`[${new Date().toISOString()}] Recovered after restart from in-progress state; resuming from last checkpoint.`);
+            changed = true;
+        }
+        if (changed) this.save();
     }
 
     private save() {
@@ -131,6 +351,14 @@ export class BackgroundWorker {
             fs.writeFileSync(this.goalsPath, JSON.stringify(this.goals, null, 2));
         } catch {
             console.error('[BackgroundWorker] Failed to save goals');
+        }
+    }
+
+    private saveProjects() {
+        try {
+            fs.writeFileSync(this.projectsPath, JSON.stringify(this.projects, null, 2));
+        } catch {
+            console.error('[BackgroundWorker] Failed to save projects');
         }
     }
 
@@ -186,9 +414,26 @@ export class BackgroundWorker {
         description: string;
         sessionId: string;
         priority?: GoalPriority;
+        projectId?: string;
+        parentId?: string;
+        milestoneId?: string;
+        dependencies?: string[];
         estimatedMinutes?: number;
         tags?: string[];
+        maxRetries?: number;
+        retryDelayMs?: number;
+        metadata?: Record<string, any>;
     }): BackgroundGoal {
+        const duplicate = this.findDuplicateGoal(params.title, params.sessionId, params.projectId);
+        if (duplicate) {
+            duplicate.duplicateCount = (duplicate.duplicateCount || 0) + 1;
+            duplicate.lastDuplicateAt = Date.now();
+            duplicate.progressNotes.push(`[${new Date().toISOString()}] Duplicate request ignored; reused existing goal.`);
+            this.save();
+            console.log(`[BackgroundWorker] Duplicate goal reused: ${duplicate.title} (${duplicate.id})`);
+            return duplicate;
+        }
+
         const goal: BackgroundGoal = {
             id: uuidv4(),
             title: params.title,
@@ -196,17 +441,448 @@ export class BackgroundWorker {
             priority: params.priority || 'normal',
             status: 'pending',
             sessionId: params.sessionId,
+            projectId: params.projectId,
+            parentId: params.parentId,
+            milestoneId: params.milestoneId,
+            dependencies: params.dependencies || [],
             createdAt: Date.now(),
+            attempts: 0,
+            maxRetries: Math.max(0, Math.floor(Number(params.maxRetries) || this.config.maxRetries || 0)),
+            retryDelayMs: Math.max(0, Math.floor(Number(params.retryDelayMs) || this.config.retryDelayMs || 0)),
             progress: 0,
             progressNotes: [],
             estimatedMinutes: params.estimatedMinutes,
-            tags: params.tags || []
+            filesTouched: [],
+            decisions: [],
+            duplicateCount: 0,
+            tags: params.tags || [],
+            metadata: params.metadata
         };
 
         this.goals[goal.id] = goal;
         this.save();
         console.log(`[BackgroundWorker] Added goal: ${goal.title} (${goal.id})`);
         return goal;
+    }
+
+    public planProject(params: {
+        title: string;
+        description: string;
+        sessionId: string;
+        tags?: string[];
+        milestones?: ProjectMilestonePlan[];
+        tasks?: ProjectTaskPlan[];
+        sequential?: boolean;
+    }): { project: BackgroundProject; goals: BackgroundGoal[]; reused: boolean } {
+        const existing = this.findDuplicateProject(params.title, params.sessionId);
+        if (existing && existing.status !== 'completed') {
+            existing.duplicateCount = (existing.duplicateCount || 0) + 1;
+            existing.lastDuplicateAt = Date.now();
+            existing.updatedAt = Date.now();
+            this.saveProjects();
+            return {
+                project: existing,
+                goals: this.getProjectGoals(existing.id),
+                reused: true
+            };
+        }
+
+        const project: BackgroundProject = {
+            id: uuidv4(),
+            title: params.title,
+            description: params.description,
+            sessionId: params.sessionId,
+            status: 'active',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            milestoneIds: [],
+            milestones: {},
+            rootGoalIds: [],
+            memory: {
+                notes: [],
+                filesTouched: [],
+                decisions: []
+            },
+            tags: params.tags || [],
+            duplicateCount: 0
+        };
+
+        this.projects[project.id] = project;
+
+        const plan = this.prepareProjectPlan(params);
+        const sequential = params.sequential !== false;
+        let previousMilestoneLastGoalId: string | undefined;
+
+        for (const milestonePlan of plan) {
+            const milestone: BackgroundProjectMilestone = {
+                id: uuidv4(),
+                title: milestonePlan.title,
+                description: milestonePlan.description || milestonePlan.title,
+                status: 'pending',
+                goalIds: [],
+                createdAt: Date.now()
+            };
+            project.milestoneIds.push(milestone.id);
+            project.milestones[milestone.id] = milestone;
+
+            let previousGoalId = sequential ? previousMilestoneLastGoalId : undefined;
+            const tasks = milestonePlan.tasks && milestonePlan.tasks.length > 0
+                ? milestonePlan.tasks
+                : this.defaultTasksForMilestone(milestonePlan);
+
+            for (const task of tasks) {
+                const created = this.addTaskTree(project, milestone, task, undefined, previousGoalId);
+                if (created.lastGoalId && sequential) {
+                    previousGoalId = created.lastGoalId;
+                }
+            }
+
+            previousMilestoneLastGoalId = previousGoalId;
+        }
+
+        project.rootGoalIds = this.getProjectGoals(project.id)
+            .filter(goal => !goal.parentId)
+            .map(goal => goal.id);
+        project.updatedAt = Date.now();
+        this.refreshProjectStatus(project.id);
+        this.saveProjects();
+
+        return {
+            project,
+            goals: this.getProjectGoals(project.id),
+            reused: false
+        };
+    }
+
+    public getProject(id: string): BackgroundProject | undefined {
+        return this.projects[id];
+    }
+
+    public getProjects(sessionId?: string): BackgroundProject[] {
+        return Object.values(this.projects)
+            .filter(project => !sessionId || project.sessionId === sessionId)
+            .sort((a, b) => b.updatedAt - a.updatedAt);
+    }
+
+    public getProjectGoals(projectId: string): BackgroundGoal[] {
+        return Object.values(this.goals)
+            .filter(goal => goal.projectId === projectId)
+            .sort((a, b) => a.createdAt - b.createdAt);
+    }
+
+    public recordGoalMemory(id: string, details: {
+        note?: string;
+        filesTouched?: string[];
+        decisions?: string[];
+    }): boolean {
+        const goal = this.goals[id];
+        if (!goal) return false;
+
+        goal.filesTouched = this.uniqueStrings([...(goal.filesTouched || []), ...(details.filesTouched || [])]);
+        goal.decisions = this.uniqueStrings([...(goal.decisions || []), ...(details.decisions || [])]);
+        if (details.note) {
+            goal.progressNotes.push(`[${new Date().toISOString()}] Memory: ${details.note}`);
+        }
+        this.save();
+
+        if (goal.projectId) {
+            this.recordProjectMemory(goal.projectId, details);
+        }
+        return true;
+    }
+
+    public recordProjectMemory(projectId: string, details: {
+        note?: string;
+        filesTouched?: string[];
+        decisions?: string[];
+    }): boolean {
+        const project = this.projects[projectId];
+        if (!project) return false;
+
+        if (details.note) {
+            project.memory.notes = [...project.memory.notes, details.note].slice(-50);
+        }
+        project.memory.filesTouched = this.uniqueStrings([...(project.memory.filesTouched || []), ...(details.filesTouched || [])]).slice(-200);
+        project.memory.decisions = [...project.memory.decisions, ...(details.decisions || [])].filter(Boolean).slice(-100);
+        project.memory.updatedAt = Date.now();
+        project.updatedAt = Date.now();
+        this.saveProjects();
+        return true;
+    }
+
+    public getProjectSummaryPrompt(sessionId?: string): string {
+        const projects = this.getProjects(sessionId).filter(project =>
+            project.status === 'active' || project.status === 'blocked'
+        );
+        if (projects.length === 0) return '';
+
+        const lines: string[] = ['Background Project Context:'];
+        for (const project of projects.slice(0, 3)) {
+            const goals = this.getProjectGoals(project.id);
+            const completed = goals.filter(goal => goal.status === 'completed').length;
+            const active = goals.filter(goal => goal.status === 'in-progress').length;
+            const pending = goals.filter(goal => goal.status === 'pending').length;
+            const blocked = goals.filter(goal => goal.blockedReason).length;
+            lines.push(`- ${project.title} [${project.id.slice(0, 8)}]: ${project.status}; goals ${completed}/${goals.length} completed, ${active} active, ${pending} pending, ${blocked} blocked.`);
+            if (project.memory.decisions.length > 0) {
+                lines.push(`  Decisions: ${project.memory.decisions.slice(-3).join('; ')}`);
+            }
+            if (project.memory.filesTouched.length > 0) {
+                lines.push(`  Files touched: ${project.memory.filesTouched.slice(-6).join(', ')}`);
+            }
+            if (project.memory.notes.length > 0) {
+                lines.push(`  Latest note: ${project.memory.notes[project.memory.notes.length - 1]}`);
+            }
+        }
+        return lines.join('\n');
+    }
+
+    public getStrategyScoreSummary(sessionId?: string): string {
+        const buckets = new Map<string, { count: number; total: number; failures: number }>();
+        for (const goal of Object.values(this.goals)) {
+            if (sessionId && goal.sessionId !== sessionId) continue;
+            if (goal.status !== 'completed' && goal.status !== 'failed') continue;
+            const score = typeof goal.successScore === 'number'
+                ? goal.successScore
+                : (goal.status === 'completed' ? 1 : 0);
+            const labels = [
+                goal.metadata?.strategy ? String(goal.metadata.strategy) : '',
+                ...goal.tags
+            ].map(label => label.trim()).filter(Boolean);
+            for (const label of labels.length > 0 ? labels : ['untagged']) {
+                const bucket = buckets.get(label) || { count: 0, total: 0, failures: 0 };
+                bucket.count += 1;
+                bucket.total += score;
+                if (goal.status === 'failed') bucket.failures += 1;
+                buckets.set(label, bucket);
+            }
+        }
+
+        const scored = [...buckets.entries()]
+            .filter(([, bucket]) => bucket.count >= 2)
+            .map(([label, bucket]) => ({
+                label,
+                average: bucket.total / bucket.count,
+                count: bucket.count,
+                failures: bucket.failures
+            }))
+            .sort((a, b) => b.average - a.average || b.count - a.count)
+            .slice(0, 6);
+
+        if (scored.length === 0) return '';
+        return [
+            'Background Goal Strategy Scores:',
+            ...scored.map(item => `- ${item.label}: ${(item.average * 100).toFixed(0)}% over ${item.count} goals (${item.failures} failed)`)
+        ].join('\n');
+    }
+
+    private isTerminalStatus(status: GoalStatus) {
+        return status === 'completed' || status === 'failed' || status === 'cancelled';
+    }
+
+    private isCancelled(goal: BackgroundGoal): boolean {
+        return this.goals[goal.id]?.status === 'cancelled';
+    }
+
+    private findDuplicateProject(title: string, sessionId: string): BackgroundProject | undefined {
+        const normalized = this.normalizeTitle(title);
+        return Object.values(this.projects).find((project) => {
+            if (project.status === 'completed' || project.status === 'cancelled') return false;
+            if (project.sessionId !== sessionId) return false;
+            return this.normalizeTitle(project.title) === normalized;
+        });
+    }
+
+    private findDuplicateGoal(title: string, sessionId: string, projectId?: string): BackgroundGoal | undefined {
+        const normalized = this.normalizeTitle(title);
+        return Object.values(this.goals).find((goal) => {
+            if (this.isTerminalStatus(goal.status)) return false;
+            if (goal.sessionId !== sessionId) return false;
+            if ((goal.projectId || '') !== (projectId || '')) return false;
+            return this.normalizeTitle(goal.title) === normalized;
+        });
+    }
+
+    private prepareProjectPlan(params: {
+        title: string;
+        description: string;
+        milestones?: ProjectMilestonePlan[];
+        tasks?: ProjectTaskPlan[];
+    }): ProjectMilestonePlan[] {
+        if (params.milestones && params.milestones.length > 0) {
+            return params.milestones
+                .filter(milestone => milestone?.title)
+                .map(milestone => ({
+                    title: String(milestone.title).trim(),
+                    description: String(milestone.description || milestone.title).trim(),
+                    tasks: Array.isArray(milestone.tasks) ? milestone.tasks : []
+                }));
+        }
+
+        if (params.tasks && params.tasks.length > 0) {
+            return [{
+                title: 'Execution',
+                description: params.description,
+                tasks: params.tasks
+            }];
+        }
+
+        return [
+            {
+                title: 'Discovery',
+                description: `Understand the current state for ${params.title}.`,
+                tasks: [
+                    { title: `Review current state for ${params.title}`, description: params.description, strategy: 'discovery', tags: ['discovery'] },
+                    { title: `Identify risks and dependencies for ${params.title}`, description: 'List blockers, assumptions, and dependencies before implementation.', strategy: 'discovery', tags: ['discovery'] }
+                ]
+            },
+            {
+                title: 'Planning',
+                description: `Break ${params.title} into verifiable work.`,
+                tasks: [
+                    { title: `Create implementation checklist for ${params.title}`, description: 'Turn the project into small ordered work items.', strategy: 'planning', tags: ['planning'] },
+                    { title: `Define verification plan for ${params.title}`, description: 'Decide what tests, smoke checks, and inspections should prove completion.', strategy: 'planning', tags: ['planning'] }
+                ]
+            },
+            {
+                title: 'Implementation',
+                description: `Make the required changes for ${params.title}.`,
+                tasks: [
+                    { title: `Implement first safe slice of ${params.title}`, description: 'Make the smallest useful implementation step.', strategy: 'implementation', tags: ['implementation'] },
+                    { title: `Integrate remaining changes for ${params.title}`, description: 'Connect the implementation with existing behavior and configuration.', strategy: 'implementation', tags: ['implementation'] }
+                ]
+            },
+            {
+                title: 'Verification',
+                description: `Verify ${params.title}.`,
+                tasks: [
+                    { title: `Run verification for ${params.title}`, description: 'Run the planned tests or smoke checks and capture results.', strategy: 'verification', tags: ['verification'] },
+                    { title: `Fix verification failures for ${params.title}`, description: 'Repair any failures found during verification.', strategy: 'verification', tags: ['verification'] }
+                ]
+            },
+            {
+                title: 'Handoff',
+                description: `Record project memory for ${params.title}.`,
+                tasks: [
+                    { title: `Record decisions and files changed for ${params.title}`, description: 'Update project memory with important files, decisions, and follow-up work.', strategy: 'handoff', tags: ['handoff'] }
+                ]
+            }
+        ];
+    }
+
+    private defaultTasksForMilestone(milestone: ProjectMilestonePlan): ProjectTaskPlan[] {
+        return [{
+            title: milestone.title,
+            description: milestone.description || milestone.title,
+            strategy: this.normalizeTitle(milestone.title),
+            tags: [this.normalizeTitle(milestone.title)]
+        }];
+    }
+
+    private addTaskTree(
+        project: BackgroundProject,
+        milestone: BackgroundProjectMilestone,
+        task: ProjectTaskPlan,
+        parentId?: string,
+        dependencyId?: string
+    ): { goals: BackgroundGoal[]; lastGoalId?: string } {
+        const dependencies = this.uniqueStrings([
+            ...(dependencyId ? [dependencyId] : []),
+            ...(task.dependencies || [])
+        ]);
+        const tags = this.uniqueStrings([
+            ...(project.tags || []),
+            ...(task.tags || []),
+            this.normalizeTitle(milestone.title)
+        ]);
+        const goal = this.addGoal({
+            title: String(task.title || 'Untitled project task').trim(),
+            description: String(task.description || task.title || 'Untitled project task').trim(),
+            sessionId: project.sessionId,
+            priority: task.priority || 'normal',
+            projectId: project.id,
+            parentId,
+            milestoneId: milestone.id,
+            dependencies,
+            estimatedMinutes: task.estimatedMinutes,
+            tags,
+            metadata: {
+                strategy: task.strategy || this.normalizeTitle(milestone.title),
+                projectTitle: project.title,
+                milestoneTitle: milestone.title
+            }
+        });
+
+        if (!milestone.goalIds.includes(goal.id)) {
+            milestone.goalIds.push(goal.id);
+        }
+        if (!parentId && !project.rootGoalIds.includes(goal.id)) {
+            project.rootGoalIds.push(goal.id);
+        }
+
+        const created: BackgroundGoal[] = [goal];
+        let lastGoalId = goal.id;
+        let previousSubtaskId = goal.id;
+        const subtasks = Array.isArray(task.subtasks) ? task.subtasks : [];
+        for (const subtask of subtasks) {
+            if (!subtask?.title) continue;
+            const nested = this.addTaskTree(project, milestone, subtask, goal.id, previousSubtaskId);
+            created.push(...nested.goals);
+            if (nested.lastGoalId) {
+                previousSubtaskId = nested.lastGoalId;
+                lastGoalId = nested.lastGoalId;
+            }
+        }
+
+        return { goals: created, lastGoalId };
+    }
+
+    private refreshProjectStatus(projectId?: string) {
+        if (!projectId) return;
+        const project = this.projects[projectId];
+        if (!project) return;
+        if (project.status === 'paused' || project.status === 'cancelled') return;
+
+        const allGoals = this.getProjectGoals(projectId);
+        for (const milestoneId of project.milestoneIds) {
+            const milestone = project.milestones[milestoneId];
+            if (!milestone) continue;
+            const milestoneGoals = milestone.goalIds
+                .map(id => this.goals[id])
+                .filter(Boolean);
+            if (milestoneGoals.length === 0) {
+                milestone.status = 'pending';
+                milestone.completedAt = undefined;
+            } else if (milestoneGoals.every(goal => goal.status === 'completed')) {
+                milestone.status = 'completed';
+                milestone.completedAt = milestone.completedAt || Date.now();
+            } else if (milestoneGoals.some(goal => goal.status === 'failed')) {
+                milestone.status = 'failed';
+                milestone.completedAt = undefined;
+            } else if (milestoneGoals.some(goal => goal.status === 'cancelled')) {
+                milestone.status = 'cancelled';
+                milestone.completedAt = undefined;
+            } else if (milestoneGoals.some(goal => goal.status === 'in-progress' || goal.status === 'completed')) {
+                milestone.status = 'in-progress';
+                milestone.completedAt = undefined;
+            } else {
+                milestone.status = 'pending';
+                milestone.completedAt = undefined;
+            }
+        }
+
+        if (allGoals.length > 0 && allGoals.every(goal => goal.status === 'completed')) {
+            project.status = 'completed';
+            project.completedAt = project.completedAt || Date.now();
+        } else if (allGoals.some(goal => goal.status === 'failed' || goal.status === 'cancelled')) {
+            project.status = 'blocked';
+            project.completedAt = undefined;
+        } else {
+            project.status = 'active';
+            project.completedAt = undefined;
+        }
+        project.updatedAt = Date.now();
+        this.saveProjects();
     }
 
     /**
@@ -225,11 +901,19 @@ export class BackgroundWorker {
             .sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
     }
 
+    public getGoals(sessionId?: string): BackgroundGoal[] {
+        return Object.values(this.goals)
+            .filter(goal => !sessionId || goal.sessionId === sessionId)
+            .sort((a, b) => b.createdAt - a.createdAt);
+    }
+
     /**
      * Get active (in-progress) goals
      */
-    public getActiveGoals(): BackgroundGoal[] {
-        return Object.values(this.goals).filter(g => g.status === 'in-progress');
+    public getActiveGoals(sessionId?: string): BackgroundGoal[] {
+        return Object.values(this.goals).filter(g =>
+            g.status === 'in-progress' && (!sessionId || g.sessionId === sessionId)
+        );
     }
 
     /**
@@ -246,11 +930,59 @@ export class BackgroundWorker {
         const goal = this.goals[id];
         if (!goal) return false;
 
-        goal.status = 'failed';
+        goal.status = 'cancelled';
         goal.error = 'Cancelled by user';
         goal.completedAt = Date.now();
+        goal.progressNotes.push(`[${new Date().toISOString()}] Goal cancelled by user.`);
         this.save();
         this.activeGoals.delete(id);
+        this.refreshProjectStatus(goal.projectId);
+        return true;
+    }
+
+    public completeGoal(id: string, result: string = 'Marked done by user'): boolean {
+        const goal = this.goals[id];
+        if (!goal) return false;
+        goal.status = 'completed';
+        goal.result = result;
+        goal.error = undefined;
+        goal.progress = 100;
+        goal.completedAt = Date.now();
+        goal.successScore = typeof goal.successScore === 'number' ? goal.successScore : 1;
+        goal.progressNotes.push(`[${new Date().toISOString()}] ${result}`);
+        this.activeGoals.delete(id);
+        this.save();
+        if (goal.projectId) {
+            this.recordProjectMemory(goal.projectId, { note: `${goal.title}: ${result}` });
+        }
+        this.refreshProjectStatus(goal.projectId);
+        return true;
+    }
+
+    public checkpointGoal(id: string, note: string, data?: any): boolean {
+        const goal = this.goals[id];
+        if (!goal) return false;
+        goal.checkpoint = {
+            note,
+            data,
+            updatedAt: Date.now()
+        };
+        goal.progressNotes.push(`[${new Date().toISOString()}] Checkpoint: ${note}`);
+        this.save();
+        if (goal.projectId) {
+            this.recordProjectMemory(goal.projectId, { note });
+        }
+        return true;
+    }
+
+    public scoreGoal(id: string, score: number, note?: string): boolean {
+        const goal = this.goals[id];
+        if (!goal) return false;
+        goal.successScore = Math.max(0, Math.min(1, Number(score)));
+        if (note) {
+            goal.progressNotes.push(`[${new Date().toISOString()}] Score note (${goal.successScore}): ${note}`);
+        }
+        this.save();
         return true;
     }
 
@@ -306,12 +1038,14 @@ export class BackgroundWorker {
             return;
         }
 
-        // Find next goal to work on
-        const pending = this.getPendingGoals();
+        // Find next runnable goal to work on
+        const pending = this.getRunnableGoals();
         if (pending.length === 0) return;
 
-        // Find a goal where the user is idle
+        // Fill available capacity with runnable goals where the user is idle.
+        let started = 0;
         for (const goal of pending) {
+            if (this.activeGoals.size >= this.config.maxConcurrentGoals) break;
             if (this.activeGoals.has(goal.id)) continue;
 
             // Check if user is idle for this session
@@ -321,8 +1055,66 @@ export class BackgroundWorker {
 
             // Start working on this goal
             this.executeGoal(goal);
-            break;
+            started += 1;
         }
+
+        if (started > 0) {
+            console.log(`[BackgroundWorker] Started ${started} goal(s) this tick`);
+        }
+    }
+
+    private dependenciesSatisfied(goal: BackgroundGoal): boolean {
+        if (!goal.dependencies || goal.dependencies.length === 0) {
+            goal.blockedReason = undefined;
+            return true;
+        }
+
+        const missing: string[] = [];
+        const failed: string[] = [];
+        for (const depId of goal.dependencies) {
+            const dep = this.goals[depId];
+            if (!dep) {
+                missing.push(depId);
+                continue;
+            }
+            if (dep.status === 'failed' || dep.status === 'cancelled') {
+                failed.push(depId);
+                continue;
+            }
+            if (dep.status !== 'completed') {
+                missing.push(depId);
+            }
+        }
+
+        if (failed.length > 0) {
+            goal.blockedReason = `Dependency failed/cancelled: ${failed.join(', ')}`;
+            return false;
+        }
+        if (missing.length > 0) {
+            goal.blockedReason = `Waiting for dependencies: ${missing.join(', ')}`;
+            return false;
+        }
+
+        goal.blockedReason = undefined;
+        return true;
+    }
+
+    private getRunnableGoals(): BackgroundGoal[] {
+        const now = Date.now();
+        const runnable: BackgroundGoal[] = [];
+        let changed = false;
+        for (const goal of this.getPendingGoals()) {
+            if (goal.nextRunAt && goal.nextRunAt > now) continue;
+            const before = goal.blockedReason;
+            if (!this.dependenciesSatisfied(goal)) {
+                if (before !== goal.blockedReason) changed = true;
+                continue;
+            }
+            if (before !== goal.blockedReason) changed = true;
+            runnable.push(goal);
+        }
+        if (changed) this.save();
+        return runnable;
     }
 
     /**
@@ -337,6 +1129,9 @@ export class BackgroundWorker {
         this.activeGoals.add(goal.id);
         goal.status = 'in-progress';
         goal.startedAt = Date.now();
+        goal.lastAttemptAt = Date.now();
+        goal.attempts = (goal.attempts || 0) + 1;
+        goal.error = undefined;
         this.save();
 
         console.log(`[BackgroundWorker] Starting: ${goal.title}`);
@@ -344,16 +1139,31 @@ export class BackgroundWorker {
         try {
             const result = await this.executor(goal, (percent, note) => {
                 // Progress callback
+                if (this.isCancelled(goal)) return;
                 goal.progress = percent;
                 if (note) goal.progressNotes.push(`[${new Date().toISOString()}] ${note}`);
+                goal.checkpoint = {
+                    note: note || `Progress ${percent}%`,
+                    updatedAt: Date.now()
+                };
                 this.save();
             });
+
+            if (this.isCancelled(goal)) {
+                console.log(`[BackgroundWorker] Cancelled during execution: ${goal.title}`);
+                return;
+            }
 
             goal.status = 'completed';
             goal.result = result;
             goal.progress = 100;
             goal.completedAt = Date.now();
+            goal.successScore = typeof goal.successScore === 'number' ? goal.successScore : 1;
             console.log(`[BackgroundWorker] Completed: ${goal.title}`);
+            if (goal.projectId) {
+                this.recordProjectMemory(goal.projectId, { note: `${goal.title}: ${result || 'Completed'}` });
+                this.refreshProjectStatus(goal.projectId);
+            }
 
             // Notify if configured
             if (this.config.reportOnCompletion && this.onComplete) {
@@ -369,18 +1179,62 @@ export class BackgroundWorker {
                 }
             }
         } catch (err: any) {
+            if (this.isCancelled(goal)) {
+                console.log(`[BackgroundWorker] Cancelled during execution: ${goal.title}`);
+                return;
+            }
+
+            const message = err.message || 'Unknown error';
+            goal.error = message;
+            goal.progressNotes.push(`[${new Date().toISOString()}] Attempt ${goal.attempts} failed: ${message}`);
+
+            if (goal.attempts <= goal.maxRetries) {
+                goal.status = 'pending';
+                goal.nextRunAt = Date.now() + goal.retryDelayMs;
+                goal.blockedReason = `Retry scheduled after failure: ${message}`;
+                this.refreshProjectStatus(goal.projectId);
+                console.error(`[BackgroundWorker] Failed: ${goal.title}; retry scheduled`, err);
+                return;
+            }
+
             goal.status = 'failed';
-            goal.error = err.message || 'Unknown error';
             goal.completedAt = Date.now();
+            goal.successScore = 0;
+            this.refreshProjectStatus(goal.projectId);
             console.error(`[BackgroundWorker] Failed: ${goal.title}`, err);
+
+            if (this.config.reportOnCompletion && this.onComplete) {
+                if (this.config.respectDND && dndManager.isQuietHours() && goal.priority !== 'urgent') {
+                    dndManager.queueNotification(
+                        goal.sessionId,
+                        `Background task failed: **${goal.title}**\n\n${message}`,
+                        'high'
+                    );
+                } else {
+                    await this.onComplete(goal);
+                }
+            }
         } finally {
             this.activeGoals.delete(goal.id);
             this.save();
+            if (this.checkInterval && this.getRunnableGoals().length > 0) {
+                setTimeout(() => {
+                    void this.tick();
+                }, 0);
+            }
         }
     }
 
     private normalizeTitle(title: string): string {
         return String(title || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    }
+
+    private uniqueStrings(values: any[]): string[] {
+        return Array.from(new Set(
+            values
+                .map(value => String(value || '').trim())
+                .filter(Boolean)
+        ));
     }
 
     private getMostRecentSessionId(): string | null {
@@ -413,7 +1267,7 @@ export class BackgroundWorker {
             lines.push('');
             lines.push('Active goals:');
             active.slice(0, 3).forEach((g, i) => {
-                lines.push(`${i + 1}. ${g.title} (${g.progress}%)`);
+                lines.push(`${i + 1}. ${g.title} [${g.id.slice(0, 8)}] (${g.progress}%, attempt ${g.attempts}/${g.maxRetries + 1})`);
             });
             if (active.length > 3) {
                 lines.push(`...and ${active.length - 3} more active`);
@@ -424,7 +1278,8 @@ export class BackgroundWorker {
             lines.push('');
             lines.push('Pending goals:');
             pending.slice(0, 3).forEach((g, i) => {
-                lines.push(`${i + 1}. ${g.title} [${g.priority}]`);
+                const blocked = g.blockedReason ? ` - ${g.blockedReason}` : '';
+                lines.push(`${i + 1}. ${g.title} [${g.id.slice(0, 8)}; ${g.priority}]${blocked}`);
             });
             if (pending.length > 3) {
                 lines.push(`...and ${pending.length - 3} more pending`);
@@ -502,6 +1357,7 @@ export class BackgroundWorker {
         // conversation history, causing an infinite execute-same-output loop.
         const existingTitles = new Set(
             Object.values(this.goals)
+                .filter(g => g.sessionId === sessionId && !g.projectId)
                 .map(g => this.normalizeTitle(g.title))
         );
 
@@ -542,6 +1398,9 @@ export class BackgroundWorker {
         activeCount: number;
         pendingCount: number;
         completedToday: number;
+        activeProjects: number;
+        blockedProjects: number;
+        completedProjects: number;
     } {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
@@ -555,7 +1414,10 @@ export class BackgroundWorker {
             enabled: this.config.enabled,
             activeCount: this.activeGoals.size,
             pendingCount: this.getPendingGoals().length,
-            completedToday
+            completedToday,
+            activeProjects: Object.values(this.projects).filter(project => project.status === 'active').length,
+            blockedProjects: Object.values(this.projects).filter(project => project.status === 'blocked').length,
+            completedProjects: Object.values(this.projects).filter(project => project.status === 'completed').length
         };
     }
 }
