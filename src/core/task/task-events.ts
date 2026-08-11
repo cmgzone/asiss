@@ -18,6 +18,9 @@ export type TaskEventName =
   | 'TaskReady'
   | 'TaskStarted'
   | 'TaskProgress'
+  // Multi-turn execution contract (Phase 12 Move 1)
+  | 'TaskTurnStarted'
+  | 'TaskTurnCompleted'
   | 'TaskPaused'
   | 'TaskResumed'
   | 'TaskBlocked'

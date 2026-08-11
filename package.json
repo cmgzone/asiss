@@ -47,7 +47,8 @@
     "smoke:policy": "ts-node scripts/smoke-policy.ts",
     "smoke:context": "ts-node scripts/smoke-context.ts",
     "smoke:repo-index": "ts-node scripts/smoke-repo-index.ts",
-    "smoke:config": "ts-node scripts/smoke-config.ts"
+    "smoke:config": "ts-node scripts/smoke-config.ts",
+    "smoke:turn-contract": "ts-node scripts/smoke-turn-contract.ts"
   },
   "keywords": [],
   "author": "",

@@ -186,6 +186,8 @@ export interface TaskTiming {
   /** Milliseconds between creation and terminal state. */
   durationMs?: number;
   attempts: number;
+  /** Completed turns under the multi-turn execution contract (Phase 12). */
+  turns?: number;
 }
 
 export type TaskOutcomeStatus = 'SUCCESS' | 'FAILURE' | 'PARTIAL' | 'CANCELLED';

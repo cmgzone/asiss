@@ -308,3 +308,23 @@ FAILED mid-loop — it uses `diagnose`'s EXECUTING → VERIFYING → EXECUTING).
 Recommended migration order: turn contract → completion verdict →
 verify/diagnose in-loop → delegate the loop body as the executor hook, each
 sliced with the e2e mission as the gate.
+
+**Phase 12, Move 1 — the turn contract (done).** `TaskEngine.runTurn()` is
+the per-turn execution primitive the execution map identified as missing.
+It owns the EXECUTING -> (VERIFYING) -> EXECUTING / COMPLETED transitions
+across the turns of a long-running mission; the host supplies each turn's
+domain verdict (`continue` / `verify` / `complete` / `fail` / `blocked`)
+plus optional tool evidence / model / progress, and the engine records it on
+the canonical Task (tool STARTED/COMPLETED/FAILED, assignModel, progress)
+and emits `TaskTurnStarted` / `TaskTurnCompleted` on the bus. Turns are
+strictly sequential (`task.timing.turns`), READY tasks are started
+implicitly, `verify` verdicts run the existing in-loop `diagnose` recovery
+authority (EXECUTING -> VERIFYING -> EXECUTING with diagnosis evidence),
+`complete` records the SUCCESS outcome, and `fail`/`blocked` transition to
+FAILED (blocked keeps a PARTIAL outcome). The runner loop is untouched —
+this is the contract the mission loop's body becomes the hook for in the
+later moves. Verified by `npm run smoke:turn-contract` (8 sections: normal,
+tool-producing, failed, verification-required, multi-turn continuation,
+sequential enforcement, blocked, engine-owned completion) and by all prior
+smokes unchanged (`smoke:baseline`, `smoke:runtime` e2e mission,
+`smoke:repo-index`, `smoke:tools`).

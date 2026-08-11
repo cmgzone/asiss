@@ -8,7 +8,7 @@
  *
  * Lifecycle surface:
  *   create / createChildTask / analyze / plan / execute / verify
- *   pause / resume / cancel / retry / complete / run
+ *   pause / resume / cancel / retry / complete / run / runTurn
  *
  * Recording surface (data + events for telemetry/recovery/learning):
  *   recordProgress / recordToolExecution / recordArtifact / recordCheckpoint
@@ -113,6 +113,71 @@ export interface TaskRunOptions {
   executor?: TaskExecutor;
   verifier?: TaskVerifier;
   repair?: TaskRepairer;
+}
+
+// --------------------------------------------------- turn contract (Move 1)
+
+/**
+ * One tool executed during a turn, as reported by the host. Used to record
+ * tool executions on the canonical Task without the host hand-wiring events.
+ */
+export interface TaskTurnToolExecution {
+  name: string;
+  arguments?: Record<string, unknown>;
+  success: boolean;
+  output?: unknown;
+  error?: string;
+  durationMs?: number;
+  projectId?: string;
+}
+
+/**
+ * Host verdict after a turn. The engine owns the lifecycle transition; the
+ * host owns the domain judgment about whether the mission needs another turn.
+ *
+ *   continue — keep executing; the task stays EXECUTING.
+ *   verify   — run in-loop verification (EXECUTING -> VERIFYING -> EXECUTING)
+ *              via an injected diagnoser; the task returns to EXECUTING.
+ *   complete — the mission is done; -> COMPLETED.
+ *   fail     — the mission cannot continue; -> FAILED.
+ *   blocked  — an external blocker (approval denied, dependency unmet, step
+ *              limit) stopped the mission; -> FAILED with a blocked outcome.
+ */
+export type TaskTurnVerdict =
+  | { type: 'continue'; reason?: string }
+  | { type: 'verify'; reason?: string }
+  | { type: 'complete'; summary?: string; result?: unknown; confidence?: number }
+  | { type: 'fail'; error: string }
+  | { type: 'blocked'; error: string; reason?: string };
+
+export interface TaskTurnInput {
+  /** 1-based turn number. Must increase by exactly one per call. */
+  turn: number;
+  verdict: TaskTurnVerdict;
+  /** Tools executed during this turn (recorded on the Task). */
+  tools?: TaskTurnToolExecution[];
+  /** Model used for this turn (recorded via assignModel when different). */
+  model?: string;
+  /** 0-100 progress estimate after this turn. */
+  progress?: number;
+  /** Optional turn summary note. */
+  summary?: string;
+}
+
+export type TaskTurnAction = 'continue' | 'verify' | 'complete' | 'failed' | 'blocked';
+
+export interface TaskTurnResult {
+  turn: number;
+  action: TaskTurnAction;
+  task: Task;
+  /** Present after a 'verify' verdict: the diagnosis evidence gathered. */
+  diagnosis?: TaskDiagnosis;
+  error?: string;
+}
+
+export interface TaskTurnRunOptions {
+  /** Used by the 'verify' verdict: gathers recovery evidence in-loop. */
+  diagnoser?: TaskDiagnoser;
 }
 
 // --------------------------------------------------------------------- engine
@@ -287,6 +352,144 @@ export class TaskEngine {
         return { success: false, error: `Task ${taskId} is ${record.status} and cannot be run.` };
     }
   }
+
+  /**
+   * Phase 12 Move 1 — the multi-turn execution contract.
+   *
+   * A per-turn primitive that owns the EXECUTING -> (VERIFYING) -> EXECUTING /
+   * COMPLETED transitions across the turns of a long-running autonomous
+   * mission. The host supplies each turn's domain outcome (verdict + optional
+   * tool evidence / model / progress); the engine owns the lifecycle state
+   * machine, records, and events. Unlike `run()`/`runExecution()`, this never
+   * hides the mission loop inside an executor: the host keeps driving model
+   * and tool work, and the engine keeps deciding what happens next.
+   *
+   * Turns are sequential: `input.turn` must equal the last completed turn + 1
+   * (tracked on `task.timing.turns`). A task that is still in READY is started
+   * implicitly; CREATED/PAUSED/FAILED tasks must be brought to EXECUTING via
+   * the dedicated lifecycle methods first.
+   */
+  async runTurn(taskId: string, input: TaskTurnInput, options: TaskTurnRunOptions = {}): Promise<TaskTurnResult> {
+    let record = this.require(taskId);
+    const entity = new TaskEntity(record);
+    if (entity.status === 'READY') {
+      await this.start(taskId);
+      record = this.store.require(taskId);
+    }
+    if (record.status !== 'EXECUTING') {
+      throw new Error(`runTurn() requires an EXECUTING task, got ${record.status}.`);
+    }
+    const expectedTurn = (record.timing.turns || 0) + 1;
+    if (input.turn !== expectedTurn) {
+      throw new Error(`runTurn() turn must be sequential: expected ${expectedTurn}, got ${input.turn}.`);
+    }
+
+    await this.emit('TaskTurnStarted', taskId, {
+      turn: input.turn,
+      verdict: input.verdict.type,
+      ...(input.summary ? { summary: input.summary } : {})
+    });
+
+    // Record this turn's model selection, tool executions, and progress so the
+    // canonical Task carries the turn's evidence (single source of truth).
+    if (input.model && record.model !== input.model) {
+      await this.assignModel(taskId, input.model);
+    }
+    if (Array.isArray(input.tools)) {
+      for (const tool of input.tools) {
+        await this.recordToolExecution(taskId, {
+          name: tool.name,
+          arguments: tool.arguments,
+          status: 'STARTED',
+          startedAt: Date.now() - (tool.durationMs || 0),
+          projectId: tool.projectId
+        });
+      }
+      const latest = this.store.require(taskId);
+      const lastIdx = latest.toolExecutions.length - 1;
+      for (let i = 0; i < input.tools.length; i++) {
+        const tool = input.tools[i];
+        const executionId = latest.toolExecutions[lastIdx - (input.tools.length - 1 - i)]?.id;
+        if (executionId) {
+          await this.completeToolExecution(taskId, executionId, {
+            status: tool.success ? 'COMPLETED' : 'FAILED',
+            ...(tool.output !== undefined ? { output: tool.output } : {}),
+            ...(tool.error ? { error: tool.error } : {}),
+            ...(tool.durationMs !== undefined ? { durationMs: tool.durationMs } : {})
+          });
+        }
+      }
+    }
+    if (typeof input.progress === 'number') {
+      await this.recordProgress(taskId, input.progress, input.summary);
+    }
+
+    // The engine owns the transition; the host owns the judgment (verdict).
+    let action: TaskTurnAction;
+    let diagnosis: TaskDiagnosis | undefined;
+    let error: string | undefined;
+    switch (input.verdict.type) {
+      case 'continue':
+        this.persistTurn(taskId, input.turn);
+        action = 'continue';
+        break;
+      case 'verify': {
+        const outcome = await this.diagnose(taskId, {
+          diagnoser: options.diagnoser,
+          detail: input.verdict.reason || input.summary
+        });
+        diagnosis = outcome.diagnosis;
+        this.persistTurn(taskId, input.turn);
+        action = 'verify';
+        break;
+      }
+      case 'complete':
+        await this.complete(taskId, {
+          status: 'SUCCESS',
+          summary: input.verdict.summary || input.summary,
+          result: input.verdict.result,
+          confidence: input.verdict.confidence
+        });
+        this.persistTurn(taskId, input.turn);
+        action = 'complete';
+        break;
+      case 'fail':
+        await this.failTask(taskId, input.verdict.error, 'EXECUTING');
+        this.persist(new TaskEntity(this.store.require(taskId)).setOutcome({ status: 'FAILURE', summary: input.verdict.error }).record, {
+          turns: input.turn
+        });
+        action = 'failed';
+        error = input.verdict.error;
+        break;
+      case 'blocked': {
+        const failed = await this.failTask(taskId, input.verdict.error, 'EXECUTING');
+        this.persist(new TaskEntity(failed).setOutcome({ status: 'PARTIAL', summary: input.verdict.reason }).record, {
+          turns: input.turn
+        });
+        action = 'blocked';
+        error = input.verdict.error;
+        break;
+      }
+      default:
+        throw new Error(`Unknown turn verdict type.`);
+    }
+
+    await this.emit('TaskTurnCompleted', taskId, {
+      turn: input.turn,
+      verdict: input.verdict.type,
+      action,
+      ...(error ? { error } : {})
+    });
+
+    return {
+      turn: input.turn,
+      action,
+      task: this.store.require(taskId),
+      ...(diagnosis ? { diagnosis } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
   /**
    * EXECUTING -> VERIFYING -> COMPLETED (pass) or VERIFYING -> FAILED (fail).
    * Only meaningful while the task is EXECUTING.
@@ -688,6 +891,12 @@ export class TaskEngine {
 
   private persist(record: Task, timingPatch?: Partial<Task['timing']>): Task {
     return this.store.update(record.id, timingPatch ? { ...record, timing: { ...record.timing, ...timingPatch } } : record);
+  }
+
+  /** Record the last completed turn number on the task. */
+  private persistTurn(taskId: string, turn: number): Task {
+    const record = this.store.require(taskId);
+    return this.persist(record, { turns: turn });
   }
 
   private async emit(name: TaskEventName, taskId: string, data?: Record<string, unknown>): Promise<void> {
