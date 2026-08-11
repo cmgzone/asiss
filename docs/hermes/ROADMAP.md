@@ -18,7 +18,7 @@
 | 1 | Canonical Task system | `src/core/task/` (types, state, events, store, engine) | [x] |
 | 2 | TaskEngine ownership | AgentRunner creates a Task per mission, records tools/checkpoints/cost/progress, finalizes on every exit | [x] |
 | 3 | Event system | TaskEventBus bridged to hookManager (audit + subscribers); events carry taskId/sessionId | [x] |
-| 4 | ToolEngine | Extract tool dispatch from AgentRunner (`src/core/tools/`) | [ ] |
+| 4 | ToolEngine | Extract tool dispatch from AgentRunner (`src/core/tools/`) | [x] |
 | 5 | PolicyEngine | ALLOW / ASK / DENY before tool execution | [ ] |
 | 6 | ModelEngine | Capability/reliability/cost scoring instead of naive routing | [ ] |
 | 7 | ContextEngine | Budgeted relevance-based context construction | [ ] |
@@ -38,7 +38,7 @@
 
 ## Current milestone
 
-Phases 0-2 are complete. `AgentRunner.processMessage` now creates a canonical
+Phases 0-4 are complete. `AgentRunner.processMessage` now creates a canonical
 Task per mission (`kind: 'mission'`), advances it through the lifecycle
 (CREATED -> ANALYZING -> PLANNING -> EXECUTING), records tool executions
 (ToolStarted/ToolCompleted/ToolFailed), automatic workspace checkpoints, token
@@ -49,5 +49,14 @@ end-to-end by `scripts/smoke-agent-runtime.ts`. Phase 3 is also done: the
 task-hooks bridge (`src/core/task/task-hooks-bridge.ts`) auto-subscribes the
 process-wide TaskEventBus and forwards every task/tool lifecycle event onto
 hookManager (extended HookEventName union), so telemetry/recovery/audit observe
-the canonical Task system without AgentRunner wiring anything. Phase 4 next:
-extract tool dispatch into a ToolEngine.
+the canonical Task system without AgentRunner wiring anything. Phase 4 is
+also done: `src/core/tools/` now owns the whole tool lifecycle (result types,
+registry catalog, name normalization + alias resolution + fallback chains,
+argument validation, authorize/policy, execution with automatic checkpoints and
+semantic fallback, and telemetry/task recording). AgentRunner's
+`executeToolCall` and `normalizeToolCall` are thin delegations into
+`ToolEngine.execute`; the old static helpers (resolveToolAlias,
+resolveFallbackSkills, adaptFallbackArgs, closestToolNames) are deleted.
+Verified by `scripts/smoke-tools.ts` (7 lifecycle sections) and by the
+end-to-end `smoke-agent-runtime` mission running through the new pipeline.
+Phase 5 next: a real PolicyEngine (ALLOW / ASK / DENY) in front of execution.

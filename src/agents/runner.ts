@@ -65,7 +65,6 @@ import { LearnedSkillsSkill } from '../skills/learned-skills';
 import { learnedSkillsManager } from '../core/learned-skills';
 import { ReadFileSkill, WriteFileSkill, ListDirectorySkill, GlobSkill } from '../skills/filesystem';
 import { ToolsDiagSkill, buildToolReport } from '../skills/tools-diag';
-import type { AliasCoverage } from '../skills/tools-diag';
 import { DynamicToolManager } from '../core/dynamic-tools';
 import { ResilientModelProvider } from '../core/resilient-model';
 import { analyticsTracker } from '../core/analytics-tracker';
@@ -78,6 +77,7 @@ import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { taskEngine } from '../core/task';
+import { ToolEngine, normalizeToolRequest } from '../core/tools';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -117,6 +117,7 @@ export class AgentRunner {
   private mcpManager: McpManager;
   private scheduler: SchedulerManager;
   private dynamicTools: DynamicToolManager;
+  private toolEngine: ToolEngine;
   // Keys already warned about (tool-capping) so truncation warnings are logged
   // once per process run instead of on every message.
   private advertisedWarnings = new Set<string>();
@@ -129,101 +130,6 @@ export class AgentRunner {
   private proactiveInFlight = false;
   private proactiveEveryMs: number = 60 * 1000;
   private proactiveLastTickAt = 0;
-
-  // Ordered fallback chains per capability. The first entry is the preferred
-  // alternative when the requested skill fails (e.g. a missing/invalid API key).
-  private static readonly CAPABILITY_FALLBACK: Record<string, string[]> = {
-    web_search: ['web_search', 'playwright'],
-    web_fetch: ['web_fetch', 'playwright', 'web_search'],
-  };
-
-  // Resolve which other skills can satisfy the same job when `name` fails.
-  private static resolveFallbackSkills(name: string): string[] {
-    const skill: any = SkillRegistry.get(name);
-    const caps: string[] = skill?.capabilities || [];
-    const order: string[] = [];
-    for (const cap of caps) {
-      const list = AgentRunner.CAPABILITY_FALLBACK[cap] || SkillRegistry.skillsForCapability(cap);
-      for (const n of list) if (!order.includes(n)) order.push(n);
-    }
-    return order.filter((n) => n !== name);
-  }
-
-  // Adapt the original arguments to the argument shape of an alternative skill.
-  private static adaptFallbackArgs(altName: string, original: any): any {
-    const query = original?.query ?? original?.q ?? '';
-    if (altName === 'playwright') {
-      if (query) return { action: 'search', query, maxResults: original?.num ?? original?.maxResults ?? 5 };
-      if (original?.url) return { action: 'extract_text', url: original.url, selector: original?.selector };
-    }
-    if (altName === 'web_search') return { query, maxResults: original?.num ?? original?.maxResults ?? 5 };
-    if (altName === 'web_fetch') return { url: original?.url };
-    return { query, num: original?.num ?? 10, type: original?.type ?? 'search', maxResults: original?.maxResults };
-  }
-
-  // Models sometimes emit tool names that don't exactly match a registered
-  // skill (e.g. "spawn_subagent", "subagent", "research_agent"). Map those
-  // hallucinated names to the real skill so dispatch doesn't fall through to
-  // the MCP path and fail with "Tool not found in any connected MCP server".
-  private static readonly TOOL_ALIASES: Array<[RegExp, string]> = [
-    [/(^|[_-])(delegate|subagent|sub_agent|spawn_agent|spawn_subagent|research_agent|worker|agent)([_-]|$)/i, 'delegate_agent'],
-    [/(^|[_-])(research|deep_research|literature_review)([_-]|$)/i, 'web_search'],
-    [/(^|[_-])(grep|code_search|find_in_files|rg|ripgrep)([_-]|$)/i, 'code_search'],
-    [/(^|[_-])(git|github)([_-]|$)/i, 'git'],
-    [/(^|[_-])(fetch|scrape|http_get)([_-]|$)/i, 'web_fetch'],
-    // File-tool aliases: models commonly emit these variants of the native
-    // filesystem skills instead of the exact registered names. Without this
-    // they would fall through to a hard "tool not found" failure.
-    [/(^|[_-])(read_file|readfile|read-file|read_text_file|read-text-file|cat|view_file|get_file_contents|file_contents|read_text|read_file_contents)([_-]|$)/i, 'read_file'],
-    [/(^|[_-])(write_file|writefile|write-file|create_file|create-file|save_file|save-file|append_file|append-file|edit_file|edit-file|update_file|update-file|modify_file|put_file|overwrite_file)([_-]|$)/i, 'write_file'],
-    [/(^|[_-])(list_directory|list-dir|listdir|list_dir|list_files|list-files|ls|dir|read_directory|folder_contents|list_directories)([_-]|$)/i, 'list_directory'],
-    [/(^|[_-])(glob|search_files|search-files|find_files|find-files|file_search|find_file|list_matching_files|locate_file)([_-]|$)/i, 'glob'],
-  ];
-
-  // Resolve a possibly-hallucinated tool name to a real registered skill.
-  private static resolveToolAlias(name: string): string | null {
-    const lower = String(name || '').trim().toLowerCase();
-    if (!lower) return null;
-    if (SkillRegistry.get(lower)) return lower;
-    for (const [re, target] of AgentRunner.TOOL_ALIASES) {
-      if (re.test(lower)) return target;
-    }
-    return null;
-  }
-
-  // Report the alias patterns (regex sources) so diagnostics can show coverage.
-  private static getAliasCoverage(): AliasCoverage[] {
-    return AgentRunner.TOOL_ALIASES.map(([re, target]) => ({ pattern: re.source, target }));
-  }
-
-  // Score how close a requested tool name is to a candidate, to suggest
-  // likely-intended tools instead of a bare "not available" error. Combines a
-  // shared-prefix bonus with character-overlap (Jaccard) so mid-word typos
-  // like 'wite_file' → 'write_file' still rank high.
-  private static nameSimilarity(requested: string, candidate: string): number {
-    const a = requested.toLowerCase();
-    const b = candidate.toLowerCase();
-    if (a === b) return 100;
-    if (b.includes(a) || a.includes(b)) return 60 + Math.min(a.length, b.length);
-    const maxLen = Math.min(a.length, b.length);
-    let prefix = 0;
-    while (prefix < maxLen && a[prefix] === b[prefix]) prefix += 1;
-    const setA = new Set(a);
-    const setB = new Set(b);
-    let overlap = 0;
-    for (const ch of setA) if (setB.has(ch)) overlap += 1;
-    const union = setA.size + setB.size - overlap;
-    const jaccard = union > 0 ? overlap / union : 0;
-    return prefix + Math.round(jaccard * 40);
-  }
-
-  private static closestToolNames(requested: string, available: string[], max = 5): string[] {
-    const scored = (available || [])
-      .map((name) => ({ name, score: AgentRunner.nameSimilarity(requested, name) }))
-      .filter((s) => s.score >= 15) // meaningful overlap only, not incidental matches
-      .sort((x, y) => y.score - x.score);
-    return scored.slice(0, max).map((s) => s.name);
-  }
 
   // Compute advertised-tool caps the same way buildAdvertisedTools does.
   private static getToolLimits(config?: any): { maxNativeTools: number; maxMcpToolsPerServer: number } {
@@ -254,6 +160,15 @@ export class AgentRunner {
         return '';
       }
     });
+    // Canonical ToolEngine (Phase 4): one consistent tool execution mechanism
+    // for native skills, MCP tools and dynamic tools.
+    this.toolEngine = new ToolEngine({
+      skills: SkillRegistry,
+      mcp: this.mcpManager,
+      dynamicTools: this.dynamicTools,
+      checkpoints: checkpointManager
+    });
+
     this.scheduler = new SchedulerManager(async (job) => {
       const scheduledMsg: Message = {
         id: uuidv4(),
@@ -278,7 +193,7 @@ export class AgentRunner {
     SkillRegistry.register(new ToolsDiagSkill({
       listMcpTools: () => this.mcpManager.listTools(),
       buildAdvertised: (sid: string, mcpTools: any[]) => this.buildAdvertisedTools(sid, mcpTools),
-      getAliasCoverage: () => AgentRunner.getAliasCoverage(),
+      getAliasCoverage: () => this.toolEngine.aliasCoverage(),
       getLimits: () => AgentRunner.getToolLimits(),
       getUsageStats: () => analyticsTracker.getToolUsageStats()
     }));
@@ -607,50 +522,18 @@ export class AgentRunner {
 
   private normalizeToolCall(call: any): void {
     if (!call || typeof call !== 'object') return;
-    const originalName = String(call.name || '').trim();
-    if (!originalName) return;
-    // Already a registered native skill: keep the exact name so budget/media
-    // logic and the dispatch lookup stay canonical.
-    if (SkillRegistry.get(originalName)) return;
-    // Strip MCP-style prefixes generically so "mcp__filesystem__read_file",
-    // "filesystem.read_file" or "mcp_playwright_navigate" resolve to the
-    // native skill instead of falling through to a hard "tool not found".
-    const normalizedBase = this.dynamicTools.normalizeName(originalName);
-    if (normalizedBase && SkillRegistry.get(normalizedBase)) {
-      call.name = normalizedBase;
-      return;
-    }
-    // Models sometimes emit MCP-style browser tool names
-    // (playwright_navigate, mcp_playwright__screenshot, browser_navigate, ...).
-    // Route those to the native PlaywrightSkill instead of failing with
-    // "Tool not found in any connected MCP server".
-    const lower = normalizedBase || originalName.toLowerCase().replace(/^mcp_/, '').replace(/_+/g, '_');
-    const isPlaywrightAlias = /^playwright(_[a-z0-9_]+)?$/.test(lower)
-      || /^browser(_[a-z0-9_]+)?$/.test(lower);
-    if (isPlaywrightAlias) {
-      call.name = 'playwright';
-      const args = (call.arguments && typeof call.arguments === 'object') ? call.arguments : {};
-      if (!args.action) {
-        const suffix = lower.replace(/^(playwright|browser)_?/, '');
-        let action = 'extract_text';
-        if (/screenshot|shot/.test(suffix)) action = 'screenshot';
-        else if (/navigate|goto|open|visit|go_/.test(suffix)) action = 'extract_text';
-        else if (/snapshot|scrape|extract|text|content|get_/.test(suffix)) action = 'extract_text';
-        args.action = action;
-      }
-      if (!args.url) {
-        args.url = args.link || args.href || args.page || args.target || args.website || '';
-      }
-      call.arguments = args;
-      return;
-    }
-    // General alias resolution for other commonly hallucinated tool names
-    // (e.g. "spawn_subagent" -> delegate_agent). Without this the unknown name
-    // would fall through to the MCP path and fail with "Tool not found".
-    const resolved = AgentRunner.resolveToolAlias(originalName);
-    if (resolved) {
-      call.name = resolved;
-    }
+    // Delegate to the canonical ToolEngine name resolution (Phase 4): registered
+    // names pass through, MCP-style prefixes are stripped, playwright/browser
+    // aliases fold onto the native skill, and other hallucinated names are
+    // alias-resolved. The call object is mutated in place so downstream
+    // budget/media/disabled-tool logic sees the canonical name.
+    const normalized = normalizeToolRequest(
+      { name: String(call.name || '').trim(), arguments: call.arguments },
+      SkillRegistry,
+      (name: string) => this.dynamicTools.normalizeName(name)
+    );
+    if (normalized.name) call.name = normalized.name;
+    call.arguments = normalized.arguments;
   }
 
   private requiresToolExecution(text: string): boolean {
@@ -2164,224 +2047,80 @@ ${context ? `\nSystem Context: ${context}` : ''}
             `Executing ${response.toolCalls.length} tools: ${response.toolCalls.map(c => c.name).join(', ')}`
           );
 
-          // Tool outcomes are recorded per-call inside executeToolCall
-          // (recordToolCallResult) so usage counts are exact: calls = ok + err.
+          // Tool outcomes are recorded per-call inside executeToolCall (via the
+          // ToolEngine -> TaskEngine) so usage counts are exact: calls = ok + err.
 
           const executeToolCall = async (call: any) => {
-            let taskToolExecutionId: string | undefined;
             try {
               await hookManager.emit('before_tool', {
                 tool: call.name,
                 arguments: call.arguments || {},
                 projectId: msg.metadata?.projectId || null
               }, sessionId);
-              if (missionTaskId) {
-                try {
-                  const taskTool = await taskEngine.recordToolExecution(missionTaskId, {
-                    name: call.name,
-                    arguments: call.arguments || {},
-                    status: 'STARTED'
-                  });
-                  taskToolExecutionId = taskTool.id;
-                } catch (taskError: any) {
-                  console.warn('[TaskEngine] record tool start failed:', taskError?.message || taskError);
-                }
-              }
-              let output;
-              const nativeSkill = SkillRegistry.get(call.name);
-
-              if (nativeSkill) {
-                const projectWorkspacePath = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
-                const projectId = typeof msg.metadata?.projectId === 'string'
-                  ? msg.metadata.projectId.trim()
-                  : '';
-                if (projectId && !projectWorkspacePath && ['shell', 'apply_patch', 'write_file'].includes(call.name)) {
-                  throw new Error(
-                    'This project has no attached local workspace. Create or select a workspace from the Projects page before running commands or editing files.'
-                  );
-                }
-                let automaticCheckpoint: any = null;
-                const checkpointConfig = this.loadConfig()?.checkpoints || {};
-                const shellCommand = String(call.arguments?.command || '');
-                const mutatesWorkspace = (call.name === 'apply_patch' && checkpointConfig.automaticBeforePatch !== false)
-                  || (call.name === 'shell' && checkpointConfig.automaticBeforeDestructiveShell !== false && checkpointManager.shouldCheckpointShell(shellCommand));
-                if (checkpointConfig.enabled !== false && projectWorkspacePath && mutatesWorkspace) {
-                  try {
-                    automaticCheckpoint = checkpointManager.create(
-                      projectWorkspacePath,
-                      `Before ${call.name}: ${call.name === 'shell' ? shellCommand : 'file patch'}`,
-                      sessionId
-                    );
-                    if (missionTaskId) {
-                      try {
-                        await taskEngine.recordCheckpoint(missionTaskId, {
-                          id: automaticCheckpoint.id,
-                          reason: automaticCheckpoint.reason
-                        });
-                      } catch (taskError: any) {
-                        console.warn('[TaskEngine] record checkpoint failed:', taskError?.message || taskError);
-                      }
-                    }
-                  } catch (checkpointError: any) {
-                    if (checkpointConfig.required === true) throw checkpointError;
-                    console.warn(`[Checkpoints] Could not create automatic checkpoint: ${checkpointError?.message || checkpointError}`);
+              const projectWorkspacePath = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
+              const projectId = typeof msg.metadata?.projectId === 'string'
+                ? msg.metadata.projectId.trim()
+                : '';
+              // Canonical ToolEngine (Phase 4): normalize -> validate -> authorize
+              // -> execute (native skill / MCP / dynamic) -> record on the mission
+              // Task (STARTED/COMPLETED/FAILED + checkpoints + telemetry). Never
+              // throws for tool failures — it returns a normalized ToolResult.
+              const result = await this.toolEngine.execute(
+                { name: call.name, arguments: call.arguments || {} },
+                {
+                  sessionId,
+                  taskId: missionTaskId || undefined,
+                  projectId: projectId || undefined,
+                  workspacePath: projectWorkspacePath,
+                  config: this.loadConfig(),
+                  stream: (chunk: string) => {
+                    if (chunk) void this.gateway.sendStreamChunk(sessionId, chunk);
                   }
                 }
-                const args = {
-                  ...(call.arguments || {}),
-                  __sessionId: sessionId,
-                  __projectId: projectId || undefined,
-                  __workspacePath: projectWorkspacePath
+              );
+              // Host-level session memory for semantic fallback / dynamic resolution.
+              if (result.fallback && result.fallback.resolved !== result.fallback.requested) {
+                this.memory.add(sessionId, {
+                  role: 'system',
+                  content: `Skill '${result.fallback.resolved}' dynamically replaced a failed call to '${result.fallback.requested}' and succeeded. Prefer '${result.fallback.resolved}' for similar requests in this session.`,
+                  timestamp: Date.now(),
+                  metadata: { type: 'skill_fallback' }
+                });
+              }
+              if (result.dynamic && result.dynamic.resolved !== result.dynamic.requested) {
+                this.memory.add(sessionId, {
+                  role: 'system',
+                  content: `Tool '${result.dynamic.requested}' was dynamically resolved to '${result.dynamic.resolved}' and succeeded. Prefer '${result.dynamic.resolved}' for similar requests in this session.`,
+                  timestamp: Date.now(),
+                  metadata: { type: 'skill_fallback' }
+                });
+              }
+              if (!result.success) {
+                await hookManager.emit('tool_error', {
+                  tool: result.name,
+                  error: String(result.error || 'Unknown error')
+                }, sessionId);
+                return {
+                  success: false,
+                  call: call,
+                  error: result.error
                 };
-                if (projectWorkspacePath && call.name === "apply_patch") {
-                  args.basePath = projectWorkspacePath;
-                }
-                if (call.name === "shell") {
-                  (args as any).__stream = (chunk: string) => {
-                    if (chunk) {
-                      void this.gateway.sendStreamChunk(sessionId, chunk);
-                    }
-                  };
-                }
-                let nativeResult = await nativeSkill.execute(args);
-                const failedPatchCount = Number(nativeResult?.summary?.failed || 0);
-                let semanticError = nativeResult?.error
-                  || nativeResult?.success === false
-                  || failedPatchCount > 0;
-                if (semanticError) {
-                  // Dynamic skill fallback: if this skill failed (e.g. invalid/missing
-                  // API key), try another skill that provides the same capability.
-                  const requestedName = call.name;
-                  for (const altName of AgentRunner.resolveFallbackSkills(requestedName)) {
-                    const altSkill = SkillRegistry.get(altName);
-                    if (!altSkill) continue;
-                    let altResult: any;
-                    try {
-                      altResult = await altSkill.execute(AgentRunner.adaptFallbackArgs(altName, args));
-                    } catch {
-                      continue;
-                    }
-                    const altFailed = altResult?.error
-                      || altResult?.success === false
-                      || Number(altResult?.summary?.failed || 0) > 0;
-                    if (!altFailed) {
-                      nativeResult = altResult;
-                      semanticError = false;
-                      call.name = altName;
-                      this.memory.add(sessionId, {
-                        role: 'system',
-                        content: `Skill '${altName}' dynamically replaced a failed call to '${requestedName}' and succeeded. Prefer '${altName}' for similar requests in this session.`,
-                        timestamp: Date.now(),
-                        metadata: { type: 'skill_fallback' }
-                      });
-                      break;
-                    }
-                  }
-                }
-                if (semanticError) {
-                  const detail = typeof nativeResult?.error === 'string'
-                    ? [nativeResult.error, nativeResult.stderr, nativeResult.stdout]
-                        .map(value => String(value || '').trim())
-                        .filter(Boolean)
-                        .join('\n')
-                    : (failedPatchCount > 0
-                      ? `${failedPatchCount} patch operation(s) failed: ${JSON.stringify(nativeResult?.results || [])}`
-                      : `Tool '${call.name}' reported failure.`);
-                  throw new Error(detail);
-                }
-                output = JSON.stringify(automaticCheckpoint
-                  ? { result: nativeResult, checkpoint: automaticCheckpoint }
-                  : nativeResult);
-              } else {
-                let mcpResult: any;
-                let dynamicOutput: string | null = null;
-                try {
-                  mcpResult = await this.mcpManager.callTool(call.name, call.arguments);
-                } catch (mcpErr: any) {
-                  const mcpMsg = String(mcpErr?.message || mcpErr);
-                  // Unknown tool name that isn't a registered skill or MCP tool:
-                  // resolve it dynamically instead of hard-failing. This routes
-                  // hallucinated/MCP-style names to real skills and creates new
-                  // tools on the fly when possible ("the agent adds the tool
-                  // itself"), instead of throwing a dead-end "tool not found".
-                  if (/not found in any connected MCP server/i.test(mcpMsg)) {
-                    const dynamic = await this.dynamicTools.resolve(call.name, call.arguments, sessionId);
-                    if (dynamic.success) {
-                      dynamicOutput = JSON.stringify(dynamic.output);
-                      if (dynamic.tool && dynamic.tool !== call.name) {
-                        this.memory.add(sessionId, {
-                          role: 'system',
-                          content: `Tool '${call.name}' was dynamically resolved to '${dynamic.tool}' and succeeded. Prefer '${dynamic.tool}' for similar requests in this session.`,
-                          timestamp: Date.now(),
-                          metadata: { type: 'skill_fallback' }
-                        });
-                      }
-                    } else {
-                      const skillNames = SkillRegistry.getAll().map((s) => s.name);
-                      const mcpNames = this.mcpManager.getKnownToolNames();
-                      const available = Array.from(new Set([...skillNames, ...mcpNames])).sort();
-                      const closest = AgentRunner.closestToolNames(call.name, available);
-                      const hint = closest.length > 0
-                        ? ` Did you mean: ${closest.join(', ')}?`
-                        : '';
-                      throw new Error(
-                        `Tool '${call.name}' is not available: it is neither a registered skill nor provided by any connected MCP server, and could not be created dynamically.` +
-                        `${hint} Run the tools_diag skill to see exactly which tools are callable. Available tools: ${available.join(', ')}.`
-                      );
-                    }
-                  } else {
-                    throw mcpErr;
-                  }
-                }
-                if (dynamicOutput !== null) {
-                  output = dynamicOutput;
-                } else {
-                  if (mcpResult?.isError || mcpResult?.error || mcpResult?.success === false) {
-                    throw new Error(String(mcpResult?.error || mcpResult?.message || `MCP tool '${call.name}' reported failure.`));
-                  }
-                  output = JSON.stringify(mcpResult);
-                }
               }
-
-              const completed = {
+              await hookManager.emit('after_tool', {
+                tool: result.name,
+                success: true,
+                output: String(result.output || '').slice(0, 5_000)
+              }, sessionId);
+              return {
                 success: true,
                 call: call,
-                output: output
+                output: result.output
               };
-              analyticsTracker.recordToolCallResult(sessionId, call.name, true);
-              await hookManager.emit('after_tool', {
-                tool: call.name,
-                success: true,
-                output: String(output || '').slice(0, 5_000)
-              }, sessionId);
-              if (missionTaskId && taskToolExecutionId) {
-                try {
-                  const cappedOutput = typeof output === 'string' ? output.slice(0, 20_000) : output;
-                  await taskEngine.completeToolExecution(missionTaskId, taskToolExecutionId, {
-                    status: 'COMPLETED',
-                    output: cappedOutput
-                  });
-                } catch (taskError: any) {
-                  console.warn('[TaskEngine] record tool completion failed:', taskError?.message || taskError);
-                }
-              }
-              return completed;
             } catch (err: any) {
-              analyticsTracker.recordToolCallResult(sessionId, call.name, false);
               await hookManager.emit('tool_error', {
                 tool: call.name,
                 error: err?.message || String(err)
               }, sessionId);
-              if (missionTaskId && taskToolExecutionId) {
-                try {
-                  await taskEngine.completeToolExecution(missionTaskId, taskToolExecutionId, {
-                    status: 'FAILED',
-                    error: err?.message || String(err)
-                  });
-                } catch (taskError: any) {
-                  console.warn('[TaskEngine] record tool failure failed:', taskError?.message || taskError);
-                }
-              }
               return {
                 success: false,
                 call: call,
@@ -3663,7 +3402,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
         {
           listMcpTools: () => Promise.resolve(mcpTools),
           buildAdvertised: (sid: string, tools: any[]) => this.buildAdvertisedTools(sid, tools, config),
-          getAliasCoverage: () => AgentRunner.getAliasCoverage(),
+          getAliasCoverage: () => this.toolEngine.aliasCoverage(),
           getLimits: () => AgentRunner.getToolLimits(config),
           getUsageStats: () => analyticsTracker.getToolUsageStats()
         },
