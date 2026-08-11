@@ -120,6 +120,11 @@ async function main() {
   const offTaskCreated = hookManager.on('TaskCreated', () => { observedHooks.push('TaskCreated'); });
   const offTaskCompleted = hookManager.on('TaskCompleted', () => { observedHooks.push('TaskCompleted'); });
   const offToolCompleted = hookManager.on('ToolCompleted', () => { observedHooks.push('ToolCompleted'); });
+  // Phase 12 D3: the legacy tool-lifecycle hook names must still fire through
+  // the bus -> bridge aliases now that the runner emits nothing for tools.
+  const offBeforeTool = hookManager.on('before_tool', () => { observedHooks.push('before_tool'); });
+  const offAfterTool = hookManager.on('after_tool', () => { observedHooks.push('after_tool'); });
+  const offToolError = hookManager.on('tool_error', () => { observedHooks.push('tool_error'); });
 
   await runner.processMessage('runtime-session', {
     id: 'message-1',
@@ -192,9 +197,18 @@ async function main() {
   assert.ok(observedHooks.includes('TaskCreated'), 'hookManager observed TaskCreated via the bridge');
   assert.ok(observedHooks.includes('TaskCompleted'), 'hookManager observed TaskCompleted via the bridge');
   assert.ok(observedHooks.includes('ToolCompleted'), 'hookManager observed ToolCompleted via the bridge');
+  // D3: the mission used tools (some failed on purpose), so both the success
+  // alias and the failure alias must have been observed — proving the runner's
+  // direct emits were safely replaced by the bridge aliases.
+  assert.ok(observedHooks.includes('before_tool'), 'before_tool alias observed via the bridge (runner emits nothing)');
+  assert.ok(observedHooks.includes('after_tool'), 'after_tool alias observed for tool success');
+  assert.ok(observedHooks.includes('tool_error'), 'tool_error alias observed for tool failure');
   offTaskCreated();
   offTaskCompleted();
   offToolCompleted();
+  offBeforeTool();
+  offAfterTool();
+  offToolError();
 
   // Phase 10: the failed verification tool must have injected a goal-aware
   // retry hint naming the files the index matched for the mission goal.

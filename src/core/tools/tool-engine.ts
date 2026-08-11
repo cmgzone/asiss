@@ -106,7 +106,7 @@ export class ToolEngine {
     // Record STARTED before dispatch (matches the previous behavior where the
     // task record existed even for calls that then failed validation/policy).
     const taskRecord: TaskToolRecord | null = ctx.taskId
-      ? await this.startTaskRecord(ctx.taskId, normalized)
+      ? await this.startTaskRecord(ctx.taskId, normalized, ctx.projectId)
       : null;
 
     try {
@@ -180,12 +180,13 @@ export class ToolEngine {
     }
   }
 
-  private async startTaskRecord(taskId: string, request: ToolRequest): Promise<TaskToolRecord | null> {
+  private async startTaskRecord(taskId: string, request: ToolRequest, projectId?: string): Promise<TaskToolRecord | null> {
     try {
       const exec = await this.taskEngine.recordToolExecution(taskId, {
         name: request.name,
         arguments: request.arguments || {},
-        status: 'STARTED'
+        status: 'STARTED',
+        projectId
       });
       return { id: exec.id };
     } catch (taskError: any) {

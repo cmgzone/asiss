@@ -225,20 +225,67 @@ async function main() {
 
     // ---- 11. New: task-hooks bridge (TaskEventBus -> hookManager) ----
     const bus5 = new TaskEventBus();
-    const observed: Array<{ name: string; taskId?: string; sessionId?: string }> = [];
+    const observed: Array<{ name: string; taskId?: string; sessionId?: string; tool?: unknown; error?: unknown; success?: unknown; projectId?: unknown; output?: unknown; durationMs?: unknown }> = [];
     const mockHooks: TaskHooksSink = {
       emit: async (name, data, sessionId) => {
-        observed.push({ name, taskId: String(data?.taskId || ''), sessionId });
+        observed.push({
+          name,
+          taskId: String(data?.taskId || ''),
+          sessionId,
+          tool: data?.tool,
+          error: data?.error,
+          success: data?.success,
+          projectId: data?.projectId,
+          output: data?.output,
+          durationMs: data?.durationMs
+        });
       }
     };
     const uninstallBridge = installTaskHooksBridge(bus5, mockHooks);
     const engine5 = new TaskEngine({ store, bus: bus5, executor: async () => ({ success: true }) });
     const bridged = await engine5.create({ goal: 'Bridged mission', sessionId: 'bridge-session' });
     await engine5.run(bridged.id);
+    // Phase 12 D3: tool lifecycle is bus-only, aliased for legacy subscribers.
+    // Record a STARTED -> COMPLETED tool execution (the canonical events the
+    // ToolEngine would emit) and assert the bridge forwards BOTH the canonical
+    // name and the legacy alias with equivalent payloads.
+    const aliasExec = await engine5.recordToolExecution(bridged.id, {
+      name: 'shell',
+      arguments: { command: 'npm test' },
+      status: 'STARTED',
+      projectId: 'p-7'
+    });
+    await engine5.completeToolExecution(bridged.id, aliasExec.id, {
+      status: 'COMPLETED',
+      output: 'all tests passed',
+      durationMs: 42
+    });
+    const aliasFailedExec = await engine5.recordToolExecution(bridged.id, { name: 'git', status: 'STARTED' });
+    await engine5.completeToolExecution(bridged.id, aliasFailedExec.id, { status: 'FAILED', error: 'merge conflict' });
     uninstallBridge();
     assert.ok(observed.some((e) => e.name === 'TaskCreated' && e.taskId === bridged.id), 'TaskCreated forwarded with taskId');
     assert.ok(observed.some((e) => e.name === 'TaskStarted' && e.sessionId === 'bridge-session'), 'TaskStarted forwarded with sessionId');
     assert.ok(observed.some((e) => e.name === 'TaskCompleted' && e.sessionId === 'bridge-session'), 'TaskCompleted forwarded with sessionId');
+    // Canonical tool events forwarded.
+    assert.ok(observed.some((e) => e.name === 'ToolStarted' && e.tool === 'shell'), 'ToolStarted forwarded');
+    assert.ok(observed.some((e) => e.name === 'ToolCompleted' && e.tool === 'shell'), 'ToolCompleted forwarded');
+    assert.ok(observed.some((e) => e.name === 'ToolFailed' && e.tool === 'git'), 'ToolFailed forwarded');
+    // Legacy aliases preserved (D3): same lifecycle, legacy names + payloads.
+    const before = observed.find((e) => e.name === 'before_tool' && e.tool === 'shell');
+    assert.ok(before, 'before_tool alias emitted for the shell call');
+    const beforeCanonical = observed.find((e) => e.name === 'ToolStarted' && e.tool === 'shell');
+    assert.ok(beforeCanonical, 'ToolStarted carries tool');
+    assert.strictEqual(String(beforeCanonical?.projectId || ''), 'p-7', 'projectId flows through the canonical event');
+    const after = observed.find((e) => e.name === 'after_tool' && e.tool === 'shell');
+    assert.ok(after, 'after_tool alias emitted on success');
+    assert.strictEqual(after?.success, true, 'after_tool carries success flag');
+    const afterCanonical = observed.find((e) => e.name === 'ToolCompleted' && e.tool === 'shell');
+    assert.strictEqual(String(afterCanonical?.output || ''), 'all tests passed', 'output flows through ToolCompleted');
+    assert.strictEqual(afterCanonical?.durationMs, 42, 'tool timing flows through ToolCompleted');
+    const toolError = observed.find((e) => e.name === 'tool_error' && e.tool === 'git');
+    assert.ok(toolError, 'tool_error alias emitted on failure');
+    assert.strictEqual(toolError?.error, 'merge conflict', 'tool_error carries the error');
+    assert.strictEqual(typeof toolError?.durationMs, 'number', 'tool timing flows through ToolFailed too');
     assert.ok(!observed.some((e) => e.name === 'TaskCreated' && e.taskId !== bridged.id), 'no stray task events');
     // After uninstall, further events are not forwarded.
     await engine5.create({ goal: 'Unobserved' });

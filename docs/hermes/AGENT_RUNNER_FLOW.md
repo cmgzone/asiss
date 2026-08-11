@@ -76,14 +76,18 @@ runner talks to channels: `sendResponse`, `sendStreamChunk`, `sendStreamEvent`,
      (`looksLikeProgressOnly`, tool budget, repetition guard) force further
      turns; hard-blocked turns deliver a final response with `ok: false`.
    - **Tool execution** (~2076-2318): `executeToolCall` per call -
-     `hookManager.emit('before_tool')` -> native skill (with automatic
-     checkpoint before destructive shell/patches, project workspace guard,
+     native skill (with automatic checkpoint before destructive
+     shell/patches, project workspace guard,
      `__sessionId`/`__projectId`/`__workspacePath` injection) -> semantic-error
      fallback to capability-alternative skills -> MCP `callTool` -> unknown-tool
-     dynamic resolution (`dynamicTools.resolve`) -> closest-name suggestion ->
-     `after_tool`/`tool_error` hooks + analytics. Parallel only for independent
-     delegate calls; otherwise in model-declared order. Tracks
-     mutation/verification sequences and tool budgets.
+     dynamic resolution (`dynamicTools.resolve`) -> closest-name suggestion +
+     analytics. The tool lifecycle itself is bus-only (Phase 12 D3):
+     ToolEngine records through TaskEngine, whose ToolStarted/Completed/Failed
+     events reach hookManager via the task-hooks bridge (canonical names +
+     `before_tool`/`after_tool`/`tool_error` legacy aliases). The runner emits
+     nothing for tools. Parallel only for independent delegate calls;
+     otherwise in model-declared order. Tracks mutation/verification
+     sequences and tool budgets.
    - **Result processing**: results appended to memory; failure recovery
      counters; `verificationRequired && lastMutation > lastVerification` forces
      a verification turn.

@@ -275,5 +275,19 @@ in the host. Smoke-context section 8 proves byte-identical system prompt
 and body (with and without repository/notes/system-context), minimal
 omission behavior, package sections, and that a tight budget never changes
 the assembled prompt. The e2e runtime mission (repository enabled)
-exercises the full path. Remaining Phase 12: D3 (bridge-only tool
-lifecycle), then adopt taskEngine.run() for missions.
+exercises the full path.
+
+**Phase 12, D3 — tool lifecycle is bus-only (done).** The runner's direct
+`before_tool`/`after_tool`/`tool_error` hookManager emits are removed —
+the runner now emits nothing for the tool lifecycle. ToolEngine records
+through TaskEngine, whose canonical ToolStarted/ToolCompleted/ToolFailed
+events carry the full payload (arguments, output, durationMs, projectId
+threaded from the host context); the task-hooks bridge forwards them to
+hookManager under the canonical names AND the legacy `before_tool` /
+`after_tool` / `tool_error` aliases with equivalent payloads, so audit
+consumers and pre-existing hook subscribers see the same names unchanged.
+Smoke-baseline section 11 asserts both canonical forwarding and the
+aliases (success, failure, projectId, output, timing); the e2e runtime
+mission asserts before_tool/after_tool/tool_error all arrive via the
+bridge during a real mission. Remaining Phase 12: adopt taskEngine.run()
+for missions — the one execution authority.

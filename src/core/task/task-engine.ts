@@ -466,7 +466,14 @@ export class TaskEngine {
     const stored = updated.toolExecutions[updated.toolExecutions.length - 1];
     const eventName: TaskEventName =
       stored.status === 'STARTED' ? 'ToolStarted' : stored.status === 'FAILED' ? 'ToolFailed' : 'ToolCompleted';
-    await this.emit(eventName, taskId, { tool: stored.name, ...(stored.error ? { error: stored.error } : {}) });
+    await this.emit(eventName, taskId, {
+      tool: stored.name,
+      arguments: stored.arguments || {},
+      ...(stored.projectId ? { projectId: stored.projectId } : {}),
+      ...(stored.output !== undefined ? { output: stored.output } : {}),
+      ...(stored.durationMs !== undefined ? { durationMs: stored.durationMs } : {}),
+      ...(stored.error ? { error: stored.error } : {})
+    });
     return stored;
   }
 
@@ -497,7 +504,14 @@ export class TaskEngine {
     toolExecutions[idx] = updated;
     this.persist(new TaskEntity(record).with({ toolExecutions }).record);
     const eventName: TaskEventName = updated.status === 'FAILED' ? 'ToolFailed' : 'ToolCompleted';
-    await this.emit(eventName, taskId, { tool: updated.name, ...(updated.error ? { error: updated.error } : {}) });
+    await this.emit(eventName, taskId, {
+      tool: updated.name,
+      arguments: updated.arguments || {},
+      ...(updated.projectId ? { projectId: updated.projectId } : {}),
+      ...(updated.output !== undefined ? { output: updated.output } : {}),
+      ...(updated.durationMs !== undefined ? { durationMs: updated.durationMs } : {}),
+      ...(updated.error ? { error: updated.error } : {})
+    });
     return updated;
   }
 

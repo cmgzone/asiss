@@ -2275,13 +2275,12 @@ export class AgentRunner {
           // Tool outcomes are recorded per-call inside executeToolCall (via the
           // ToolEngine -> TaskEngine) so usage counts are exact: calls = ok + err.
 
+          // Phase 12 D3: the tool lifecycle is bus-only. ToolEngine records
+          // through TaskEngine, whose ToolStarted/ToolCompleted/ToolFailed
+          // events reach hookManager (canonical names + legacy aliases) via
+          // the task-hooks bridge. Nothing is emitted here.
           const executeToolCall = async (call: any) => {
             try {
-              await hookManager.emit('before_tool', {
-                tool: call.name,
-                arguments: call.arguments || {},
-                projectId: msg.metadata?.projectId || null
-              }, sessionId);
               const projectWorkspacePath = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
               const projectId = typeof msg.metadata?.projectId === 'string'
                 ? msg.metadata.projectId.trim()
@@ -2325,10 +2324,6 @@ export class AgentRunner {
                 });
               }
               if (!result.success) {
-                await hookManager.emit('tool_error', {
-                  tool: result.name,
-                  error: String(result.error || 'Unknown error')
-                }, sessionId);
                 await this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath, missionTaskId || undefined);
                 return {
                   success: false,
@@ -2336,21 +2331,12 @@ export class AgentRunner {
                   error: result.error
                 };
               }
-              await hookManager.emit('after_tool', {
-                tool: result.name,
-                success: true,
-                output: String(result.output || '').slice(0, 5_000)
-              }, sessionId);
               return {
                 success: true,
                 call: call,
                 output: result.output
               };
             } catch (err: any) {
-              await hookManager.emit('tool_error', {
-                tool: call.name,
-                error: err?.message || String(err)
-              }, sessionId);
               await this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath, missionTaskId || undefined);
               return {
                 success: false,

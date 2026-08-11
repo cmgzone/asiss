@@ -92,6 +92,8 @@ export interface ToolExecution {
   durationMs?: number;
   output?: unknown;
   error?: string;
+  /** Host project attribution (D3: legacy before_tool carried projectId). */
+  projectId?: string;
 }
 
 export interface TaskArtifact {
@@ -114,6 +116,8 @@ export interface TaskToolExecutionInput {
   durationMs?: number;
   output?: unknown;
   error?: string;
+  /** Host project attribution (D3: legacy before_tool carried projectId). */
+  projectId?: string;
 }
 
 /** Reference to a workspace snapshot created by checkpoint-manager. */

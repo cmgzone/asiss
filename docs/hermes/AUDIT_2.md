@@ -49,13 +49,17 @@ own JSON persistence (`current_task.json`), read by the runner and the
 `task-memory` skill, while the canonical Task system tracks the same
 notion per mission. Two definitions of "what am I working on".
 
-**D3 — Dual tool-lifecycle observation (Events concern).** The bridge
+**D3 — Dual tool-lifecycle observation (Events concern).** ~~The bridge
 forwards `ToolStarted/ToolCompleted/ToolFailed` to hookManager; the runner
-independently emits `before_tool/after_tool/tool_error`. Different moments
-and hook names, so not an exact duplicate, but the same lifecycle is
-reported through two buses — audit consumers must know both. Consolidate
-by having the runner emit nothing for the tool lifecycle (the bridge +
-projections already cover it) or by aliasing the hook names.
+independently emits `before_tool/after_tool/tool_error`.~~ **RESOLVED
+(Phase 12): the runner emits nothing for the tool lifecycle.** The canonical
+ToolStarted/ToolCompleted/ToolFailed events now carry the full payload
+(arguments, output, durationMs, projectId) and the task-hooks bridge
+forwards them to hookManager under the canonical names AND the legacy
+`before_tool`/`after_tool`/`tool_error` aliases with equivalent payloads,
+so audit consumers and pre-existing hook subscribers keep working
+unchanged. ToolEngine records through TaskEngine (`projectId` threaded
+from the host context); the runner's direct emits are gone.
 
 **D4 (deferred, pre-existing).** Memory / Learning / Checkpoints /
 Telemetry managers are singletons not wrapped behind engines. These are
@@ -90,8 +94,10 @@ started. Concretely, in order:
 2. **D1:** wire `ContextEngine.build()` into the mission prompt so the
    runner's inline assembly becomes a call into the engine (byte-identical
    default output, same drop-in discipline as `renderHistory` in Phase 7).
-3. **D3:** route the tool lifecycle through the bridge/projections alone
-   (or alias hook names), removing the runner's direct emits.
+3. **D3 (done):** the tool lifecycle is bus-only — the runner's direct
+   `before_tool`/`after_tool`/`tool_error` emits are removed; canonical
+   ToolStarted/Completed/Failed carry the full payload and the bridge
+   aliases the legacy hook names for audit/subscriber compatibility.
 4. **Then adopt `taskEngine.run()` for missions** — the planner/executor/
    verifier hooks now have real homes (context build = planner, turn loop =
    executor, diagnose/verify = recovery), delivering the
