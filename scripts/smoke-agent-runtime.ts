@@ -168,6 +168,15 @@ async function main() {
     'the passing verification shell command is recorded as completed'
   );
   assert.ok(mission.progress === 100, 'completed task has 100% progress');
+  // Move 2 (one execution authority): the recovery the mission performed ran
+  // through TaskEngine.diagnose, so the canonical Task carries the recovery
+  // evidence — a verification record for the goal-matched test run and a
+  // bumped attempt count.
+  assert.ok(
+    mission.verification.some((v) => v.kind === 'unit'),
+    `diagnose recorded verification evidence on the mission task (got ${mission.verification.length})`
+  );
+  assert.ok(mission.timing.attempts >= 2, `recovery counted attempts (got ${mission.timing.attempts})`);
   assert.strictEqual(typeof mission.timing.durationMs, 'number', 'completed task records duration');
   assert.strictEqual(mission.model, fakeModel.id, 'ModelEngine records the selected provider on the canonical Task');
   assert.ok(

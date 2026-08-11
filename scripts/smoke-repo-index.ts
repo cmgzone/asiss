@@ -23,7 +23,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { ContextEngine, detectTestCommand, matchedTestFiles, resolveSymbols, runGoalTests, stemOf, warmOnToolEvents } from '../src/core/context';
-import { TaskEventBus } from '../src/core/task';
+import { TaskEngine, TaskEventBus, TaskStore } from '../src/core/task';
 import { SymbolSkill } from '../src/skills/symbol';
 import { WarmthSkill } from '../src/skills/warmth';
 import {
@@ -640,6 +640,97 @@ async function main(): Promise<void> {
     }
   }
 
+
+  // ---- 16. TaskEngine.diagnose — one recovery authority (Move 2) ----
+  {
+    const root = tmpRepo('repo-index-16-');
+    const dataRoot = tmpRepo('repo-data-16-');
+    try {
+      const store = new TaskStore({ filePath: '' });
+      const bus = new TaskEventBus();
+      const engine = new TaskEngine({ store, bus });
+      const events: string[] = [];
+      bus.on('*', (event) => { events.push(event.name); });
+      const created = await engine.create({ goal: 'fix the authentication bug', kind: 'mission', sessionId: 'diag-session' });
+      await engine.analyze(created.id);
+      await engine.plan(created.id);
+      await engine.start(created.id);
+
+      // A diagnoser that reports matched files + one failing test run.
+      const out = await engine.diagnose(created.id, {
+        detail: 'tool failure for goal',
+        diagnoser: async (task) => {
+          assert.strictEqual(task.goal, 'fix the authentication bug', 'diagnoser sees task goal');
+          return {
+            matchedFiles: ['src/auth/auth.ts', 'src/auth/auth.test.ts'],
+            tests: [{ command: 'node --test src/auth/auth.test.ts', exitCode: 1, output: '1 failing', passed: false }]
+          };
+        }
+      });
+      assert.strictEqual(out.diagnosis.matchedFiles?.length, 2, 'diagnosis carries matched files');
+      assert.ok(String(out.diagnosis.evidence).includes('src/auth/auth.ts'), 'evidence rendered from matched files');
+      assert.strictEqual(out.task.status, 'EXECUTING', 'mission continues after diagnosis');
+      assert.strictEqual(out.task.timing.attempts, 2, 'attempts incremented on recovery');
+      for (const name of ['TaskVerifying', 'TaskRetrying', 'TestStarted', 'TestFailed', 'TaskVerificationFailed', 'TaskRecovered']) {
+        assert.ok(events.includes(name), `event ${name} emitted`);
+      }
+      assert.ok(!events.includes('TaskVerified'), 'no TaskVerified for a failing test');
+      assert.strictEqual(out.task.verification.length, 1, 'verification evidence recorded on the task');
+      assert.strictEqual(out.task.verification[0].status, 'FAILED', 'verification record failed');
+
+      // A diagnoser failure is recorded and recovery still completes.
+      const before = out.task.verification.length;
+      await engine.diagnose(created.id, {
+        diagnoser: async () => { throw new Error('repo unavailable'); }
+      });
+      const after = engine.get(created.id)!;
+      assert.strictEqual(after.status, 'EXECUTING', 'mission survives diagnoser failure');
+      assert.ok(after.failures.length > 0, 'diagnoser failure recorded');
+
+      // Terminal tasks are no-ops.
+      await engine.complete(created.id);
+      const terminal = await engine.diagnose(created.id, { diagnoser: async () => ({ matchedFiles: ['x.ts'] }) });
+      assert.strictEqual(terminal.diagnosis.matchedFiles, undefined, 'terminal task no-op');
+      assert.strictEqual(terminal.task.status, 'COMPLETED', 'terminal status untouched');
+
+      // End-to-end repository diagnoser (the runner wires exactly this): the
+      // engine gathers real matched files + runs the goal-matched test.
+      const repo = tmpRepo('repo-index-16b-');
+      try {
+        write(repo, 'src/auth/auth.ts', 'export function authenticate() {}\n');
+        write(repo, 'src/auth/auth.test.js', "const { test } = require('node:test');\ntest('auth works', () => {});\n");
+        const ctxEngine = new ContextEngine({ config: { repository: { dataRoot } } });
+        const index = ctxEngine.indexRepository(repo) as any;
+        const goal = 'fix authentication';
+        const created2 = await engine.create({ goal, kind: 'mission', sessionId: 'diag-session-2', context: { workspacePath: repo } });
+        await engine.analyze(created2.id);
+        await engine.plan(created2.id);
+        await engine.start(created2.id);
+        const e2e = await engine.diagnose(created2.id, {
+          diagnoser: async (task) => {
+            const files = ctxEngine.relevantFiles(task.context?.workspacePath || repo, task.goal, 8);
+            const matched = (files || []).map((f: any) => f.path).slice(0, 8);
+            const testFiles = matchedTestFiles(index, task.goal, files);
+            const run = await runGoalTests(task.context?.workspacePath || repo, testFiles, { timeoutMs: 20000 });
+            return {
+              matchedFiles: matched,
+              tests: run.ran ? [{ command: run.command || '', exitCode: typeof run.exitCode === 'number' ? run.exitCode : -1, output: String(run.output || ''), passed: run.exitCode === 0 }] : []
+            };
+          }
+        });
+        assert.ok(e2e.diagnosis.matchedFiles!.some((f: string) => f.includes('auth.ts')), 'repo diagnoser matched the source file');
+        assert.strictEqual(e2e.diagnosis.tests?.length, 1, 'repo diagnoser ran the matched test');
+        assert.strictEqual(e2e.diagnosis.tests![0].passed, true, 'passing test recorded as passed');
+        assert.strictEqual(e2e.task.verification[0].status, 'PASSED', 'passing verification recorded');
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+  }
+
   console.log(JSON.stringify({
     symbols: true,
     imports: true,
@@ -655,7 +746,8 @@ async function main(): Promise<void> {
     warmthTelemetry: true,
     eventWarming: true,
     verifyThenRetry: true,
-    warmthSkill: true
+    warmthSkill: true,
+    diagnoseRecovery: true
   }));
 }
 

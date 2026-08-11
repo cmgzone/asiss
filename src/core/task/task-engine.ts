@@ -63,6 +63,35 @@ export interface TaskVerificationResult {
   detail?: string;
 }
 
+/** One goal-matched test execution (Phase 11 verify-then-retry evidence). */
+export interface TaskTestRun {
+  command: string;
+  exitCode: number;
+  output: string;
+  passed: boolean;
+}
+
+/**
+ * Recovery diagnosis produced by a TaskDiagnoser. The engine records this as
+ * verification evidence + events; the host (e.g. AgentRunner) renders it into
+ * context so the retry is targeted instead of blind.
+ */
+export interface TaskDiagnosis {
+  /** Files the repository index matched for the goal (Phase 10 hint). */
+  matchedFiles?: string[];
+  /** Goal-matched test runs and their output (Phase 11 evidence). */
+  tests?: TaskTestRun[];
+  /** Optional rendered evidence text for the retry context. */
+  evidence?: string;
+}
+
+/**
+ * A diagnoser gathers recovery evidence for an in-mission failure. Hosts wire
+ * repository-aware implementations (ContextEngine + test runners); the engine
+ * owns what happens with the evidence (records, events, transitions).
+ */
+export type TaskDiagnoser = (task: Task, engine: TaskEngine) => TaskDiagnosis | Promise<TaskDiagnosis>;
+
 export interface TaskRunOutcome {
   success: boolean;
   blocked?: boolean;
@@ -269,6 +298,62 @@ export class TaskEngine {
       throw new Error(`verify() requires an EXECUTING task, got ${entity.status}.`);
     }
     return this.runVerification(taskId, options);
+  }
+
+  /**
+   * In-mission recovery (Move 2, one execution authority): EXECUTING ->
+   * VERIFYING -> EXECUTING. Runs the injected diagnoser to gather recovery
+   * evidence (goal-matched files + test runs), records every result as a
+   * TaskVerification with TestStarted/TestPassed/TestFailed and
+   * TaskVerified/TaskVerificationFailed events, and returns the task to
+   * EXECUTING so the host's retry continues — recovery semantics live here,
+   * not in the host's loop. Never throws: a diagnoser failure is recorded and
+   * recovery continues. No-op on terminal tasks.
+   */
+  async diagnose(
+    taskId: string,
+    options: { diagnoser?: TaskDiagnoser; detail?: string } = {}
+  ): Promise<{ task: Task; diagnosis: TaskDiagnosis }> {
+    const record = this.require(taskId);
+    const entity = new TaskEntity(record);
+    if (isTerminal(entity.status)) return { task: record, diagnosis: {} };
+
+    this.persist(entity.transition('VERIFYING').record, { verifyingAt: Date.now() });
+    await this.emit('TaskVerifying', taskId);
+    await this.emit('TaskRetrying', taskId, { stage: 'diagnosing', detail: options.detail });
+
+    let diagnosis: TaskDiagnosis = {};
+    if (options.diagnoser) {
+      try {
+        diagnosis = (await options.diagnoser(this.store.require(taskId), this)) || {};
+      } catch (error: any) {
+        this.recordFailure(taskId, 'VERIFYING', `Diagnosis failed: ${error?.message || String(error)}`);
+        diagnosis = { evidence: `Diagnosis failed: ${error?.message || String(error)}` };
+      }
+    }
+
+    const tests = Array.isArray(diagnosis.tests) ? diagnosis.tests : [];
+    for (const test of tests) {
+      await this.emit('TestStarted', taskId, { command: test.command });
+      await this.recordVerification(taskId, 'unit', test.passed ? 'PASSED' : 'FAILED', `${test.command} (exit ${test.exitCode})`);
+      await this.emit(test.passed ? 'TestPassed' : 'TestFailed', taskId, { command: test.command, exitCode: test.exitCode });
+      await this.emit(test.passed ? 'TaskVerified' : 'TaskVerificationFailed', taskId, { command: test.command, exitCode: test.exitCode });
+    }
+    if (diagnosis.matchedFiles && diagnosis.matchedFiles.length > 0 && !diagnosis.evidence) {
+      diagnosis.evidence = `Goal-matched files: ${diagnosis.matchedFiles.join(', ')}`;
+    }
+
+    // Return to EXECUTING: the mission retry continues with the evidence.
+    const current = this.store.require(taskId);
+    const recovered = this.persist(new TaskEntity(current).transition('EXECUTING').record, {
+      attempts: current.timing.attempts + 1
+    });
+    await this.emit('TaskRecovered', taskId, {
+      attempt: recovered.timing.attempts,
+      detail: options.detail,
+      evidence: diagnosis.evidence
+    });
+    return { task: recovered, diagnosis };
   }
 
   /** -> COMPLETED. Unblocks dependents whose dependencies are now satisfied. */

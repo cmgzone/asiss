@@ -202,6 +202,20 @@ the runner's `loadConfig()` + `new ContextEngine()` now use the validated
 config (fixes the two-sources-of-truth risk R5). Verified by
 `scripts/smoke-config.ts` (`npm run smoke:config`, 9 sections) and the e2e
 runtime mission (behavior unchanged).
-Next: review Move 2 — give the recovery loop to TaskEngine (one execution
-authority), then Move 3 (typed event-to-channel projection), then the
-second architecture audit.
+Review Move 2 is done: one recovery authority. `TaskEngine.diagnose`
+(EXECUTING -> VERIFYING -> EXECUTING) is now the canonical in-mission
+recovery path: it runs an injected diagnoser, records every goal-matched
+test run as TaskVerification evidence, emits TaskRetrying/TaskVerifying/
+TestStarted/TestPassed/TestFailed/TaskVerificationFailed/TaskRecovered,
+bumps attempts, and never throws. AgentRunner's Phase 10/11
+injectGoalRetryHint now only wires the repository diagnoser
+(ContextEngine + verify-then-retry) and renders the engine's diagnosis
+into context — the runner no longer defines recovery semantics. The
+mission loop remains the driver (model turns); recovery authority is the
+engine's, which is the foundation for adopting taskEngine.run() later.
+Verified by smoke-repo-index section 16 (events, records, transitions,
+diagnoser-failure survival, terminal no-op, end-to-end repository
+diagnoser) and the e2e runtime mission now asserting the canonical Task
+carries unit verification records and bumped attempts.
+Next: review Move 3 — typed event-to-channel projection, then the second
+architecture audit.

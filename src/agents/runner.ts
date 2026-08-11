@@ -512,62 +512,91 @@ export class AgentRunner {
   }
 
   /**
-   * Phase 10: when a tool call fails, surface the files the repository index
-   * matched for the goal so the retry is targeted instead of blind. Gated by
-   * the same repository section config; deduped per session; advisory only —
-   * never throws into the failure path.
+   * Phase 10 + 11 recovery (Move 2 — one execution authority): when a tool
+   * call fails, TaskEngine.diagnose() gathers the recovery evidence — the
+   * goal-matched files (Phase 10) and the goal-matched test runs with output
+   * (Phase 11) — via the engine's canonical EXECUTING -> VERIFYING ->
+   * EXECUTING path, recording TaskVerification evidence and emitting
+   * TaskRetrying/TaskVerifying/TestPassed/TestFailed/TaskRecovered. This host
+   * only wires the repository diagnoser (ContextEngine + verify-then-retry)
+   * and renders the engine's diagnosis into context; it no longer defines
+   * recovery semantics. Gated by the repository section config; deduped per
+   * session; advisory only — never throws into the failure path.
    */
-  /**
-   * Phase 10 + 11: when a tool call fails, surface the files the repository
-   * index matched for the goal so the retry is targeted instead of blind, and
-   * run the goal-matched tests to feed real failure evidence back. Gated by
-   * the same repository section config; deduped per session; advisory only —
-   * never throws into the failure path.
-   */
-  private async injectGoalRetryHint(sessionId: string, goal: string, workspacePathValue: unknown): Promise<void> {
+  private async injectGoalRetryHint(sessionId: string, goal: string, workspacePathValue: unknown, taskId?: string): Promise<void> {
     if (!goal) return;
     try {
       const contextCfg = this.loadConfig()?.agent?.context || {};
       if (contextCfg.repository?.enabled !== true) return;
       const workspace = this.getValidWorkspacePath(workspacePathValue);
       if (!workspace) return;
-      const files = this.contextEngine.relevantFiles(workspace, goal, 8);
-      if (!files || files.length === 0) return;
-      const paths = files.map((f: any) => f.path || String(f)).slice(0, 8);
-      const hint =
-        `A tool call failed. Files the repository index matched for the goal '${goal.slice(0, 120)}':\n` +
-        paths.map((p: string) => `- ${p}`).join('\n') +
-        '\nInspect these files and target the retry at them instead of repeating the failed approach.';
-      if (this.lastRetryHint.get(sessionId) === hint) return;
-      this.lastRetryHint.set(sessionId, hint);
-      this.memory.add(sessionId, {
-        role: 'system',
-        content: hint,
-        timestamp: Date.now(),
-        metadata: { type: 'goal_retry_hint' }
-      });
-
-      // Phase 11: verify-then-retry. Run the goal-matched tests and feed the
-      // output back so the retry is based on real failure evidence. Bounded
-      // (timeout + capped output), opt-out via verifyOnFailure.enabled.
       const verifyCfg = contextCfg.repository?.verifyOnFailure || {};
-      if (verifyCfg.enabled !== false) {
-        const index = this.contextEngine.indexRepository(workspace);
-        if (index) {
-          const testFiles = matchedTestFiles(index, goal, files);
-          const run = await runGoalTests(workspace, testFiles, {
-            timeoutMs: verifyCfg.timeoutMs,
-            maxOutputChars: verifyCfg.maxOutputChars
-          });
-          if (run.ran && run.output) {
-            this.memory.add(sessionId, {
-              role: 'system',
-              content: `Goal-matched verification ran \`${run.command}\` (exit ${run.exitCode}):\n${run.output}`,
-              timestamp: Date.now(),
-              metadata: { type: 'goal_verify_output' }
-            });
+      let diagnosis: { matchedFiles?: string[]; tests?: any[]; evidence?: string } = {};
+      if (taskId) {
+        const result = await taskEngine.diagnose(taskId, {
+          detail: `tool failure for goal '${goal.slice(0, 120)}'`,
+          diagnoser: async (task) => {
+            const taskWorkspace = this.getValidWorkspacePath(task.context?.workspacePath) || workspace;
+            const taskGoal = task.goal || goal;
+            const files = this.contextEngine.relevantFiles(taskWorkspace, taskGoal, 8);
+            const matched = (files || []).map((f: any) => f.path || String(f)).slice(0, 8);
+            const diag: any = { matchedFiles: matched };
+            if (verifyCfg.enabled !== false) {
+              const index = this.contextEngine.indexRepository(taskWorkspace);
+              if (index) {
+                const testFiles = matchedTestFiles(index, taskGoal, files);
+                const run = await runGoalTests(taskWorkspace, testFiles, {
+                  timeoutMs: verifyCfg.timeoutMs,
+                  maxOutputChars: verifyCfg.maxOutputChars
+                });
+                if (run.ran) {
+                  diag.tests = [{
+                    command: run.command || '',
+                    exitCode: run.exitCode ?? -1,
+                    output: String(run.output || ''),
+                    passed: run.exitCode === 0
+                  }];
+                  diag.evidence = `Goal-matched verification ran \`${run.command}\` (exit ${run.exitCode}):\n${run.output}`;
+                }
+              }
+            }
+            return diag;
           }
+        });
+        diagnosis = result.diagnosis;
+      } else {
+        // No canonical task (non-mission contexts): fall back to the direct
+        // evidence path without engine records.
+        const files = this.contextEngine.relevantFiles(workspace, goal, 8);
+        diagnosis = { matchedFiles: (files || []).map((f: any) => f.path || String(f)).slice(0, 8) };
+      }
+
+      const matched = diagnosis.matchedFiles || [];
+      if (matched.length > 0) {
+        const hint =
+          `A tool call failed. Files the repository index matched for the goal '${goal.slice(0, 120)}':\n` +
+          matched.map((p: string) => `- ${p}`).join('\n') +
+          '\nInspect these files and target the retry at them instead of repeating the failed approach.';
+        if (this.lastRetryHint.get(sessionId) !== hint) {
+          this.lastRetryHint.set(sessionId, hint);
+          this.memory.add(sessionId, {
+            role: 'system',
+            content: hint,
+            timestamp: Date.now(),
+            metadata: { type: 'goal_retry_hint' }
+          });
         }
+      }
+      const evidence = diagnosis.evidence || (diagnosis.tests && diagnosis.tests[0]?.output
+        ? `Goal-matched verification ran (exit ${diagnosis.tests[0].exitCode}):\n${diagnosis.tests[0].output}`
+        : '');
+      if (evidence) {
+        this.memory.add(sessionId, {
+          role: 'system',
+          content: evidence,
+          timestamp: Date.now(),
+          metadata: { type: 'goal_verify_output' }
+        });
       }
     } catch {
       // Advisory only.
@@ -2338,7 +2367,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
                   tool: result.name,
                   error: String(result.error || 'Unknown error')
                 }, sessionId);
-                await this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath);
+                await this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath, missionTaskId || undefined);
                 return {
                   success: false,
                   call: call,
@@ -2360,7 +2389,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
                 tool: call.name,
                 error: err?.message || String(err)
               }, sessionId);
-              await this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath);
+              await this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath, missionTaskId || undefined);
               return {
                 success: false,
                 call: call,
