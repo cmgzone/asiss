@@ -22,11 +22,11 @@
 | 5 | PolicyEngine | ALLOW / ASK / DENY before tool execution | [x] |
 | 6 | ModelEngine | Capability/reliability/cost scoring instead of naive routing | [x] |
 | 7 | ContextEngine | Budgeted relevance-based context construction | [x] |
-| 8 | Repository intelligence | Symbol/file/test index for coding tasks | [ ] |
-| 9 | ExecutionScheduler | Real parallelism: deps, priorities, timeouts, retries | [ ] |
-| 10 | Swarm on TaskEngine | AgentSwarm -> child Tasks -> AgentEngine | [ ] |
-| 11 | VerificationEngine | Typecheck/lint/test/build gates; never trust "the model said it's fixed" | [ ] |
-| 12 | Checkpoint integration | Task-aware checkpoints; mutations attributable to tasks | [ ] |
+| 8 | Repository intelligence | Symbol/file/test index for coding tasks | [x] |
+| 9 | Warm index + telemetry | On-demand/event-driven index freshness, warmth audit events | [x] |
+| 10 | Goal-aware retries | Failures suggest goal-matched files instead of retrying blind | [x] |
+| 11 | Verify-then-retry | Goal-matched tests run before the retry; evidence fed back | [x] |
+| 12 | Execution authority | Mission loop adopts taskEngine.run() (see docs/hermes/AUDIT_2.md) | [ ] |
 | 13 | Unified memory | Episodic/Semantic/Procedural/Project/Working memory | [ ] |
 | 14 | LearningEngine | Observation -> evaluation -> validation -> promotion | [ ] |
 | 15 | Background worker migration | Background goals/projects become Tasks | [ ] |
@@ -235,3 +235,14 @@ Models/Events/Repository/Recovery/Verification/Checkpoints/Memory/
 Learning/Telemetry), consolidate any remaining duplicate, then decide the
 next phase. GoalEngine stays a design decision for that audit, not a new
 abstraction now.
+Audit 2 is done (`docs/hermes/AUDIT_2.md`): single-source-of-truth per
+concern verified — Tools/Policy/Models/Events/Repository/Recovery/Verification
+are each single-authority after Moves 1-3; remaining duplicates are D1
+(prompt assembly not in ContextEngine.build), D2 (legacy task-context
+coexists with the canonical Task), D3 (runner's direct hook emits vs the
+bus bridge for the tool lifecycle), plus the deferred pre-existing
+managers (memory/learning/checkpoints/telemetry). GoalEngine deferred.
+Next phase decided: **Phase 12 — Execution authority** (fold task-context
+into TaskEngine, wire ContextEngine.build into the mission prompt, route
+the tool lifecycle through the bridge alone, then adopt taskEngine.run()
+for missions).
