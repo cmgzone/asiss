@@ -21,3 +21,4 @@ export * from './task';
 export * from './task-engine';
 export * from './task-hooks-bridge';
 export * from './task-event-projection';
+export * from './task-memory';

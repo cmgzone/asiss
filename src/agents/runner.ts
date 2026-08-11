@@ -23,7 +23,6 @@ import { ProjectManagerSkill } from '../skills/project-manager';
 import { AgentsMdSkill } from '../skills/agents-md';
 import { thinkingManager } from '../core/thinking';
 import { scratchpad } from '../core/scratchpad';
-import { taskContext } from '../core/task-context';
 import { agentSwarm } from '../core/agent-swarm';
 import { TaskMemorySkill } from '../skills/task-memory';
 import { backgroundWorker } from '../core/background-worker';
@@ -79,7 +78,7 @@ import { chainOfThought } from '../core/chain-of-thought';
 import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
-import { installTaskEventProjections, taskEngine, taskEventBus } from '../core/task';
+import { installTaskEventProjections, taskEngine, taskEventBus, taskMemory } from '../core/task';
 import { loadHermesConfig } from '../core/config';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
 import { ContextEngine, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
@@ -834,7 +833,9 @@ export class AgentRunner {
       result += `\n${delegationReports}\n`;
     }
 
-    const taskSummary = taskContext.getSummaryPrompt();
+    // Phase 12 D2: the current-task resume summary comes from the canonical
+    // Task system (TaskMemory) instead of the legacy current_task.json.
+    const taskSummary = taskMemory.summaryPrompt(sessionId || '');
     if (taskSummary) {
       result += `\n${taskSummary}`;
     }

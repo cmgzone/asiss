@@ -246,3 +246,19 @@ Next phase decided: **Phase 12 — Execution authority** (fold task-context
 into TaskEngine, wire ContextEngine.build into the mission prompt, route
 the tool lifecycle through the bridge alone, then adopt taskEngine.run()
 for missions).
+
+**Phase 12, D2 — task-context folded into the canonical Task (done).**
+`src/core/task-context.ts` (and `current_task.json`) deleted. The legacy
+surface is re-implemented as `TaskMemory` (`src/core/task/task-memory.ts`)
+on top of TaskEngine: kind `resume` tasks own the tracked goal, context
+points become kind-`context` artifacts, legacy statuses map to the state
+machine (in-progress/paused/completed), recents are terminal tasks, and
+`summaryPrompt()` renders the exact legacy `## Current Task (Resume)`
+block from the Task record. The runner's `getSummaryPrompt()` and the
+`task_memory` skill now read TaskEngine (via `taskMemory`); the baseline
+smoke asserts the summary matches the legacy format and that
+`current_task.json` is never written. Determinism fix: `mem.start`'s
+new-task path monotonic-touches so a mission and a tracked resume created
+in the same millisecond still resolve current() deterministically.
+Remaining Phase 12: D1 (ContextEngine.build in the mission prompt),
+D3 (bridge-only tool lifecycle), then adopt taskEngine.run() for missions.

@@ -23,7 +23,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { ContextEngine, detectTestCommand, matchedTestFiles, resolveSymbols, runGoalTests, stemOf, warmOnToolEvents } from '../src/core/context';
-import { TaskEngine, TaskEventBus, TaskStore, installTaskEventProjections } from '../src/core/task';
+import { TaskEngine, TaskEventBus, TaskMemory, TaskStore, installTaskEventProjections } from '../src/core/task';
 import { SymbolSkill } from '../src/skills/symbol';
 import { WarmthSkill } from '../src/skills/warmth';
 import {
@@ -787,6 +787,76 @@ async function main(): Promise<void> {
     assert.ok(!received.some((r) => r.sessionId === 's5'), 'unsubscribe stops delivery');
   }
 
+
+  // ---- 18. TaskMemory — legacy task-context folded into TaskEngine (Phase 12 D2) ----
+  {
+    const store = new TaskStore({ filePath: '' });
+    const engine = new TaskEngine({ store, bus: new TaskEventBus() });
+    const mem = new TaskMemory({ engine });
+
+    // Session A: pure resume-task lifecycle (no mission), fully deterministic.
+    const sessionA = 'tm-session-a';
+    const first = await mem.start('fix the login flow', sessionA, ['auth module', 'session store']);
+    assert.strictEqual(first.kind, 'resume', 'resume kind');
+    assert.strictEqual(first.status, 'EXECUTING', 'in-progress in the state machine');
+    const summary = mem.summaryPrompt(sessionA);
+    assert.ok(summary.includes('## Current Task (Resume)'), 'legacy summary header');
+    assert.ok(summary.includes('**fix the login flow**'), 'legacy summary goal');
+    assert.ok(summary.includes('Status: in-progress'), 'legacy summary status');
+    assert.ok(summary.includes('1. auth module\n2. session store'), 'numbered context points');
+    assert.ok(summary.includes('You should ask the user if they want to continue'), 'legacy closing line');
+
+    // task_start again reuses the resume task (goal updated), never duplicates.
+    const second = await mem.start('fix the login flow v2', sessionA);
+    assert.strictEqual(second.id, first.id, 'resume task reused');
+    assert.strictEqual(second.goal, 'fix the login flow v2', 'goal updated');
+    assert.strictEqual(engine.list().filter((t) => t.sessionId === sessionA && t.kind === 'resume').length, 1, 'no duplicate resume tasks');
+
+    // addContext appends and renders; no-active session returns false.
+    assert.strictEqual(await mem.addContext(sessionA, 'third point'), true);
+    assert.ok(mem.summaryPrompt(sessionA).includes('3. third point'), 'appended context renders');
+    assert.strictEqual(await mem.addContext('no-task-session', 'orphan point'), false, 'no active task -> false');
+
+    // update: goal + paused status; resume back.
+    assert.strictEqual(await mem.update(sessionA, { goal: 'tracked goal v2', status: 'paused' }), true);
+    const paused = store.require(first.id);
+    assert.strictEqual(paused.status, 'PAUSED', 'paused in state machine');
+    assert.strictEqual(paused.goal, 'tracked goal v2', 'goal updated');
+    assert.ok(mem.summaryPrompt(sessionA).includes('Status: paused'), 'paused in summary');
+    assert.strictEqual(await mem.update(sessionA, { status: 'in-progress' }), true);
+    assert.strictEqual(store.require(first.id).status, 'READY', 'resumed (READY) and still current');
+
+    // clear pauses; complete (from PAUSED, via advanceToExecuting) finishes.
+    assert.strictEqual(await mem.clear(sessionA), true);
+    assert.strictEqual(store.require(first.id).status, 'PAUSED', 'clear pauses');
+    assert.strictEqual(await mem.complete(sessionA), true);
+    const done = store.require(first.id);
+    assert.strictEqual(done.status, 'COMPLETED', 'complete finishes');
+    assert.strictEqual(mem.current(sessionA), undefined, 'no current after completion');
+    assert.ok(mem.recent(sessionA).some((t) => t.id === first.id), 'completed in recents');
+
+    // Session B: a running mission is current until the model tracks a goal;
+    // task_start then creates a separate resume task and never clobbers the
+    // mission (the resume is created later, so ordering is deterministic).
+    const sessionB = 'tm-session-b';
+    const mission = await engine.create({ goal: 'mission goal', kind: 'mission', sessionId: sessionB });
+    await engine.analyze(mission.id);
+    await engine.plan(mission.id);
+    await engine.start(mission.id);
+    assert.strictEqual(mem.current(sessionB)!.id, mission.id, 'mission is current while running');
+    const tracked = await mem.start('tracked goal', sessionB);
+    assert.notStrictEqual(tracked.id, mission.id, 'tracking creates a separate resume task');
+    assert.strictEqual(engine.get(mission.id)!.goal, 'mission goal', 'mission goal never clobbered');
+    assert.strictEqual(engine.get(mission.id)!.status, 'EXECUTING', 'mission untouched by tracking');
+    assert.strictEqual(mem.current(sessionB)!.id, tracked.id, 'tracked resume becomes current');
+    assert.strictEqual(await mem.update(sessionB, { status: 'paused' }), true);
+    assert.strictEqual(store.require(tracked.id).status, 'PAUSED', 'tracked task paused');
+    assert.strictEqual(store.require(mission.id).status, 'EXECUTING', 'mission still executing');
+
+    // current_task.json is never written anywhere (module deleted).
+    assert.ok(!fs.existsSync('current_task.json'), 'current_task.json never written');
+  }
+
   console.log(JSON.stringify({
     symbols: true,
     imports: true,
@@ -804,7 +874,8 @@ async function main(): Promise<void> {
     verifyThenRetry: true,
     warmthSkill: true,
     diagnoseRecovery: true,
-    eventProjection: true
+    eventProjection: true,
+    taskMemoryFold: true
   }));
 }
 

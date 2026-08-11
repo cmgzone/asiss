@@ -5,7 +5,7 @@
  * the new canonical Task system. Run with `npm run smoke:baseline`.
  *
  * Covers:
- *   1. task-context (current-task resume)          — existing
+ *   1. task-memory (current-task resume, folded)   — canonical Task
  *   2. checkpoint-manager (create/rollback)        — existing
  *   3. Task state machine                          — new
  *   4. TaskEngine full lifecycle + events          — new
@@ -20,13 +20,13 @@ import assert from 'assert';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { TaskContext } from '../src/core/task-context';
 import { CheckpointManager } from '../src/core/checkpoint-manager';
 import {
   TaskEngine,
   TaskStore,
   TaskEventBus,
   TaskEvent,
+  TaskMemory,
   canTransition,
   isTerminal,
   Task,
@@ -37,17 +37,25 @@ import {
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gitu-smoke-baseline-'));
   try {
-    // ---- 1. Existing: task context (current-task resume) ----
-    // TaskContext joins against process.cwd(), so pass a relative path on Windows.
-    const ctx = new TaskContext(path.relative(process.cwd(), path.join(root, 'current_task.json')));
-    ctx.setTask('Baseline smoke task', 'smoke-session', ['context point']);
-    assert.equal(ctx.getActiveTask()?.goal, 'Baseline smoke task');
-    assert.equal(ctx.addContext('second point'), true);
-    assert.ok(ctx.getSummaryPrompt().includes('Baseline smoke task'));
-    assert.equal(ctx.hasUnfinishedTask(), true);
-    ctx.completeTask();
-    assert.equal(ctx.getActiveTask(), null);
-    assert.equal(ctx.getRecentTasks().length, 1);
+    // ---- 1. Folded: task-memory (current-task resume on canonical Tasks) ----
+    // Phase 12 D2: the legacy TaskContext (current_task.json) is replaced by
+    // TaskMemory over the canonical Task store; nothing writes current_task.json.
+    const memoryStore = new TaskStore({ filePath: '' });
+    const memoryEngine = new TaskEngine({ store: memoryStore, bus: new TaskEventBus() });
+    const mem = new TaskMemory({ engine: memoryEngine });
+    const started = await mem.start('Baseline smoke task', 'smoke-session', ['context point']);
+    assert.equal(started.kind, 'resume', 'tracked task is a canonical resume task');
+    assert.equal(mem.toEntry(started).goal, 'Baseline smoke task');
+    assert.equal(await mem.addContext('smoke-session', 'second point'), true);
+    assert.ok(mem.summaryPrompt('smoke-session').includes('Baseline smoke task'));
+    assert.ok(mem.summaryPrompt('smoke-session').includes('2. second point'), 'context points render');
+    assert.equal(mem.hasUnfinishedTask('smoke-session'), true);
+    assert.equal(await mem.complete('smoke-session'), true);
+    assert.equal(mem.current('smoke-session'), undefined);
+    assert.equal(mem.recent('smoke-session').length, 1);
+    const completed = memoryStore.require(started.id);
+    assert.equal(completed.status, 'COMPLETED');
+    assert.ok(!fs.existsSync(path.join(root, 'current_task.json')), 'current_task.json is never written');
 
     // ---- 2. Existing: checkpoint-manager (create/rollback) ----
     const workspace = path.join(root, 'workspace');
@@ -237,7 +245,7 @@ async function main() {
     assert.ok(!observed.some((e) => e.name === 'TaskCreated' && e.taskId !== bridged.id), 'bridge unsubscribes cleanly');
 
     console.log(JSON.stringify({
-      taskContext: true,
+      taskMemory: true,
       checkpoints: true,
       stateMachine: true,
       lifecycle: true,

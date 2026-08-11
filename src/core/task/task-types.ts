@@ -37,6 +37,7 @@ export type TaskStatus =
 /** What kind of work the task represents — maps to existing subsystems. */
 export type TaskKind =
   | 'mission'      // an AgentRunner mission (processMessage turn)
+  | 'resume'       // task_memory tracking entry (folded from legacy task-context)
   | 'background'   // background-worker goal
   | 'workflow'     // execute-workflow step
   | 'delegation'   // delegate_agent run
