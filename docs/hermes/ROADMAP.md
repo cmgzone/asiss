@@ -354,11 +354,25 @@ blocked on exhausted budget, hook complete, engine-level hook + guard) and by
 `npm run smoke:runtime` (the 6-turn e2e mission still completes through the
 moved decision).
 
-**Phase 12, Move 3 (planned) — verify/diagnose in-loop.** Route the mission's
-verification-pending continuations and late-failure recoveries through the
-engine's in-loop `diagnose` authority via the `verify` verdict already wired in
-Move 1/2, so the "run verification before completion" and "recover after
-failure" decisions also stop being host-side bools.
+**Phase 12, Move 3 — verify/diagnose in-loop (done).** The engine now owns
+mutation/verification state and the in-loop verification decision. The host
+annotates each executed tool's role via `TaskEngine.recordToolKind(executionId,
+kind)` (mutation / verification / inspection), and the engine answers
+`verificationPending(taskId)` — true when a successful mutation has no later
+successful verification tool and no PASSED verification evidence. The runner's
+lastMutationSequence/lastVerificationSequence counters now survive only as a
+task-less degraded fallback (when beginMissionTask failed). The completion hook
+answers `verify` (not `continue`) when the goal requires verification and the
+engine reports pending; `runTurn` then runs the engine's in-loop diagnose
+authority with the same repository diagnoser failure recovery uses
+(`buildMissionDiagnoser`, extracted from `injectGoalRetryHint`), yielding
+canonical TaskVerification evidence + TaskVerifying/TaskVerified events, and
+the runner renders that diagnosis into context. The mission's
+verification-pending continuations and late-failure recoveries both route
+through the engine's diagnose authority. Verified by `npm run
+smoke:turn-contract` (14 sections — 2 new: verify verdict runs the diagnose
+authority, recordToolKind drives verification-pending) and by `npm run
+smoke:runtime` (the 6-turn e2e mission still completes).
 
 **Phase 12, Move 4 (planned) — delegate the loop body.** Turn the mission
 loop's model+tool batch body into the host hook the turn contract drives, so

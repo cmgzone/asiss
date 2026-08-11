@@ -315,7 +315,52 @@ async function main() {
     console.log('12. engine-level hook + guard                   ok');
   }
 
-  console.log(JSON.stringify({ success: true, sections: 12 }));
+  // ---- 13. verify verdict runs the in-loop diagnose authority ----
+  {
+    const { engine, events } = setup();
+    const task = await mission(engine);
+    let diagnoserRan = false;
+    const diagnoser: TaskDiagnoser = async (t) => {
+      diagnoserRan = true;
+      return {
+        matchedFiles: ['src/node.ts'],
+        tests: [{ command: 'node --test', exitCode: 0, output: 'ok', passed: true }],
+        evidence: 'Goal-matched verification ran `node --test` (exit 0):\nok'
+      };
+    };
+    const result = await engine.runTurn(task.id, {
+      turn: 1,
+      verdict: { type: 'verify', reason: 'Changes were made but no later verification has run.' }
+    }, { diagnoser });
+    assert.ok(diagnoserRan, 'verify verdict runs the injected repository diagnoser');
+    assert.strictEqual(result.action, 'verify', 'verify action returned');
+    assert.strictEqual(result.task.status, 'EXECUTING', 'task returns to EXECUTING');
+    assert.strictEqual(result.diagnosis?.matchedFiles?.[0], 'src/node.ts', 'diagnosis carries goal-matched files');
+    assert.ok(result.task.verification.some(v => v.status === 'PASSED'), 'diagnose recorded canonical PASSED verification evidence');
+    assert.ok(events.some(e => e.name === 'TaskVerifying'), 'TaskVerifying emitted during in-loop verify');
+    assert.ok(events.some(e => e.name === 'TaskVerified'), 'TaskVerified emitted for PASSED in-loop verification');
+    console.log('13. verify verdict runs diagnose authority        ok');
+  }
+
+  // ---- 14. verification-pending state: recordToolKind + verificationPending ----
+  {
+    const { engine } = setup();
+    const task = await mission(engine, 'fix the bug');
+    const patchExec = await engine.recordToolExecution(task.id, {
+      name: 'apply_patch', status: 'COMPLETED', output: 'ok'
+    });
+    await engine.recordToolKind(task.id, patchExec.id, 'mutation');
+    assert.strictEqual(engine.verificationPending(task.id), true, 'mutation + no verification => pending');
+    const testExec = await engine.recordToolExecution(task.id, {
+      name: 'shell', arguments: { command: 'node --test' }, status: 'COMPLETED', output: 'ok'
+    });
+    assert.strictEqual(engine.verificationPending(task.id), true, 'verification tool still pending until kind annotated');
+    await engine.recordToolKind(task.id, testExec.id, 'verification');
+    assert.strictEqual(engine.verificationPending(task.id), false, 'mutation then verification kind => resolved');
+    console.log('14. recordToolKind drives verification-pending    ok');
+  }
+
+  console.log(JSON.stringify({ success: true, sections: 14 }));
 }
 
 main().then(() => process.exit(0)).catch((err) => {

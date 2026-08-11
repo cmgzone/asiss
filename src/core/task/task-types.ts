@@ -82,6 +82,13 @@ export interface TaskPlanStep {
   subtaskId?: string;
 }
 
+/**
+ * Host-computed role of a tool call relative to the mission goal (Phase 12
+ * Move 3). The host classifies each execution; the engine keeps the canonical
+ * mutation/verification state so "verification is pending" is engine-owned.
+ */
+export type TaskToolKind = 'mutation' | 'verification' | 'inspection';
+
 export interface ToolExecution {
   id: string;
   name: string;
@@ -94,6 +101,8 @@ export interface ToolExecution {
   error?: string;
   /** Host project attribution (D3: legacy before_tool carried projectId). */
   projectId?: string;
+  /** Host-computed role (mutation / verification / inspection). */
+  kind?: TaskToolKind;
 }
 
 export interface TaskArtifact {
@@ -118,6 +127,8 @@ export interface TaskToolExecutionInput {
   error?: string;
   /** Host project attribution (D3: legacy before_tool carried projectId). */
   projectId?: string;
+  /** Host-computed role (mutation / verification / inspection). */
+  kind?: TaskToolKind;
 }
 
 /** Reference to a workspace snapshot created by checkpoint-manager. */

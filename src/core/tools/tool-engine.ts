@@ -115,7 +115,7 @@ export class ToolEngine {
       if (!validation.valid) {
         await this.finishTaskRecord(ctx.taskId, taskRecord, { status: 'FAILED', error: validation.reason });
         this.analytics.recordToolCallResult(ctx.sessionId || '', normalized.name, false);
-        return errorResult(normalized.name, validation.reason || 'Invalid tool arguments.');
+        return errorResult(normalized.name, validation.reason || 'Invalid tool arguments.', { executionId: taskRecord?.id });
       }
 
       // ---- Authorize (PolicyEngine: ALLOW / ASK / DENY) ----
@@ -131,7 +131,8 @@ export class ToolEngine {
         return errorResult(normalized.name, denialReason, {
           denied: true,
           reason: denialReason,
-          policy: verdict
+          policy: verdict,
+          executionId: taskRecord?.id
         });
       }
 
@@ -158,7 +159,8 @@ export class ToolEngine {
           source: isNative ? 'native' : 'mcp',
           error: executed.error,
           fallback: executed.fallback,
-          dynamic: executed.dynamic
+          dynamic: executed.dynamic,
+          executionId: taskRecord?.id
         };
       }
 
@@ -171,12 +173,13 @@ export class ToolEngine {
         output: executed.output,
         checkpoint: executed.checkpoint,
         fallback: executed.fallback,
-        dynamic: executed.dynamic
+        dynamic: executed.dynamic,
+        executionId: taskRecord?.id
       };
     } catch (error: any) {
       await this.finishTaskRecord(ctx.taskId, taskRecord, { status: 'FAILED', error: error?.message || String(error) });
       this.analytics.recordToolCallResult(ctx.sessionId || '', normalized.name, false);
-      return errorResult(normalized.name, error?.message || String(error));
+      return errorResult(normalized.name, error?.message || String(error), { executionId: taskRecord?.id });
     }
   }
 

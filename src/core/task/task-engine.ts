@@ -30,6 +30,7 @@ import {
   TaskPlanStep,
   TaskStatus,
   TaskToolExecutionInput,
+  TaskToolKind,
   TaskVerification,
   TaskVerificationKind,
   ToolExecution
@@ -145,6 +146,13 @@ export interface TaskCompletionContext {
   task: Task;
   turn: number;
   evidence: TaskCompletionEvidence;
+  /**
+   * Engine-owned verification state (Phase 12 Move 3): true when a successful
+   * mutation tool remains unverified (no later successful verification tool and
+   * no PASSED verification evidence). The host never maintains this as a second
+   * mechanism — it asks the engine here.
+   */
+  pendingVerification?: boolean;
 }
 
 /**
@@ -173,6 +181,8 @@ export interface TaskTurnToolExecution {
   error?: string;
   durationMs?: number;
   projectId?: string;
+  /** Host-computed role (mutation / verification / inspection). */
+  kind?: TaskToolKind;
 }
 
 /**
@@ -469,7 +479,8 @@ export class TaskEngine {
           arguments: tool.arguments,
           status: 'STARTED',
           startedAt: Date.now() - (tool.durationMs || 0),
-          projectId: tool.projectId
+          projectId: tool.projectId,
+          kind: tool.kind
         });
       }
       const latest = this.store.require(taskId);
@@ -576,7 +587,8 @@ export class TaskEngine {
     const verdict = await hook({
       task: this.require(taskId),
       turn: input.turn,
-      evidence: input.evidence || {}
+      evidence: input.evidence || {},
+      pendingVerification: this.verificationPending(taskId)
     });
     const detail = 'reason' in verdict
       ? verdict.reason
@@ -777,6 +789,45 @@ export class TaskEngine {
       ...(stored.error ? { error: stored.error } : {})
     });
     return stored;
+  }
+
+  /**
+   * Annotate an already-recorded tool execution with its host-computed role
+   * (Phase 12 Move 3). Idempotent. Existing STARTED/COMPLETED/FAILED records
+   * are tagged after the batch, so the canonical Task carries the mutation /
+   * verification state that `verificationPending` reads.
+   */
+  async recordToolKind(taskId: string, executionId: string, kind: TaskToolKind): Promise<ToolExecution | undefined> {
+    const record = this.require(taskId);
+    const idx = record.toolExecutions.findIndex((ex) => ex.id === executionId);
+    if (idx === -1) return undefined;
+    const toolExecutions = [...record.toolExecutions];
+    toolExecutions[idx] = { ...toolExecutions[idx], kind };
+    this.persist(new TaskEntity(record).with({ toolExecutions }).record);
+    return toolExecutions[idx];
+  }
+
+  /**
+   * Engine-owned "verification is pending" state (Phase 12 Move 3). True when a
+   * successful mutation tool has no later successful verification tool and no
+   * PASSED verification evidence. This is the single mechanism the host's
+   * completion hook asks; the host does not maintain its own counter state.
+   */
+  verificationPending(taskId: string): boolean {
+    const task = this.require(taskId);
+    const mutationAt = task.toolExecutions
+      .filter((ex) => ex.kind === 'mutation' && ex.status === 'COMPLETED')
+      .reduce((max, ex) => Math.max(max, ex.startedAt || 0), -1);
+    if (mutationAt < 0) return false;
+    const verifiedToolLater = task.toolExecutions.some(
+      (ex) => ex.kind === 'verification' && ex.status === 'COMPLETED' && (ex.startedAt || 0) >= mutationAt
+    );
+    if (verifiedToolLater) return false;
+    const passedEvidenceLater = (task.verification || []).some(
+      (v) => v.status === 'PASSED' && (v.completedAt ?? v.startedAt) >= mutationAt
+    );
+    if (passedEvidenceLater) return false;
+    return true;
   }
 
   /**

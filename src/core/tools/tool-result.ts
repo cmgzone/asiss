@@ -49,6 +49,9 @@ export interface ToolResult {
   reason?: string;
   /** The full PolicyEngine verdict (checks + risk) when policy ran. */
   policy?: any;
+  /** Recorded canonical Task execution id (Phase 12 Move 3), when a taskId was
+   *  supplied. Lets the host annotate the execution with its tool role. */
+  executionId?: string;
 }
 
 /** JSON-stringify a raw tool output, passing strings through untouched. */

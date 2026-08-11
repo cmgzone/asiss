@@ -180,7 +180,8 @@ export class TaskEntity {
       durationMs: execution.durationMs,
       output: execution.output,
       error: execution.error,
-      projectId: execution.projectId
+      projectId: execution.projectId,
+      kind: execution.kind
     };
     return this.with({ toolExecutions: [...this.record.toolExecutions, completed] });
   }

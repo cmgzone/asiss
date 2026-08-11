@@ -79,7 +79,7 @@ import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { installTaskEventProjections, taskEngine, taskEventBus, taskMemory } from '../core/task';
-import type { TaskCompletionContext, TaskCompletionEvidence, TaskTurnAction, TaskTurnVerdict } from '../core/task';
+import type { TaskCompletionContext, TaskCompletionEvidence, TaskDiagnosis, TaskDiagnoser, TaskToolKind, TaskTurnAction, TaskTurnResult, TaskTurnVerdict } from '../core/task';
 import { loadHermesConfig } from '../core/config';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
 import { ContextEngine, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
@@ -467,6 +467,48 @@ export class AgentRunner {
   }
 
   /**
+   * Builds the repository-aware diagnoser the engine runs for the mission's
+   * verification authority (Phase 12 Move 3). The host only wires the
+   * ContextEngine + verify-then-retry evidence; the engine owns what the
+   * evidence means (records, events, EXECUTING -> VERIFYING -> EXECUTING).
+   * Used by both failure recovery (injectGoalRetryHint) and the turn
+   * contract's `verify` verdict.
+   */
+  private buildMissionDiagnoser(goal: string, workspacePathValue: unknown, workspaceFallback?: string): TaskDiagnoser {
+    return async (task) => {
+      const contextCfg = this.loadConfig()?.agent?.context || {};
+      const verifyCfg = contextCfg.repository?.verifyOnFailure || {};
+      const taskWorkspace = this.getValidWorkspacePath(task.context?.workspacePath) || workspaceFallback || '';
+      const taskGoal = task.goal || goal;
+      const workspace = taskWorkspace || this.getValidWorkspacePath(workspacePathValue) || '';
+      if (!workspace) return {};
+      const files = this.contextEngine.relevantFiles(workspace, taskGoal, 8);
+      const matched = (files || []).map((f: any) => f.path || String(f)).slice(0, 8);
+      const diag: any = { matchedFiles: matched };
+      if (contextCfg.repository?.enabled === true && verifyCfg.enabled !== false) {
+        const index = this.contextEngine.indexRepository(workspace);
+        if (index) {
+          const testFiles = matchedTestFiles(index, taskGoal, files);
+          const run = await runGoalTests(workspace, testFiles, {
+            timeoutMs: verifyCfg.timeoutMs,
+            maxOutputChars: verifyCfg.maxOutputChars
+          });
+          if (run.ran) {
+            diag.tests = [{
+              command: run.command || '',
+              exitCode: run.exitCode ?? -1,
+              output: String(run.output || ''),
+              passed: run.exitCode === 0
+            }];
+            diag.evidence = `Goal-matched verification ran \`${run.command}\` (exit ${run.exitCode}):\n${run.output}`;
+          }
+        }
+      }
+      return diag;
+    };
+  }
+
+  /**
    * Phase 10 + 11 recovery (Move 2 — one execution authority): when a tool
    * call fails, TaskEngine.diagnose() gathers the recovery evidence — the
    * goal-matched files (Phase 10) and the goal-matched test runs with output
@@ -485,38 +527,11 @@ export class AgentRunner {
       if (contextCfg.repository?.enabled !== true) return;
       const workspace = this.getValidWorkspacePath(workspacePathValue);
       if (!workspace) return;
-      const verifyCfg = contextCfg.repository?.verifyOnFailure || {};
       let diagnosis: { matchedFiles?: string[]; tests?: any[]; evidence?: string } = {};
       if (taskId) {
         const result = await taskEngine.diagnose(taskId, {
           detail: `tool failure for goal '${goal.slice(0, 120)}'`,
-          diagnoser: async (task) => {
-            const taskWorkspace = this.getValidWorkspacePath(task.context?.workspacePath) || workspace;
-            const taskGoal = task.goal || goal;
-            const files = this.contextEngine.relevantFiles(taskWorkspace, taskGoal, 8);
-            const matched = (files || []).map((f: any) => f.path || String(f)).slice(0, 8);
-            const diag: any = { matchedFiles: matched };
-            if (verifyCfg.enabled !== false) {
-              const index = this.contextEngine.indexRepository(taskWorkspace);
-              if (index) {
-                const testFiles = matchedTestFiles(index, taskGoal, files);
-                const run = await runGoalTests(taskWorkspace, testFiles, {
-                  timeoutMs: verifyCfg.timeoutMs,
-                  maxOutputChars: verifyCfg.maxOutputChars
-                });
-                if (run.ran) {
-                  diag.tests = [{
-                    command: run.command || '',
-                    exitCode: run.exitCode ?? -1,
-                    output: String(run.output || ''),
-                    passed: run.exitCode === 0
-                  }];
-                  diag.evidence = `Goal-matched verification ran \`${run.command}\` (exit ${run.exitCode}):\n${run.output}`;
-                }
-              }
-            }
-            return diag;
-          }
+          diagnoser: this.buildMissionDiagnoser(goal, workspacePathValue, workspace)
         });
         diagnosis = result.diagnosis;
       } else {
@@ -678,13 +693,18 @@ export class AgentRunner {
   }
 
   /**
-   * Phase 12 Move 2 — the completion judgment (host domain knowledge). Answers
-   * the engine's "is completion allowed?" question from the evidence the mission
-   * loop supplies. The engine owns the lifecycle transition; this only supplies
-   * the verdict, never terminates a Task directly.
+   * Phase 12 Move 2 + 3 — the completion/verification judgment (host domain
+   * knowledge). Answers the engine's "is completion allowed?" question from the
+   * evidence the mission loop supplies plus the engine-owned verification
+   * state. The engine owns the lifecycle transition; this only supplies the
+   * verdict, never terminates a Task directly. When the goal requires
+   * verification and a mutation is still unverified, the answer is `verify` so
+   * the engine's in-loop diagnose authority runs.
    */
-  private completionVerdict(evidence: TaskCompletionEvidence): TaskTurnVerdict {
+  private completionVerdict(evidence: TaskCompletionEvidence, pendingVerification?: boolean): TaskTurnVerdict {
     const withinBudget = (evidence.forcedContinuations ?? 0) < (evidence.maxForcedContinuations ?? 4);
+    const verifyPending = pendingVerification
+      ?? (!!evidence.verificationRequired && (evidence.lastMutationSequence ?? -1) > (evidence.lastVerificationSequence ?? -1));
     if (withinBudget) {
       if (evidence.toolRequired && (evidence.totalToolCalls ?? 0) === 0) {
         return { type: 'continue', reason: 'The action task has not used any tools yet.' };
@@ -692,8 +712,8 @@ export class AgentRunner {
       if (evidence.lastBatchHadFailure) {
         return { type: 'continue', reason: 'The latest tool batch failed and needs a recovery attempt.' };
       }
-      if (evidence.verificationRequired && (evidence.lastMutationSequence ?? -1) > (evidence.lastVerificationSequence ?? -1)) {
-        return { type: 'continue', reason: 'Changes were made but no later verification command has run.' };
+      if (evidence.verificationRequired && verifyPending) {
+        return { type: 'verify', reason: 'Changes were made but no later verification has run.' };
       }
       if (this.looksLikeProgressOnly(evidence.finalDraft || '')) {
         return { type: 'continue', reason: 'The draft only promises future work instead of completing it.' };
@@ -701,7 +721,7 @@ export class AgentRunner {
     }
     const blocked = evidence.lastBatchHadFailure
       || (evidence.toolRequired && (evidence.totalToolCalls ?? 0) === 0)
-      || (evidence.verificationRequired && (evidence.lastMutationSequence ?? -1) > (evidence.lastVerificationSequence ?? -1));
+      || (evidence.verificationRequired && verifyPending);
     if (blocked) {
       return {
         type: 'blocked',
@@ -712,9 +732,9 @@ export class AgentRunner {
     return { type: 'complete', summary: (evidence.finalDraft || '').trim() || undefined };
   }
 
-  /** Bound form the engine's completion-verdict hook expects (Phase 12 Move 2). */
+  /** Bound form the engine's completion-verdict hook expects (Phase 12 Move 2/3). */
   private readonly completionVerdictHook = async (context: TaskCompletionContext): Promise<TaskTurnVerdict> =>
-    this.completionVerdict(context.evidence);
+    this.completionVerdict(context.evidence, context.pendingVerification);
 
   private verdictAction(verdict: TaskTurnVerdict): TaskTurnAction {
     switch (verdict.type) {
@@ -1856,8 +1876,13 @@ export class AgentRunner {
     let repeatedFailureRecoveries = 0;
     let explorationBatches = 0;
     let toolSequence = 0;
+    // Phase 12 Move 3 — verification-pending state is engine-owned
+    // (TaskEngine.verificationPending). `lastMutationSequence` /
+    // `lastVerificationSequence` are kept only as a degraded, task-less
+    // fallback when beginMissionTask failed and there is no canonical Task.
     let lastMutationSequence = -1;
     let lastVerificationSequence = -1;
+    let missionVerificationPending = false;
 
     const initialMemories = this.memory.getAll(sessionId);
     await this.autoCompactSessionIfNeeded(sessionId, config, initialMemories);
@@ -2299,7 +2324,7 @@ export class AgentRunner {
             response.content || '',
             response.toolCalls,
             lastBatchHadFailure,
-            lastMutationSequence > lastVerificationSequence
+            missionVerificationPending
           );
           await this.gateway.sendStreamEvent(sessionId, {
             type: 'assistant_update',
@@ -2427,13 +2452,28 @@ export class AgentRunner {
             .join(' | ');
           for (const result of results) {
             toolSequence += 1;
-            if (result.success && this.isMutationToolCall(result.call)) {
-              lastMutationSequence = toolSequence;
+            // Phase 12 Move 3 — annotate the recorded execution with the tool's
+            // role so the engine owns mutation/verification state. The
+            // per-turn sequence counters survive only as a task-less fallback.
+            const kind: TaskToolKind = result.success && this.isMutationToolCall(result.call)
+              ? 'mutation'
+              : result.success && this.isVerificationToolCall(result.call)
+                ? 'verification'
+                : 'inspection';
+            if (kind !== 'inspection' && missionTaskId && result.executionId) {
+              try {
+                await taskEngine.recordToolKind(missionTaskId, result.executionId, kind);
+              } catch { /* tool annotation is advisory; engine state stays authoritative */ }
             }
-            if (result.success && this.isVerificationToolCall(result.call)) {
-              lastVerificationSequence = toolSequence;
+            if (!missionTaskId) {
+              if (kind === 'mutation') lastMutationSequence = toolSequence;
+              if (kind === 'verification') lastVerificationSequence = toolSequence;
             }
           }
+          // Phase 12 Move 3 — the engine-owned pending state.
+          missionVerificationPending = missionTaskId
+            ? taskEngine.verificationPending(missionTaskId)
+            : (lastMutationSequence > lastVerificationSequence);
           if (missionTaskId) {
             try {
               const batchPct = Math.min(90, 10 + Math.round((totalToolCalls / Math.max(1, maxToolCalls)) * 80));
@@ -2798,12 +2838,18 @@ export class AgentRunner {
           };
           let action: TaskTurnAction;
           let reason: string | undefined;
+          let verifyDiagnosis: TaskDiagnosis | undefined;
           if (missionTaskId) {
             const turnResult = await taskEngine.runTurn(missionTaskId, { turn: missionTurn, evidence }, {
-              completionVerdict: this.completionVerdictHook
+              completionVerdict: this.completionVerdictHook,
+              // Phase 12 Move 3 — the engine runs its in-loop diagnose authority
+              // (verify verdict) with the host's repository evidence, the same
+              // diagnoser failure recovery uses.
+              diagnoser: this.buildMissionDiagnoser(msg.content, msg.metadata?.projectWorkspacePath)
             });
             action = turnResult.action;
             reason = turnResult.reason;
+            verifyDiagnosis = turnResult.diagnosis;
           } else {
             // Degraded path (beginMissionTask failed): the host still answers
             // the completion question, but there is no canonical Task to
@@ -2815,13 +2861,27 @@ export class AgentRunner {
 
           if (action === 'continue' || action === 'verify') {
             forcedContinuations += 1;
+            const checkParts = [
+              `Runtime completion check: ${reason || 'The mission is not yet complete.'}`
+            ];
+            if (action === 'verify' && verifyDiagnosis) {
+              // Phase 12 Move 3 — render the engine's canonical verification
+              // evidence so the model continues from recorded results.
+              checkParts.push(`Verification evidence: ${
+                Array.isArray(verifyDiagnosis.matchedFiles) && verifyDiagnosis.matchedFiles.length > 0
+                  ? `goal-matched files: ${verifyDiagnosis.matchedFiles.join(', ')}`
+                  : 'no goal-matched files'
+              }${
+                verifyDiagnosis.evidence ? `\n${verifyDiagnosis.evidence}` : ''
+              }`);
+            }
+            checkParts.push(
+              'Continue autonomously now. Use the next required tool, recover from the error, or run verification.',
+              'Do not repeat the draft and do not ask the user to continue.'
+            );
             this.memory.add(sessionId, {
               role: 'system',
-              content: [
-                `Runtime completion check: ${reason || 'The mission is not yet complete.'}`,
-                'Continue autonomously now. Use the next required tool, recover from the error, or run verification.',
-                'Do not repeat the draft and do not ask the user to continue.'
-              ].join('\n'),
+              content: checkParts.join('\n'),
               timestamp: Date.now(),
               metadata: { type: 'runtime_completion_check' }
             });
