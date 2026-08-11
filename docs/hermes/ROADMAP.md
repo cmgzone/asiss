@@ -289,5 +289,22 @@ consumers and pre-existing hook subscribers see the same names unchanged.
 Smoke-baseline section 11 asserts both canonical forwarding and the
 aliases (success, failure, projectId, output, timing); the e2e runtime
 mission asserts before_tool/after_tool/tool_error all arrive via the
-bridge during a real mission. Remaining Phase 12: adopt taskEngine.run()
-for missions — the one execution authority.
+bridge during a real mission.
+
+**Phase 12, final step — pre-migration execution map (done, audit only).**
+`docs/hermes/EXECUTION_MAP.md` maps all 22 mission-loop operations against
+TaskEngine before any migration code: 11 already owned (A), 4 already
+delegated to satellite engines (B: context/model/tools/checkpoints), 8 that
+must stay host-side (C: streaming/UI, session memory, model client, batch
+orchestration, completion + verification decisions, retry-as-loop,
+repair-as-model-turn, approval, turn budgets), and **2 missing engine
+capabilities (D): a multi-turn execution contract** (`run()`/`runExecution`
+call the executor once and complete/fail — there is no per-turn primitive
+that owns "keep looping until a verdict") **and a completion-verdict hook**
+(the engine records completion but the `completionBlocked` heuristic is
+host-owned). It also flags the near-misses: `taskEngine.verify` (terminal,
+unused) and `taskEngine.retry` (FAILED-path, the mission never enters
+FAILED mid-loop — it uses `diagnose`'s EXECUTING → VERIFYING → EXECUTING).
+Recommended migration order: turn contract → completion verdict →
+verify/diagnose in-loop → delegate the loop body as the executor hook, each
+sliced with the e2e mission as the gate.
