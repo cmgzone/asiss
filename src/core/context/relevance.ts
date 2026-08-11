@@ -86,3 +86,28 @@ export function selectRelevantWithRecency<T>(
     .sort((a, b) => b.score - a.score);
   return scored.slice(0, limit).map((s) => s.item);
 }
+
+/**
+ * Stem-aware overlap: counts a hit when a query token shares a prefix with a
+ * haystack part, not only when it is a plain substring. "authentication"
+ * therefore matches the symbol "authenticate" and the path segment "auth";
+ * "tests" matches "test". Used where the goal is a natural-language phrase
+ * and the haystack is an identifier/path — the Phase 8 symbol matcher.
+ * Returns hits/tokens, same 0-1 shape as relevanceScore.
+ */
+export function stemOverlap(query: string, haystack: string): number {
+  const tokens = significantTokens(query);
+  if (tokens.length === 0) return 0;
+  const parts = String(haystack || '')
+    .toLowerCase()
+    .split(/[^a-z0-9_]+/)
+    .filter((part) => part.length >= 4);
+  if (parts.length === 0) return 0;
+  let hits = 0;
+  for (const token of tokens) {
+    if (parts.some((part) => part.includes(token) || (token.length >= 5 && (token.startsWith(part) || part.startsWith(token))))) {
+      hits += 1;
+    }
+  }
+  return hits / tokens.length;
+}

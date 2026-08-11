@@ -115,8 +115,14 @@ rebuild; `repository.persistent: false` restores the lightweight walk), and
 `matchBySymbols` resolves goals to files via path + symbol + import signals
 with test/config bonuses ("fix authentication" -> src/auth/auth.ts and
 tests/auth/*; "add tests" surfaces test files; "docker deploy" surfaces
-Dockerfile). Verified by `scripts/smoke-repo-index.ts` (8 sections:
-extraction, imports, classification, full index, symbol matching, disk
-round-trip, incremental refresh, engine integration) and all prior smokes.
+Dockerfile). The repository section now also renders a per-goal
+"Files relevant to the current goal" hint each turn, driven by the same
+`agent.context.repository` config (`goalHints.enabled: false` opts back into
+the plain path list): symbol/test/config reasons per file, powered by a
+stem-aware matcher ("authentication" hits `authenticate`/`auth`) and gated so
+unrelated goals inject no noise. Verified by `scripts/smoke-repo-index.ts`
+(9 sections: extraction, imports, classification, full index, symbol
+matching, disk round-trip, incremental refresh, engine integration, goal
+hints) and all prior smokes.
 Phase 9 next: keep the index warm — a lightweight watcher or on-demand
 refresh in the mission loop so symbols never go stale during long sessions.

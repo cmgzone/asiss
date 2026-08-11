@@ -36,15 +36,16 @@ import {
 import {
   getRepositoryIndex,
   matchBySymbols,
+  PersistentIndexOptions,
   PersistentRepositoryIndex,
-  PersistentIndexOptions
+  renderGoalFileHints
 } from './repo-index';
 
 export interface ContextEngineConfig {
   /** Token budget for the assembled context. Default 32000. */
   maxTokens?: number;
   /** Repository context: surfaced when enabled and a workspace exists. */
-  repository?: { enabled?: boolean; persistent?: boolean; maxFiles?: number; maxDepth?: number; maxListed?: number; dataRoot?: string };
+  repository?: { enabled?: boolean; persistent?: boolean; maxFiles?: number; maxDepth?: number; maxListed?: number; dataRoot?: string; goalHints?: { enabled?: boolean; maxFiles?: number } };
   /** Summarize long sections via an injectable model. */
   summarize?: { enabled?: boolean; maxChars?: number };
   /** Cap history render truncation (chars per memory). Default 20000. */
@@ -133,11 +134,30 @@ export class ContextEngine {
     return index;
   }
 
-  /** Rendered repository context block for a workspace + goal. */
+  /**
+   * Rendered repository context block for a workspace + goal. When goal hints
+   * are enabled (the default once the repository section is on), the plain
+   * path-matched file list is replaced by the per-goal symbol-aware hint.
+   */
   repositorySection(root: string, goal: string): string {
     const index = this.indexRepository(root);
     if (!index) return '';
-    return renderRepositoryContext(index, goal, { maxListed: this.config.repository?.maxListed ?? 40 });
+    const cfg = this.config.repository || {};
+    if (cfg.goalHints?.enabled === false) {
+      return renderRepositoryContext(index, goal, { maxListed: cfg.maxListed ?? 40 });
+    }
+    const staticText = renderRepositoryContext(index, goal, { relevantFiles: [], maxListed: cfg.maxListed ?? 40 });
+    const hints = this.goalFilesSection(root, goal);
+    return hints ? `${staticText}
+
+${hints}` : staticText;
+  }
+
+  /** Per-goal "files relevant to the current goal" hint (symbol-aware). */
+  goalFilesSection(root: string, goal: string): string {
+    const index = this.indexRepository(root);
+    if (!index) return '';
+    return renderGoalFileHints(index, goal, { maxFiles: this.config.repository?.goalHints?.maxFiles ?? 8 });
   }
 
   /** Relevant files for the goal: symbol-aware when the index is persistent. */

@@ -18,11 +18,12 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { relevanceScore } from './relevance';
+import { relevanceScore, significantTokens, stemOverlap } from './relevance';
 import {
   fileRelevance,
   IndexedFile,
   indexWorkspace,
+  matchFiles,
   RepositoryContextOptions,
   RepositoryIndex
 } from './repository-context';
@@ -415,17 +416,19 @@ export function matchBySymbols(index: PersistentRepositoryIndex, goal: string, l
   const testGoal = /\b(?:tests?|specs?|verif\w*|cover\w*|assert\w*)\b/.test(lower);
   const configGoal = /\b(?:config\w*|setup\w*|build\w*|deploy\w*|docker\w*|package\w*|install\w*)\b/.test(lower);
   const scored = index.files.map((file) => {
-    let score = fileRelevance(file, goal);
+    // Path relevance: exact overlap + stem hits (authentication ~ auth) +
+    // depth bonus; symbols/imports add ranked signal on top.
+    let score = fileRelevance(file, goal) + stemOverlap(goal, file.path);
     for (const sym of file.symbols) {
-      const s = relevanceScore(goal, sym.name);
+      const s = stemOverlap(goal, sym.name);
       if (s > 0) score += s * 1.2;
     }
     for (const name of file.importedNames) {
-      const s = relevanceScore(goal, name);
+      const s = stemOverlap(goal, name);
       if (s > 0) score += s * 0.5;
     }
     for (const imp of file.imports) {
-      const s = relevanceScore(goal, imp);
+      const s = stemOverlap(goal, imp);
       if (s > 0) score += s * 0.3;
     }
   if (file.isTest) score += testGoal ? 0.4 : -0.15;
@@ -437,4 +440,58 @@ export function matchBySymbols(index: PersistentRepositoryIndex, goal: string, l
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((s) => s.file);
+}
+
+/** ------------------------------------------------------------------ */
+/* Per-goal file hints for the mission prompt.                          */
+/** ------------------------------------------------------------------ */
+
+export interface GoalFileHintsOptions {
+  /** Cap the hint list. Default 8. */
+  maxFiles?: number;
+}
+
+function isPersistent(index: RepositoryIndex): index is PersistentRepositoryIndex {
+  return (index as PersistentRepositoryIndex).version !== undefined;
+}
+
+/**
+ * True when a file has real goal signal beyond the index's depth bonus —
+ * a path/symbol/import stem hit. Prevents hint noise for unrelated goals.
+ */
+function hasGoalSignal(index: PersistentRepositoryIndex, goal: string): boolean {
+  const tokens = significantTokens(goal);
+  if (tokens.length === 0) return false;
+  return index.files.some(
+    (file) =>
+      stemOverlap(goal, file.path) > 0 ||
+      file.symbols.some((s) => stemOverlap(goal, s.name) > 0) ||
+      file.importedNames.some((n) => stemOverlap(goal, n) > 0) ||
+      file.imports.some((i) => stemOverlap(goal, i) > 0)
+  );
+}
+
+/**
+ * Render a compact, per-goal "files relevant to the current goal" hint.
+ * Persistent indexes get symbol/test/config justification per file; the
+ * lightweight index falls back to a plain path list. Empty when nothing
+ * matches — safe to drop from the prompt.
+ */
+export function renderGoalFileHints(index: RepositoryIndex, goal: string, options: GoalFileHintsOptions = {}): string {
+  const max = options.maxFiles ?? 8;
+  const lines = ['Files relevant to the current goal:'];
+  if (isPersistent(index)) {
+    if (!hasGoalSignal(index, goal)) return '';
+    const files = matchBySymbols(index, goal, max);
+    for (const file of files) {
+      const syms = file.symbols.slice(0, 4).map((s) => s.name).join(', ');
+      const why = file.isTest ? 'tests' : file.isConfig ? 'config' : syms ? `exports ${syms}` : '';
+      lines.push(`- ${file.path}${why ? ` (${why})` : ''}`);
+    }
+    return lines.join('\n');
+  }
+  const files = matchFiles(index, goal, max);
+  if (files.length === 0 || !files.some((f) => relevanceScore(goal, f.path) > 0)) return '';
+  for (const file of files) lines.push(`- ${file.path}`);
+  return lines.join('\n');
 }

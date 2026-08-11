@@ -287,6 +287,47 @@ const helper = require('./util');
   }
 }
 
+// ---------------------------------------------------------------------
+// 9. Per-goal file hints in the mission prompt section
+// ---------------------------------------------------------------------
+{
+  const root = tmpRepo('repo-index-9-');
+  const dataRoot = tmpRepo('repo-data-9-');
+  try {
+    write(root, 'src/auth/auth.ts', 'export function authenticate(u: string) { return true; }\nexport function refreshToken() { return "t"; }\n');
+    write(root, 'src/payments/billing.ts', 'export function charge(amount: number) {}\n');
+    write(root, 'src/auth/auth.test.ts', 'test("authenticates", () => {});\n');
+    const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+
+    // Default: repository section renders the static block + the per-goal
+    // symbol-aware hint with reasons; the plain list is replaced.
+    const section = engine.repositorySection(root, 'fix the authentication bug');
+    assert.ok(section.includes('Files relevant to the current goal:'), 'hint header present by default');
+    assert.ok(section.includes('- src/auth/auth.ts (exports authenticate, refreshToken)'), 'hint carries symbol reasons');
+    const testSection = engine.repositorySection(root, 'verify login works with tests');
+    assert.ok(testSection.includes('- src/auth/auth.test.ts (tests)'), 'hint carries test classification on test goals');
+    assert.ok(!section.includes('Files most relevant to the current goal:'), 'plain list replaced by hint');
+
+    // Test goal: the test file surfaces via goalFilesSection with reasons.
+    const hint = engine.goalFilesSection(root, 'verify login works with tests');
+    assert.ok(hint.includes('src/auth/auth.test.ts'), 'test goal surfaces test file in hint');
+    assert.ok(hint.indexOf('src/auth/auth.test.ts') < hint.indexOf('src/auth/auth.ts'), 'test file ranks above source for test goal');
+
+    // Opt-out: goalHints.enabled === false restores the plain path list.
+    const plain = new ContextEngine({ config: { repository: { dataRoot, goalHints: { enabled: false } } } });
+    const plainSection = plain.repositorySection(root, 'fix the authentication bug');
+    assert.ok(plainSection.includes('Files most relevant to the current goal:'), 'plain list restored on opt-out');
+    assert.ok(!plainSection.includes('Files relevant to the current goal:'), 'hint suppressed on opt-out');
+
+    // Non-matching goal -> no hint block at all.
+    const empty = engine.repositorySection(root, 'zzz nonexistent topic qqq');
+    assert.ok(!empty.includes('Files relevant to the current goal:'), 'no hint when nothing matches');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+  }
+}
+
 console.log(JSON.stringify({
   symbols: true,
   imports: true,
@@ -295,7 +336,8 @@ console.log(JSON.stringify({
   symbolMatching: true,
   roundTrip: true,
   incrementalRefresh: true,
-  engineIntegration: true
+  engineIntegration: true,
+  goalHints: true
 }));
 
 main();
