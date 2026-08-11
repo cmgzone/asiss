@@ -86,6 +86,7 @@ export class ResilientModelProvider implements ModelProvider {
   readonly name: string;
   private readonly candidates: ModelProvider[];
   private readonly cooldownMs: number;
+  private lastUsedProviderId = '';
 
   constructor(primary: ModelProvider, fallbacks: ModelProvider[], config: ModelResilienceConfig = {}) {
     const seen = new Set<string>();
@@ -121,6 +122,11 @@ export class ResilientModelProvider implements ModelProvider {
     return response;
   }
 
+  /** Provider that fulfilled the latest successful request (for ModelEngine). */
+  getLastUsedProviderId(): string {
+    return this.lastUsedProviderId;
+  }
+
   private async run(action: (provider: ModelProvider) => Promise<ModelResponse>): Promise<ModelResponse> {
     if (this.candidates.length === 0) throw new Error('No configured model providers are available.');
     const available = this.candidates.filter(provider => !modelResilienceManager.isCoolingDown(provider.id));
@@ -137,6 +143,7 @@ export class ResilientModelProvider implements ModelProvider {
         const response = await action(provider);
         this.assertUsableResponse(response, provider);
         modelResilienceManager.recordSuccess(provider);
+        this.lastUsedProviderId = provider.id;
         return response;
       } catch (error: any) {
         const cooldown = this.cooldownFor(error);
@@ -153,6 +160,7 @@ export class ResilientModelProvider implements ModelProvider {
             const retry = await action(provider);
             this.assertUsableResponse(retry, provider);
             modelResilienceManager.recordSuccess(provider);
+            this.lastUsedProviderId = provider.id;
             return retry;
           } catch (retryError: any) {
             failures.push(`${provider.name} (retry): ${String(retryError?.message || retryError).slice(0, 300)}`);

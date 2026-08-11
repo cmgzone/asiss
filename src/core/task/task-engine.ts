@@ -440,6 +440,15 @@ export class TaskEngine {
     return this.persist(entity.addDecision(decision).record);
   }
 
+  /**
+   * Attach the model selected for this task. Phase 6 keeps the choice on the
+   * canonical Task so later telemetry/evaluation can relate outcome to model.
+   */
+  async assignModel(taskId: string, model: string): Promise<Task> {
+    const entity = new TaskEntity(this.require(taskId));
+    return this.persist(entity.with({ model }).record);
+  }
+
   /** Record cost (tokens/usd) on the task. */
   async recordCost(taskId: string, cost: TaskCost): Promise<Task> {
     const entity = new TaskEntity(this.require(taskId));

@@ -72,6 +72,7 @@ import { withModelRetry } from '../core/retry-handler';
 import { guardrailManager } from '../core/guardrails';
 import { costTracker } from '../core/cost-tracker';
 import { modelRouter } from '../core/model-router';
+import { modelEngine } from '../core/model';
 import { chainOfThought } from '../core/chain-of-thought';
 import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
@@ -1827,18 +1828,6 @@ ${context ? `\nSystem Context: ${context}` : ''}
           finalSystemPrompt += '\n\nFINAL RESPONSE REQUIRED: Tool execution is closed for this task. Return the complete user-facing result now using evidence already in context. Do not emit a tool call, do not promise future work, and do not repeat a progress update.';
         }
 
-        // Call Model (Dynamic Selection w/ Model Router)
-        // Explicit rules first, then level-aware capability routing.
-        let routedModelId: string | null = null;
-        if (modelRouter.isEnabled()) {
-          routedModelId = modelRouter.selectModelId(msg.content);
-        } else if (modelRouter.hasProviders()) {
-          routedModelId = modelRouter.selectModelIdByLevel(msg.content);
-        }
-        const currentModel = routedModelId ? this.getModelById(routedModelId) : this.getModel();
-        const turnRunId = uuidv4();
-        const turnMessageId = uuidv4();
-
         // Stream model output live to structured-streaming channels (web):
         // lazily open a message bubble on the first chunk, append everything
         // after. Tool-turn text is finalized as a completed bubble once the
@@ -1856,10 +1845,40 @@ ${context ? `\nSystem Context: ${context}` : ''}
         const modelTools = forceFinalAnswer
           ? []
           : allTools.filter(tool => !missionDisabledTools.has(String(tool?.name || '')));
+
+        // Phase 6 ModelEngine: score providers against the canonical Task
+        // (capability, observed reliability/tool success, context fit, latency
+        // and cost). Explicit ModelRouter rules remain hard user overrides.
+        const missionTask = missionTaskId ? taskEngine.get(missionTaskId) : undefined;
+        const selection = modelRouter.hasProviders()
+          ? modelEngine.select({
+              goal: msg.content,
+              task: missionTask,
+              contextText: `${prompt}\n${finalSystemPrompt}`,
+              requiresTools: modelTools.length > 0,
+              attachmentCount: attachments.length,
+              desiredLevel: modelRouter.desiredLevelFor(msg.content) || undefined
+            }, ModelRegistry.getAll(), { pinnedProviderId: modelRouter.explicitModelIdFor(msg.content) || undefined })
+          : null;
+        const currentModel = selection ? this.getModelById(selection.provider.id) : this.getModel();
+        if (missionTaskId && selection && missionTask?.model !== selection.provider.id) {
+          try {
+            await taskEngine.assignModel(missionTaskId, selection.provider.id);
+            await taskEngine.recordDecision(
+              missionTaskId,
+              `ModelEngine selected '${selection.provider.id}' (${selection.score.score}/100).`,
+              JSON.stringify({ profile: selection.profile, score: selection.score, pinned: selection.pinned })
+            );
+          } catch { /* model selection telemetry must not interrupt a mission */ }
+        }
+        const turnRunId = uuidv4();
+        const turnMessageId = uuidv4();
         let response;
         let turnReasoning: string | undefined;
         let fullStreamContent = '';
         let liveStreamed = false;
+        const modelStartedAt = Date.now();
+        try {
         if (currentModel.generateStream) {
           response = await withModelRetry(() => currentModel.generateStream!(prompt, finalSystemPrompt, modelTools, (chunk) => {
             if (!chunk) return;
@@ -1880,6 +1899,14 @@ ${context ? `\nSystem Context: ${context}` : ''}
             () => currentModel.generate(prompt, finalSystemPrompt, modelTools, attachments),
             'Generate'
           );
+        }
+        const actualProviderId = typeof (currentModel as any).getLastUsedProviderId === 'function'
+          ? (currentModel as any).getLastUsedProviderId() || selection?.provider.id || currentModel.id
+          : selection?.provider.id || currentModel.id;
+        modelEngine.recordModelOutcome(actualProviderId, { success: true, latencyMs: Date.now() - modelStartedAt });
+        } catch (modelError) {
+          modelEngine.recordModelOutcome(selection?.provider.id || currentModel.id, { success: false, latencyMs: Date.now() - modelStartedAt });
+          throw modelError;
         }
         turnReasoning = (response as any)?.reasoning;
 
@@ -2137,6 +2164,10 @@ ${context ? `\nSystem Context: ${context}` : ''}
                   }
                 }
               );
+              const modelForToolOutcome = typeof (currentModel as any).getLastUsedProviderId === 'function'
+                ? (currentModel as any).getLastUsedProviderId() || selection?.provider.id || currentModel.id
+                : selection?.provider.id || currentModel.id;
+              modelEngine.recordToolOutcome(modelForToolOutcome, result.success);
               // Host-level session memory for semantic fallback / dynamic resolution.
               if (result.fallback && result.fallback.resolved !== result.fallback.requested) {
                 this.memory.add(sessionId, {

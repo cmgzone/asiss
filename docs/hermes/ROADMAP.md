@@ -20,7 +20,7 @@
 | 3 | Event system | TaskEventBus bridged to hookManager (audit + subscribers); events carry taskId/sessionId | [x] |
 | 4 | ToolEngine | Extract tool dispatch from AgentRunner (`src/core/tools/`) | [x] |
 | 5 | PolicyEngine | ALLOW / ASK / DENY before tool execution | [x] |
-| 6 | ModelEngine | Capability/reliability/cost scoring instead of naive routing | [ ] |
+| 6 | ModelEngine | Capability/reliability/cost scoring instead of naive routing | [x] |
 | 7 | ContextEngine | Budgeted relevance-based context construction | [ ] |
 | 8 | Repository intelligence | Symbol/file/test index for coding tasks | [ ] |
 | 9 | ExecutionScheduler | Real parallelism: deps, priorities, timeouts, retries | [ ] |
@@ -81,5 +81,16 @@ decision record on the canonical Task. The web channel routes
 approval card with Allow/Deny buttons; unresolved requests fail closed after
 10 minutes. Verified by `scripts/smoke-policy.ts` (15 sections) and by all
 prior smokes unchanged.
-Phase 6 next: ModelEngine — capability/reliability/cost scoring instead of
-naive model routing.
+Phase 6 is also done: `src/core/model/` provides a task-aware `ModelEngine`.
+It profiles the active canonical Task and scores routable providers by
+capability fit, observed model reliability, observed tool-call success, context
+fit, latency, and actual CostTracker history. Its lightweight durable metrics
+are stored locally in ignored `model_metrics.json`. Explicit ModelRouter rules
+remain hard user overrides, but empty level rules now use ModelEngine rather
+than a first-match provider. AgentRunner records the selected provider and the
+explainable score on the Task, and feeds model/tool outcomes back into the
+engine; resilient providers expose which provider actually fulfilled the call
+so performance is attributed accurately. Verified by
+`scripts/smoke-model-engine.ts` and the end-to-end runtime smoke.
+
+Phase 7 next: ContextEngine — budgeted relevance-based context construction.

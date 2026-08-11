@@ -16,6 +16,11 @@ async function main() {
       autoContinue: { enabled: true, maxBatches: 1, notify: false },
       maxPrematureCompletions: 4
     },
+    modelRouter: {
+      enabled: true,
+      rules: [],
+      levelMap: { simple: 'low', medium: 'medium', complex: 'high' }
+    },
     execution: { allowProcessCwd: true }
   }, null, 2));
   // Keep all data-root managers (task store, checkpoints, hooks) hermetic.
@@ -156,6 +161,15 @@ async function main() {
   );
   assert.ok(mission.progress === 100, 'completed task has 100% progress');
   assert.strictEqual(typeof mission.timing.durationMs, 'number', 'completed task records duration');
+  assert.strictEqual(mission.model, fakeModel.id, 'ModelEngine records the selected provider on the canonical Task');
+  assert.ok(
+    mission.decisions.some((decision) => decision.summary.includes(`ModelEngine selected '${fakeModel.id}'`)),
+    'ModelEngine stores its explainable selection decision on the Task'
+  );
+  const { modelEngine } = await import('../src/core/model');
+  const modelPerformance = modelEngine.getPerformance(fakeModel.id);
+  assert.ok(modelPerformance.successfulModelCalls >= 6, 'ModelEngine records successful model requests');
+  assert.ok(modelPerformance.toolCalls >= 3, 'ModelEngine records outcomes for model-proposed tool calls');
 
   // The bridge forwarded lifecycle events onto the existing hook bus.
   assert.ok(observedHooks.includes('TaskCreated'), 'hookManager observed TaskCreated via the bridge');
@@ -205,6 +219,7 @@ async function main() {
     structuredFinals: finalDone.length,
     legacyFinalChunks: streamChunks.filter(text => text.includes('Fixed the file and verified')).length,
     responses: responses.length,
+    modelEngineIntegrated: true,
     patchUpdateVerified: true,
     portableShellVerified: true
   }, null, 2));

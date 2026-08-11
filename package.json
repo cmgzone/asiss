@@ -35,6 +35,7 @@
     "smoke:learning": "ts-node scripts/smoke-learning-loop.ts",
     "smoke:executable-skills": "ts-node scripts/smoke-executable-skills.ts",
     "smoke:model-resilience": "ts-node scripts/smoke-model-resilience.ts",
+    "smoke:model-engine": "ts-node scripts/smoke-model-engine.ts",
     "smoke:checkpoints": "ts-node scripts/smoke-checkpoints.ts",
     "smoke:execution-backends": "ts-node scripts/smoke-execution-backends.ts",
     "smoke:execute-workflow": "ts-node scripts/smoke-execute-workflow.ts",

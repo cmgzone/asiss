@@ -15,6 +15,7 @@ agent_runs.json
 analytics_data.json
 background_goals.json
 cost_data.json
+model_metrics.json
 dynamic_tools.json
 main_goals.json
 main_goals.json.corrupted.bak

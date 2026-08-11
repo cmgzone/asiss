@@ -174,6 +174,17 @@ export class ModelRouter {
     }
 
     /**
+     * Return only a user-configured explicit model rule. Capability selection
+     * itself belongs to ModelEngine (Phase 6), so an empty rule intentionally
+     * returns null here rather than making the old level-only selection.
+     */
+    explicitModelIdFor(message: string): string | null {
+        if (!this.config.enabled || this.config.rules.length === 0) return null;
+        const rule = this.config.rules.find(item => item.level === this.classifyComplexity(message));
+        return rule?.modelId || null;
+    }
+
+    /**
      * Check if router is enabled and configured.
      */
     isEnabled(): boolean {
