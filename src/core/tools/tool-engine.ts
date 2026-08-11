@@ -28,8 +28,8 @@ import {
 } from './tool-registry';
 import { normalizeToolRequest, getAliasCoverage } from './tool-selector';
 import { validateToolArguments } from './tool-validator';
-import { authorizeNativeTool } from './tool-policy';
 import { executeNativeSkill, executeMcpTool, CheckpointGateway } from './tool-executor';
+import { PolicyEngine, PolicyContext, policyEngine as defaultPolicyEngine } from '../policy';
 import { TaskEngine, taskEngine as defaultTaskEngine } from '../task';
 import { analyticsTracker as defaultAnalytics } from '../analytics-tracker';
 
@@ -45,7 +45,9 @@ export interface ToolEngineDeps {
   checkpoints?: CheckpointGateway;
   taskEngine?: TaskEngine;
   analytics?: ToolAnalytics;
-  /** Off by default: enforcing allow/deny lists changes behavior; wired deliberately in Phase 5. */
+  /** PolicyEngine (Phase 5). Defaults to a pure allow-mode engine. */
+  policyEngine?: PolicyEngine;
+  /** Compat: allow/deny lists enforced by a dedicated PolicyEngine when set. */
   enforceAllowDeny?: boolean;
   allowedTools?: string[];
   deniedTools?: string[];
@@ -62,9 +64,7 @@ export class ToolEngine {
   private readonly checkpoints?: CheckpointGateway;
   private readonly taskEngine: TaskEngine;
   private readonly analytics: ToolAnalytics;
-  private readonly enforceAllowDeny: boolean;
-  private readonly allowedTools?: string[];
-  private readonly deniedTools?: string[];
+  private readonly policyEngine: PolicyEngine;
 
   constructor(deps: ToolEngineDeps) {
     this.skills = deps.skills;
@@ -73,9 +73,14 @@ export class ToolEngine {
     this.checkpoints = deps.checkpoints;
     this.taskEngine = deps.taskEngine || defaultTaskEngine;
     this.analytics = deps.analytics || defaultAnalytics;
-    this.enforceAllowDeny = deps.enforceAllowDeny === true;
-    this.allowedTools = deps.allowedTools;
-    this.deniedTools = deps.deniedTools;
+    this.policyEngine = deps.policyEngine
+      || (deps.enforceAllowDeny || deps.allowedTools || deps.deniedTools
+        ? new PolicyEngine({
+            enforceAllowDeny: deps.enforceAllowDeny,
+            allowedTools: deps.allowedTools,
+            deniedTools: deps.deniedTools
+          })
+        : defaultPolicyEngine);
   }
 
   /** Unified catalog of every currently-known tool (native + MCP). */
@@ -113,21 +118,21 @@ export class ToolEngine {
         return errorResult(normalized.name, validation.reason || 'Invalid tool arguments.');
       }
 
-      // ---- Authorize (native tools only; MCP/dynamic are not workspace-gated) ----
-      if (isNative) {
-        const verdict = authorizeNativeTool(normalized, ctx, {
-          enforceAllowDeny: this.enforceAllowDeny,
-          allowedTools: this.allowedTools,
-          deniedTools: this.deniedTools
+      // ---- Authorize (PolicyEngine: ALLOW / ASK / DENY) ----
+      // Rules default to allow, so MCP/dynamic tools keep running as before;
+      // the always-on rules (workspace guard, allow/deny lists, agent
+      // permissions) scope themselves to native tools exactly like Phase 4.
+      const policyCtx: PolicyContext = { ...ctx, native: isNative };
+      const verdict = await this.policyEngine.evaluate(normalized, policyCtx);
+      if (verdict.decision === 'DENY') {
+        const denialReason = verdict.reasons.join('; ') || 'Tool call denied by policy.';
+        await this.finishTaskRecord(ctx.taskId, taskRecord, { status: 'FAILED', error: denialReason });
+        this.analytics.recordToolCallResult(ctx.sessionId || '', normalized.name, false);
+        return errorResult(normalized.name, denialReason, {
+          denied: true,
+          reason: denialReason,
+          policy: verdict
         });
-        if (verdict.decision === 'DENY') {
-          await this.finishTaskRecord(ctx.taskId, taskRecord, { status: 'FAILED', error: verdict.reason });
-          this.analytics.recordToolCallResult(ctx.sessionId || '', normalized.name, false);
-          return errorResult(normalized.name, verdict.reason || 'Tool call denied by policy.', {
-            denied: true,
-            reason: verdict.reason
-          });
-        }
       }
 
       // ---- Execute ----

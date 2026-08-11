@@ -21,6 +21,12 @@ export interface ToolContext {
   config?: any;
   /** Live output sink (shell streaming). */
   stream?: (chunk: string) => void;
+  /** PolicyEngine overrides (Phase 5): per-call approval handler. */
+  approve?: (verdict: any, ctx: any) => Promise<boolean> | boolean;
+  /** Agent permission allow-list; tools outside it are DENIED when provided. */
+  agentPermissions?: string[];
+  /** Host-computed task risk for policy evaluation ('low' | 'medium' | 'high'). */
+  taskRisk?: 'low' | 'medium' | 'high';
 }
 
 export type ToolSource = 'native' | 'mcp' | 'dynamic' | 'learned';
@@ -41,6 +47,8 @@ export interface ToolResult {
   /** True when the policy layer refused the call (workspace/allowlist). */
   denied?: boolean;
   reason?: string;
+  /** The full PolicyEngine verdict (checks + risk) when policy ran. */
+  policy?: any;
 }
 
 /** JSON-stringify a raw tool output, passing strings through untouched. */

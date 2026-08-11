@@ -19,7 +19,7 @@
 | 2 | TaskEngine ownership | AgentRunner creates a Task per mission, records tools/checkpoints/cost/progress, finalizes on every exit | [x] |
 | 3 | Event system | TaskEventBus bridged to hookManager (audit + subscribers); events carry taskId/sessionId | [x] |
 | 4 | ToolEngine | Extract tool dispatch from AgentRunner (`src/core/tools/`) | [x] |
-| 5 | PolicyEngine | ALLOW / ASK / DENY before tool execution | [ ] |
+| 5 | PolicyEngine | ALLOW / ASK / DENY before tool execution | [x] |
 | 6 | ModelEngine | Capability/reliability/cost scoring instead of naive routing | [ ] |
 | 7 | ContextEngine | Budgeted relevance-based context construction | [ ] |
 | 8 | Repository intelligence | Symbol/file/test index for coding tasks | [ ] |
@@ -38,7 +38,7 @@
 
 ## Current milestone
 
-Phases 0-4 are complete. `AgentRunner.processMessage` now creates a canonical
+Phases 0-5 are complete. `AgentRunner.processMessage` now creates a canonical
 Task per mission (`kind: 'mission'`), advances it through the lifecycle
 (CREATED -> ANALYZING -> PLANNING -> EXECUTING), records tool executions
 (ToolStarted/ToolCompleted/ToolFailed), automatic workspace checkpoints, token
@@ -59,4 +59,18 @@ semantic fallback, and telemetry/task recording). AgentRunner's
 resolveFallbackSkills, adaptFallbackArgs, closestToolNames) are deleted.
 Verified by `scripts/smoke-tools.ts` (7 lifecycle sections) and by the
 end-to-end `smoke-agent-runtime` mission running through the new pipeline.
-Phase 5 next: a real PolicyEngine (ALLOW / ASK / DENY) in front of execution.
+Phase 5 is also done: `src/core/policy/` now owns authorization. The
+PolicyEngine evaluates every tool request through composable rules
+(workspace-guard, allow/deny lists, agent permissions, destructive-command,
+secret-scan, network-tools, file-writes, elevated-command) and returns an
+ALLOW / ASK / DENY verdict with per-rule checks and a risk score for
+observability. ASK verdicts resolve through an approval handler (engine-level
+or per-call) with a configurable default outcome. The DEFAULT configuration is
+pure allow mode — every rule defaults to 'allow' and unresolved ASKs default
+to allow — so adopting the engine changed nothing in production; the Phase 4
+workspace guard and allow/deny lists moved into the engine with identical
+scope (native tools). ToolEngine now runs the PolicyEngine for every tool
+before execution and attaches the full verdict to denied results. Verified by
+`scripts/smoke-policy.ts` (14 sections) and by all prior smokes unchanged.
+Phase 6 next: ModelEngine — capability/reliability/cost scoring instead of
+naive model routing.
