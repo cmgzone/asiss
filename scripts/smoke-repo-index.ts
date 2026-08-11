@@ -22,7 +22,7 @@ import assert from 'assert';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { ContextEngine, resolveSymbols } from '../src/core/context';
+import { ContextEngine, resolveSymbols, warmOnToolEvents } from '../src/core/context';
 import { TaskEventBus } from '../src/core/task';
 import { SymbolSkill } from '../src/skills/symbol';
 import {
@@ -41,6 +41,8 @@ import {
 function tmpRepo(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 function write(root: string, rel: string, content: string): string {
   const full = path.join(root, rel);
@@ -495,6 +497,53 @@ async function main(): Promise<void> {
     }
   }
 
+
+  // ---- 13. Event-driven warm index (Phase 9) ----
+  {
+    const root = tmpRepo('repo-index-13-');
+    const dataRoot = tmpRepo('repo-data-13-');
+    try {
+      const bus = new TaskEventBus();
+      const engine = new ContextEngine({ bus, config: { repository: { dataRoot } } });
+      write(root, 'src/auth/auth.ts', 'export function authenticate() {}\n');
+      engine.indexRepository(root);
+
+      const close = warmOnToolEvents(bus, root, engine, { debounceMs: 20, sessionId: 's-1' });
+
+      // Non-mutating tool: no refresh.
+      await bus.emit({ name: 'ToolCompleted', taskId: 't-1', timestamp: Date.now(), data: { tool: 'web_search' } });
+      await sleep(60);
+      assert.strictEqual(engine.indexWarmth(root), undefined, 'non-mutating tool does not warm');
+
+      // Mutating tool completion: refresh fires after the debounce.
+      fs.appendFileSync(path.join(root, 'src/auth/auth.ts'), 'export function logout() {}\n');
+      await bus.emit({ name: 'ToolCompleted', taskId: 't-1', timestamp: Date.now(), data: { tool: 'apply_patch' } });
+      await sleep(60);
+      const warmth = engine.indexWarmth(root);
+      assert.ok(warmth, 'mutating tool warms the index');
+      assert.strictEqual(warmth!.sessionId, 's-1', 'watcher attributes session');
+      assert.ok(warmth!.filesReParsed >= 1, 'reparsed file counted');
+      assert.strictEqual(engine.resolveSymbols(root, 'logout').length, 1, 'new symbol visible after event warm');
+
+      // ToolFailed also warms (a failed patch may still have written files).
+      fs.appendFileSync(path.join(root, 'src/auth/auth.ts'), 'export function session() {}\n');
+      await bus.emit({ name: 'ToolFailed', taskId: 't-1', timestamp: Date.now(), data: { tool: 'apply_patch', error: 'oops' } });
+      await sleep(60);
+      assert.strictEqual(engine.resolveSymbols(root, 'session').length, 1, 'ToolFailed warms too');
+
+      // Unsubscribe stops warming and cancels the pending debounce.
+      close();
+      const before = engine.indexWarmth(root)?.lastRefreshedAt;
+      fs.appendFileSync(path.join(root, 'src/auth/auth.ts'), 'export function fresh() {}\n');
+      await bus.emit({ name: 'ToolCompleted', taskId: 't-1', timestamp: Date.now(), data: { tool: 'apply_patch' } });
+      await sleep(60);
+      assert.strictEqual(engine.indexWarmth(root)?.lastRefreshedAt, before, 'unsubscribe stops warming');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+  }
+
   console.log(JSON.stringify({
     symbols: true,
     imports: true,
@@ -507,7 +556,8 @@ async function main(): Promise<void> {
     goalHints: true,
     symbolResolution: true,
     warmRefresh: true,
-    warmthTelemetry: true
+    warmthTelemetry: true,
+    eventWarming: true
   }));
 }
 

@@ -80,7 +80,7 @@ import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { taskEngine, taskEventBus } from '../core/task';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
-import { ContextEngine } from '../core/context';
+import { ContextEngine, warmOnToolEvents } from '../core/context';
 import { ToolEngine, normalizeToolRequest } from '../core/tools';
 import fs from 'fs';
 import path from 'path';
@@ -127,6 +127,7 @@ export class AgentRunner {
   private policyEngine: PolicyEngine;
   // Phase 7: budgeted, relevance-based context construction.
   private contextEngine: ContextEngine;
+  private readonly repoWarmers = new Map<string, () => void>();
   // Keys already warned about (tool-capping) so truncation warnings are logged
   // once per process run instead of on every message.
   private advertisedWarnings = new Set<string>();
@@ -1786,6 +1787,20 @@ export class AgentRunner {
                 sessionId,
                 taskId: missionTaskId || undefined
               });
+              // Event-driven warming: refresh as soon as a mutating tool
+              // completes instead of waiting for the next turn.
+              if (!this.repoWarmers.has(sessionId)) {
+                try {
+                  this.repoWarmers.set(sessionId, warmOnToolEvents(
+                    taskEventBus,
+                    repoWorkspace,
+                    this.contextEngine,
+                    { sessionId, taskId: missionTaskId || undefined }
+                  ));
+                } catch (warmError: any) {
+                  console.warn('[ContextEngine] event-warming not attached:', warmError?.message || warmError);
+                }
+              }
               const repoText = this.contextEngine.repositorySection(repoWorkspace, msg.content);
               if (repoText) systemPrompt += `\n\n${repoText}`;
             } catch (contextError: any) {

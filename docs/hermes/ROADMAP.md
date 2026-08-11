@@ -144,6 +144,13 @@ the hook audit by the Phase 3 bridge, opt-out via
 `repository.telemetry.enabled: false` — so audit can tell whether a recovery
 decision was made against a fresh index. `ContextEngine.indexWarmth(root)`
 exposes the snapshot. Verified by smoke:repo-index section 12.
+Event-driven warming is in: `warmOnToolEvents` subscribes to the TaskEventBus
+and refreshes a workspace root's index (debounced, default 500ms) as soon as a
+mutating tool completes or fails — apply_patch, shell, file writes — so symbols
+stay fresh between turns instead of only at the next prompt build. AgentRunner
+attaches one watcher per session when the repository section is enabled.
+Verified by smoke:repo-index section 13 (non-mutating tools ignored,
+ToolFailed warms, unsubscribe stops).
 Phase 10 next: keep the execution loop honest — step/session limits already
 exist; add a repository-aware retry policy that suggests the files matched by
 the goal when a coding step fails.

@@ -11,5 +11,6 @@ export * from './context-budget';
 export * from './summarizer';
 export * from './repository-context';
 export * from './repo-index';
+export * from './repo-watcher';
 export * from './context-builder';
 export * from './context-engine';
