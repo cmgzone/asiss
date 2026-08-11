@@ -48,7 +48,7 @@ export class SymbolSkill implements Skill {
     try {
       // Phase 9: force an on-demand refresh so an explicit query never reads
       // a stale index (files may have changed since the last mission turn).
-      this.engine.refreshRepository(root, { force: true });
+      this.engine.refreshRepository(root, { force: true, sessionId: params?.__sessionId });
       const resolved = this.engine.resolveSymbols(root, query, limit);
       if (resolved.length === 0) {
         return {

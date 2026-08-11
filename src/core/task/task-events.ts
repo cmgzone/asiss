@@ -47,7 +47,9 @@ export type TaskEventName =
   | 'TestFailed'
   | 'TestPassed'
   // Learning (Phase 14 integration point)
-  | 'LearningCreated';
+  | 'LearningCreated'
+  // Repository intelligence (Phase 9 telemetry)
+  | 'RepositoryIndexRefreshed';
 
 export interface TaskEvent {
   name: TaskEventName;

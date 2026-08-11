@@ -23,6 +23,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { ContextEngine, resolveSymbols } from '../src/core/context';
+import { TaskEventBus } from '../src/core/task';
 import { SymbolSkill } from '../src/skills/symbol';
 import {
   buildPersistentIndex,
@@ -444,6 +445,56 @@ async function main(): Promise<void> {
     }
   }
 
+
+  // ---- 12. Warmth telemetry (Phase 9) ----
+  {
+    const root = tmpRepo('repo-index-12-');
+    const dataRoot = tmpRepo('repo-data-12-');
+    try {
+      const bus = new TaskEventBus();
+      const events: any[] = [];
+      bus.on('*', (e) => { events.push(e); });
+      const engine = new ContextEngine({ bus, config: { repository: { dataRoot, warm: { throttleMs: 60000 } } } });
+
+      write(root, 'src/auth/auth.ts', 'export function authenticate(u: string) { return true; }\n');
+      engine.indexRepository(root);
+      fs.appendFileSync(path.join(root, 'src/auth/auth.ts'), 'export function logout() { return true; }\n');
+
+      const ran = engine.refreshRepository(root, { force: true, sessionId: 's-1', taskId: 't-1' });
+      assert.strictEqual(ran, true, 'refresh ran');
+      const evt = events.find((e: any) => e.name === 'RepositoryIndexRefreshed');
+      assert.ok(evt, 'warmth event emitted');
+      assert.strictEqual(evt.taskId, 't-1', 'event carries task attribution');
+      assert.strictEqual(evt.data.sessionId, 's-1', 'event carries session attribution');
+      assert.strictEqual(evt.data.root, root, 'event carries root');
+      assert.strictEqual(evt.data.filesReParsed, 1, 'reparsed count reported');
+      assert.ok(evt.data.symbolsRefreshed >= 1, 'symbols refreshed reported');
+      assert.ok(evt.data.fileCount >= 1, 'file count reported');
+
+      const warmth = engine.indexWarmth(root)!;
+      assert.strictEqual(warmth.sessionId, 's-1', 'warmth snapshot recorded');
+      assert.ok(Date.now() - warmth.lastRefreshedAt < 5000, 'warmth timestamp fresh');
+
+      // Unchanged refresh reports filesReParsed 0 (checked, nothing changed).
+      events.length = 0;
+      engine.refreshRepository(root, { force: true, sessionId: 's-1' });
+      const idle = events.find((e: any) => e.name === 'RepositoryIndexRefreshed');
+      assert.strictEqual(idle.data.filesReParsed, 0, 'idle refresh reports 0 re-parsed');
+      assert.strictEqual(idle.data.symbolsRefreshed, 0, 'idle refresh reports 0 symbols');
+
+      // Telemetry opt-out suppresses the event but still warms.
+      const quiet = new ContextEngine({ bus, config: { repository: { dataRoot, telemetry: { enabled: false } } } });
+      quiet.indexRepository(root);
+      const n0 = events.length;
+      assert.strictEqual(quiet.refreshRepository(root, { force: true }), true, 'opt-out still refreshes');
+      assert.strictEqual(events.length, n0, 'telemetry opt-out suppresses events');
+      assert.ok(quiet.indexWarmth(root), 'warmth still recorded when telemetry off');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+  }
+
   console.log(JSON.stringify({
     symbols: true,
     imports: true,
@@ -455,7 +506,8 @@ async function main(): Promise<void> {
     engineIntegration: true,
     goalHints: true,
     symbolResolution: true,
-    warmRefresh: true
+    warmRefresh: true,
+    warmthTelemetry: true
   }));
 }
 

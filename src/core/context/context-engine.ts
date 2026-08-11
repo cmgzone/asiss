@@ -22,6 +22,7 @@
  * configuration.
  */
 
+import { TaskEventBus, taskEventBus } from '../task/task-events';
 import { buildContextPackage, ContextMemory, ContextSourceInput, ContextTool } from './context-builder';
 import { estimateTokens, truncateChars } from './context-budget';
 import { Summarizer } from './summarizer';
@@ -49,7 +50,7 @@ export interface ContextEngineConfig {
   /** Token budget for the assembled context. Default 32000. */
   maxTokens?: number;
   /** Repository context: surfaced when enabled and a workspace exists. */
-  repository?: { enabled?: boolean; persistent?: boolean; maxFiles?: number; maxDepth?: number; maxListed?: number; dataRoot?: string; goalHints?: { enabled?: boolean; maxFiles?: number }; warm?: { enabled?: boolean; throttleMs?: number } };
+  repository?: { enabled?: boolean; persistent?: boolean; maxFiles?: number; maxDepth?: number; maxListed?: number; dataRoot?: string; goalHints?: { enabled?: boolean; maxFiles?: number }; warm?: { enabled?: boolean; throttleMs?: number }; telemetry?: { enabled?: boolean } };
   /** Summarize long sections via an injectable model. */
   summarize?: { enabled?: boolean; maxChars?: number };
   /** Cap history render truncation (chars per memory). Default 20000. */
@@ -59,6 +60,8 @@ export interface ContextEngineConfig {
 export interface ContextEngineOptions {
   /** Model-backed summarizer; used when config.summarize.enabled is true. */
   summarizer?: Summarizer;
+  /** Event bus for warmth telemetry (defaults to the process-wide bus). */
+  bus?: TaskEventBus;
   config?: ContextEngineConfig;
   /** Pre-built repository index (tests/hosts can inject one). */
   repositoryIndex?: RepositoryIndex;
@@ -69,17 +72,35 @@ export interface HistoryRenderOptions {
   truncateChars?: number;
 }
 
+/** Warmth snapshot for one workspace root (Phase 9 telemetry). */
+export interface RepositoryWarmth {
+  root: string;
+  /** When the index was last refreshed (ms epoch). */
+  lastRefreshedAt: number;
+  /** Files re-parsed during that refresh (0 = checked, nothing changed). */
+  filesReParsed: number;
+  /** Symbols found in the re-parsed files. */
+  symbolsRefreshed: number;
+  /** Total indexed files after the refresh. */
+  fileCount: number;
+  sessionId?: string;
+  taskId?: string;
+}
+
 export class ContextEngine {
   private readonly summarizer?: Summarizer;
   private readonly config: ContextEngineConfig;
   private readonly injectedIndex?: RepositoryIndex;
+  private readonly bus: TaskEventBus;
   private readonly indexCache = new Map<string, RepositoryIndex>();
   private readonly lastWarm = new Map<string, number>();
+  private readonly warmth = new Map<string, RepositoryWarmth>();
 
   constructor(options: ContextEngineOptions = {}) {
     this.summarizer = options.summarizer;
     this.config = options.config || {};
     this.injectedIndex = options.repositoryIndex;
+    this.bus = options.bus || taskEventBus;
   }
 
   /** Full pipeline: sources -> sections -> budget -> ContextPackage. */
@@ -144,10 +165,14 @@ export class ContextEngine {
    * Incremental for the persistent index (only files whose mtime/size changed
    * are re-parsed, then re-saved); rebuilds the lightweight index. Throttled
    * per root (default 5s) unless `force` — callers like the symbol skill pass
-   * force so an explicit query never reads a stale index. Returns true when a
-   * refresh actually ran.
+   * force so an explicit query never reads a stale index. Warmth stats are
+   * recorded per root and emitted as a RepositoryIndexRefreshed event (opt-out
+   * via repository.telemetry.enabled). Returns true when a refresh actually ran.
    */
-  refreshRepository(root: string, options: { force?: boolean } = {}): boolean {
+  refreshRepository(
+    root: string,
+    options: { force?: boolean; sessionId?: string; taskId?: string } = {}
+  ): boolean {
     if (!root) return false;
     const warm = this.config.repository?.warm;
     if (warm?.enabled === false) return false;
@@ -157,26 +182,76 @@ export class ContextEngine {
     this.lastWarm.set(root, now);
 
     const index = this.indexCache.get(root);
+    let stats: { filesReParsed: number; symbolsRefreshed: number; fileCount: number };
     if (index && isPersistentIndex(index)) {
       try {
+        const before = index.files;
         const refreshed = refreshRepositoryIndex(index, root, this.persistentOptions());
         saveRepositoryIndex(refreshed, this.dataRoot());
         this.indexCache.set(root, refreshed);
-        return true;
+        const reparsed = refreshed.files.filter((f) => !before.includes(f));
+        stats = {
+          filesReParsed: reparsed.length,
+          symbolsRefreshed: reparsed.reduce((n, f) => n + f.symbols.length, 0),
+          fileCount: refreshed.fileCount
+        };
       } catch {
         return false;
       }
-    }
-    if (index) {
+    } else if (index) {
       try {
-        this.indexCache.set(root, indexWorkspace(root, this.repositoryOptions()));
-        return true;
+        const rebuilt = indexWorkspace(root, this.repositoryOptions());
+        this.indexCache.set(root, rebuilt);
+        stats = { filesReParsed: rebuilt.fileCount, symbolsRefreshed: 0, fileCount: rebuilt.fileCount };
       } catch {
         return false;
       }
+    } else {
+      const built = this.indexRepository(root);
+      if (!built) return false;
+      stats = { filesReParsed: built.fileCount, symbolsRefreshed: 0, fileCount: built.fileCount };
     }
-    // Nothing cached: the normal build path loads/persists a fresh index.
-    return Boolean(this.indexRepository(root));
+
+    // Phase 9 telemetry: record warmth and emit so audit can tell whether a
+    // later decision was made against a fresh index.
+    const warmth: RepositoryWarmth = {
+      root,
+      lastRefreshedAt: now,
+      filesReParsed: stats.filesReParsed,
+      symbolsRefreshed: stats.symbolsRefreshed,
+      fileCount: stats.fileCount,
+      sessionId: options.sessionId,
+      taskId: options.taskId
+    };
+    this.warmth.set(root, warmth);
+    if (this.config.repository?.telemetry?.enabled !== false) {
+      void this.emitWarmthEvent(warmth);
+    }
+    return true;
+  }
+
+  /** Latest warmth snapshot for a workspace root (undefined if never warmed). */
+  indexWarmth(root: string): RepositoryWarmth | undefined {
+    return this.warmth.get(root);
+  }
+
+  private async emitWarmthEvent(warmth: RepositoryWarmth): Promise<void> {
+    try {
+      await this.bus.emit({
+        name: 'RepositoryIndexRefreshed',
+        taskId: warmth.taskId || '',
+        timestamp: warmth.lastRefreshedAt,
+        data: {
+          root: warmth.root,
+          fileCount: warmth.fileCount,
+          filesReParsed: warmth.filesReParsed,
+          symbolsRefreshed: warmth.symbolsRefreshed,
+          sessionId: warmth.sessionId
+        }
+      });
+    } catch (error) {
+      console.warn('[ContextEngine] warmth telemetry failed:', error);
+    }
   }
 
   /**

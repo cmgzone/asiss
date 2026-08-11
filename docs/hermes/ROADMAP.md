@@ -137,6 +137,13 @@ rendering the repository section each turn, and the symbol skill force-warms
 before every explicit query, so /symbol never answers from a stale index.
 Verified by `scripts/smoke-repo-index.ts` (11 sections: + warm refresh,
 throttle, force, opt-out, lightweight rebuild, skill self-refresh).
+Phase 9 telemetry is in: every index refresh records warmth per root
+(lastRefreshedAt, filesReParsed, symbolsRefreshed, fileCount, sessionId,
+taskId) and emits a `RepositoryIndexRefreshed` TaskEvent — auto-forwarded to
+the hook audit by the Phase 3 bridge, opt-out via
+`repository.telemetry.enabled: false` — so audit can tell whether a recovery
+decision was made against a fresh index. `ContextEngine.indexWarmth(root)`
+exposes the snapshot. Verified by smoke:repo-index section 12.
 Phase 10 next: keep the execution loop honest — step/session limits already
 exist; add a repository-aware retry policy that suggests the files matched by
 the goal when a coding step fails.

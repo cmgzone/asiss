@@ -1781,7 +1781,11 @@ export class AgentRunner {
             try {
               // Phase 9: warm the index on demand so per-goal hints and the
               // symbol skill never read a stale index during the mission.
-              this.contextEngine.refreshRepository(repoWorkspace);
+              // Telemetry attributes the refresh to this session + task.
+              this.contextEngine.refreshRepository(repoWorkspace, {
+                sessionId,
+                taskId: missionTaskId || undefined
+              });
               const repoText = this.contextEngine.repositorySection(repoWorkspace, msg.content);
               if (repoText) systemPrompt += `\n\n${repoText}`;
             } catch (contextError: any) {
