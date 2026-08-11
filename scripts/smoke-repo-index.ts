@@ -22,7 +22,7 @@ import assert from 'assert';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { ContextEngine, resolveSymbols, warmOnToolEvents } from '../src/core/context';
+import { ContextEngine, detectTestCommand, matchedTestFiles, resolveSymbols, runGoalTests, stemOf, warmOnToolEvents } from '../src/core/context';
 import { TaskEventBus } from '../src/core/task';
 import { SymbolSkill } from '../src/skills/symbol';
 import {
@@ -544,6 +544,59 @@ async function main(): Promise<void> {
     }
   }
 
+
+  // ---- 14. Verify-then-retry helpers (Phase 11) ----
+  {
+    const root = tmpRepo('repo-index-14-');
+    const dataRoot = tmpRepo('repo-data-14-');
+    try {
+      // stemOf strips extensions and test markers across languages.
+      assert.strictEqual(stemOf('src/auth/auth.ts'), 'auth', 'stem of source file');
+      assert.strictEqual(stemOf('src/auth/auth.test.ts'), 'auth', 'stem of ts test');
+      assert.strictEqual(stemOf('src/auth/auth_test.py'), 'auth', 'stem of python test');
+
+      // matchedTestFiles: sibling tests + goal-surfaced tests, cross-language.
+      write(root, 'src/auth/auth.ts', 'export function authenticate() {}\n');
+      write(root, 'src/auth/auth.test.js', "const { test } = require('node:test');\ntest('auth', () => {});\n");
+      write(root, 'src/payments/billing.ts', 'export function charge() {}\n');
+      write(root, 'src/payments/billing.test.ts', 'export function x() {}\n');
+      write(root, 'src/payments/billing_test.py', 'def test_charge():\n    pass\n');
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+      const index = engine.indexRepository(root) as any;
+      const matched = engine.relevantFiles(root, 'fix authentication', 8) as any[];
+      const tests = matchedTestFiles(index, 'fix authentication', matched, 4).map((f: any) => f.path);
+      assert.ok(tests.includes('src/auth/auth.test.js'), 'sibling test matched for auth source');
+      assert.ok(!tests.includes('src/payments/billing.test.ts'), 'unrelated test not matched');
+      assert.strictEqual(stemOf('src/payments/billing_test.py'), 'billing', 'python sibling stem');
+
+      // detectTestCommand: node:test without deps; jest requires the dependency.
+      const nodeTest = detectTestCommand(root, index.files.filter((f: any) => f.path === 'src/auth/auth.test.js'));
+      assert.strictEqual(nodeTest?.engine, 'node:test', 'node:test detected');
+      assert.ok(String(nodeTest?.command).includes('node --test'), 'node --test command');
+      const pyTest = detectTestCommand(root, index.files.filter((f: any) => f.path === 'src/payments/billing_test.py'));
+      assert.strictEqual(pyTest?.engine, 'pytest', 'pytest detected');
+      assert.strictEqual(detectTestCommand(root, []), null, 'no files -> no command');
+
+      // runGoalTests executes the matched node:test and reports the outcome.
+      const passing = await runGoalTests(root, [index.files.find((f: any) => f.path === 'src/auth/auth.test.js')], { timeoutMs: 20000 });
+      assert.strictEqual(passing.ran, true, 'test run executed');
+      assert.strictEqual(passing.exitCode, 0, 'passing test exit 0');
+      assert.ok(String(passing.output).includes('pass'), 'test output captured');
+
+      // A failing test reports a nonzero exit without throwing.
+      write(root, 'src/fail.test.js', "const { test } = require('node:test');\ntest('boom', () => { throw new Error('nope'); });\n");
+      engine.refreshRepository(root, { force: true });
+      const failFile = engine.indexRepository(root)!.files.find((f: any) => f.path === 'src/fail.test.js')!;
+      const failing = await runGoalTests(root, [failFile], { timeoutMs: 20000 });
+      assert.strictEqual(failing.ran, true, 'failing run executed');
+      assert.notStrictEqual(failing.exitCode, 0, 'failing test nonzero exit');
+      assert.ok(String(failing.output).length > 0, 'failure output captured');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+  }
+
   console.log(JSON.stringify({
     symbols: true,
     imports: true,
@@ -557,7 +610,8 @@ async function main(): Promise<void> {
     symbolResolution: true,
     warmRefresh: true,
     warmthTelemetry: true,
-    eventWarming: true
+    eventWarming: true,
+    verifyThenRetry: true
   }));
 }
 

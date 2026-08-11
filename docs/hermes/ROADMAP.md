@@ -160,5 +160,17 @@ session, advisory-only. The e2e runtime smoke now asserts the hint fires on
 the failed verification step and names the goal-matched file. With the index
 fresh (Phase 9 warm + telemetry) and failures now carrying file suggestions,
 recovery decisions are both observable and targeted.
-Phase 11 next: verification-driven recovery — when a step fails, run the
-goal-matched tests and feed their output back before the next retry.
+Phase 11 is done: verify-then-retry. On a tool failure the runner now finds
+the goal-matched test files in the index (tests the goal surfaces directly
+plus sibling tests of the matched sources, cross-language, signal-gated so
+depth-bonus noise never drags unrelated tests in), detects the runner
+(node:test / vitest / jest / pytest / unittest / go — dependency-checked),
+and runs ONLY those files with a timeout, feeding the output back as a
+`goal_verify_output` memory before the retry. Bounded (45s timeout, 4k
+output cap), advisory-only, opt-out via `verifyOnFailure.enabled`. Verified
+by smoke-repo-index section 14 (stems, matching, detection, passing +
+failing runs) and the e2e runtime smoke (the failed verification step now
+runs the sibling `node --test` and records `exit 0` in context).
+Phase 12 next: index warmth as a first-class skill (`/warmth`), then a
+subtle warmth indicator in the web UI — then reassess the architecture
+before the next major phase.

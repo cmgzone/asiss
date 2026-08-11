@@ -80,7 +80,7 @@ import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { taskEngine, taskEventBus } from '../core/task';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
-import { ContextEngine, warmOnToolEvents } from '../core/context';
+import { ContextEngine, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
 import { ToolEngine, normalizeToolRequest } from '../core/tools';
 import fs from 'fs';
 import path from 'path';
@@ -495,7 +495,14 @@ export class AgentRunner {
    * the same repository section config; deduped per session; advisory only —
    * never throws into the failure path.
    */
-  private injectGoalRetryHint(sessionId: string, goal: string, workspacePathValue: unknown): void {
+  /**
+   * Phase 10 + 11: when a tool call fails, surface the files the repository
+   * index matched for the goal so the retry is targeted instead of blind, and
+   * run the goal-matched tests to feed real failure evidence back. Gated by
+   * the same repository section config; deduped per session; advisory only —
+   * never throws into the failure path.
+   */
+  private async injectGoalRetryHint(sessionId: string, goal: string, workspacePathValue: unknown): Promise<void> {
     if (!goal) return;
     try {
       const contextCfg = this.loadConfig()?.agent?.context || {};
@@ -509,7 +516,6 @@ export class AgentRunner {
         `A tool call failed. Files the repository index matched for the goal '${goal.slice(0, 120)}':\n` +
         paths.map((p: string) => `- ${p}`).join('\n') +
         '\nInspect these files and target the retry at them instead of repeating the failed approach.';
-
       if (this.lastRetryHint.get(sessionId) === hint) return;
       this.lastRetryHint.set(sessionId, hint);
       this.memory.add(sessionId, {
@@ -518,6 +524,29 @@ export class AgentRunner {
         timestamp: Date.now(),
         metadata: { type: 'goal_retry_hint' }
       });
+
+      // Phase 11: verify-then-retry. Run the goal-matched tests and feed the
+      // output back so the retry is based on real failure evidence. Bounded
+      // (timeout + capped output), opt-out via verifyOnFailure.enabled.
+      const verifyCfg = contextCfg.repository?.verifyOnFailure || {};
+      if (verifyCfg.enabled !== false) {
+        const index = this.contextEngine.indexRepository(workspace);
+        if (index) {
+          const testFiles = matchedTestFiles(index, goal, files);
+          const run = await runGoalTests(workspace, testFiles, {
+            timeoutMs: verifyCfg.timeoutMs,
+            maxOutputChars: verifyCfg.maxOutputChars
+          });
+          if (run.ran && run.output) {
+            this.memory.add(sessionId, {
+              role: 'system',
+              content: `Goal-matched verification ran \`${run.command}\` (exit ${run.exitCode}):\n${run.output}`,
+              timestamp: Date.now(),
+              metadata: { type: 'goal_verify_output' }
+            });
+          }
+        }
+      }
     } catch {
       // Advisory only.
     }
@@ -2263,7 +2292,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
                   tool: result.name,
                   error: String(result.error || 'Unknown error')
                 }, sessionId);
-                this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath);
+                await this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath);
                 return {
                   success: false,
                   call: call,
@@ -2285,7 +2314,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
                 tool: call.name,
                 error: err?.message || String(err)
               }, sessionId);
-              this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath);
+              await this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath);
               return {
                 success: false,
                 call: call,

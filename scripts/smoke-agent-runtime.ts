@@ -13,6 +13,9 @@ async function main() {
   // goal-aware retry hint has a file to name.
   fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
   fs.writeFileSync(path.join(tempDir, 'src/fix-result.ts'), 'export function fixResult() { return true; }\n');
+  // A sibling test (node:test, no deps) so Phase 11 can run it after a failure.
+  fs.writeFileSync(path.join(tempDir, 'src/fix-result.test.js'),
+    "const { test } = require('node:test');\nconst assert = require('node:assert');\ntest('goal-matched test runs', () => { assert.ok(true); });\n");
   fs.writeFileSync('config.json', JSON.stringify({
     model: 'mock',
     agent: {
@@ -198,6 +201,13 @@ async function main() {
     'the retry hint tells the model to target the retry at those files'
   );
 
+  // Phase 11: verify-then-retry — the goal-matched test ran and its output
+  // was fed back into the context before the retry.
+  const verifyOutputs = allMemories.filter((m) => m.metadata?.type === 'goal_verify_output');
+  assert.ok(verifyOutputs.length >= 1, 'goal-matched tests were run after the failure');
+  assert.ok(String(verifyOutputs[0].content).includes('node --test'), 'verification ran via node --test');
+  assert.ok(String(verifyOutputs[0].content).includes('exit 0'), 'the matched test passed');
+
   const { ApplyPatchSkill } = await import('../src/skills/patch');
   const patchSkill = new ApplyPatchSkill();
   fs.writeFileSync('patch-target.txt', 'alpha\nbeta\ngamma\n');
@@ -233,6 +243,7 @@ async function main() {
 
   console.log(JSON.stringify({
     goalRetryHint: retryHints.length >= 1,
+    goalVerification: verifyOutputs.length >= 1,
     success: true,
     tempDir,
     turns,
