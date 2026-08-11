@@ -191,3 +191,17 @@ doc drift) and the agreed next moves: typed validated config first, then
 recovery moved into TaskEngine, then a typed event-to-channel projection.
 The phase table above is stale (Phase 8 shipped; rows 9-11 renumbered) and
 is the next doc task.
+Review Move 1 is done: typed, validated config. `src/core/config.ts`
+provides `validateConfig` / `strictValidateConfig` / `loadHermesConfig`.
+Engine sections are validated at load — `policy` and `agent.context`
+STRICT (unknown keys error and are stripped), `agent` and `checkpoints`
+permissive (engine knobs type-checked, other keys pass through), all other
+sections untouched. A typo (`policy.destructivCommands`) is now a named,
+loud error listing the exact key instead of a silent behavior change, and
+the runner's `loadConfig()` + `new ContextEngine()` now use the validated
+config (fixes the two-sources-of-truth risk R5). Verified by
+`scripts/smoke-config.ts` (`npm run smoke:config`, 9 sections) and the e2e
+runtime mission (behavior unchanged).
+Next: review Move 2 — give the recovery loop to TaskEngine (one execution
+authority), then Move 3 (typed event-to-channel projection), then the
+second architecture audit.

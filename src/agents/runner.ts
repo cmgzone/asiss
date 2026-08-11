@@ -80,6 +80,7 @@ import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { taskEngine, taskEventBus } from '../core/task';
+import { loadHermesConfig } from '../core/config';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
 import { ContextEngine, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
 import { ToolEngine, normalizeToolRequest } from '../core/tools';
@@ -233,7 +234,7 @@ export class AgentRunner {
     this.forwardApprovalEventsToGateway();
     this.forwardRepositoryEventsToGateway();
     // Phase 7 ContextEngine: budgeted, relevance-based context construction.
-    this.contextEngine = new ContextEngine();
+    this.contextEngine = new ContextEngine({ config: this.loadConfig()?.agent?.context });
 
     // Canonical ToolEngine (Phase 4): one consistent tool execution mechanism
     // for native skills, MCP tools and dynamic tools.
@@ -859,15 +860,11 @@ export class AgentRunner {
   }
 
   private loadConfig(): any {
-    let config: any = { model: 'mock' };
-    if (fs.existsSync('config.json')) {
-      try {
-        config = JSON.parse(fs.readFileSync('config.json', 'utf-8'));
-      } catch (e) {
-        console.error('[AgentRunner] Failed to load config.json', e);
-      }
-    }
-    return config;
+    // Architecture review Move 1: typed, validated config. Engine sections
+    // (policy, agent.context, agent knobs, checkpoints) are validated at load;
+    // a typo is logged loudly and the invalid key stripped instead of silently
+    // changing behavior. Other sections pass through untouched.
+    return loadHermesConfig();
   }
 
   // Build the tool list advertised to the model. Bounded per provider and
