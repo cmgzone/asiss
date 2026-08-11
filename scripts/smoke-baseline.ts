@@ -29,7 +29,9 @@ import {
   TaskEvent,
   canTransition,
   isTerminal,
-  Task
+  Task,
+  installTaskHooksBridge,
+  TaskHooksSink
 } from '../src/core/task';
 
 async function main() {
@@ -213,6 +215,27 @@ async function main() {
       assert.ok(events4.some((e) => e.name === name), `expected event ${name}`);
     }
 
+    // ---- 11. New: task-hooks bridge (TaskEventBus -> hookManager) ----
+    const bus5 = new TaskEventBus();
+    const observed: Array<{ name: string; taskId?: string; sessionId?: string }> = [];
+    const mockHooks: TaskHooksSink = {
+      emit: async (name, data, sessionId) => {
+        observed.push({ name, taskId: String(data?.taskId || ''), sessionId });
+      }
+    };
+    const uninstallBridge = installTaskHooksBridge(bus5, mockHooks);
+    const engine5 = new TaskEngine({ store, bus: bus5, executor: async () => ({ success: true }) });
+    const bridged = await engine5.create({ goal: 'Bridged mission', sessionId: 'bridge-session' });
+    await engine5.run(bridged.id);
+    uninstallBridge();
+    assert.ok(observed.some((e) => e.name === 'TaskCreated' && e.taskId === bridged.id), 'TaskCreated forwarded with taskId');
+    assert.ok(observed.some((e) => e.name === 'TaskStarted' && e.sessionId === 'bridge-session'), 'TaskStarted forwarded with sessionId');
+    assert.ok(observed.some((e) => e.name === 'TaskCompleted' && e.sessionId === 'bridge-session'), 'TaskCompleted forwarded with sessionId');
+    assert.ok(!observed.some((e) => e.name === 'TaskCreated' && e.taskId !== bridged.id), 'no stray task events');
+    // After uninstall, further events are not forwarded.
+    await engine5.create({ goal: 'Unobserved' });
+    assert.ok(!observed.some((e) => e.name === 'TaskCreated' && e.taskId !== bridged.id), 'bridge unsubscribes cleanly');
+
     console.log(JSON.stringify({
       taskContext: true,
       checkpoints: true,
@@ -223,7 +246,8 @@ async function main() {
       pauseResumeCancel: true,
       childTasks: true,
       persistence: true,
-      hostDrivenLifecycle: true
+      hostDrivenLifecycle: true,
+      hooksBridge: true
     }));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

@@ -100,6 +100,14 @@ async function main() {
   ModelRegistry.register(fakeModel as any);
   assert(ModelRegistry.setCurrentModel(fakeModel.id));
 
+  // Canonical Task (Phase 3): task/tool lifecycle events must be observable
+  // through hookManager via the task-hooks bridge (auto-installed on import).
+  const { hookManager } = await import('../src/core/hooks');
+  const observedHooks: string[] = [];
+  const offTaskCreated = hookManager.on('TaskCreated', () => { observedHooks.push('TaskCreated'); });
+  const offTaskCompleted = hookManager.on('TaskCompleted', () => { observedHooks.push('TaskCompleted'); });
+  const offToolCompleted = hookManager.on('ToolCompleted', () => { observedHooks.push('ToolCompleted'); });
+
   await runner.processMessage('runtime-session', {
     id: 'message-1',
     channel: 'web',
@@ -148,6 +156,14 @@ async function main() {
   );
   assert.ok(mission.progress === 100, 'completed task has 100% progress');
   assert.strictEqual(typeof mission.timing.durationMs, 'number', 'completed task records duration');
+
+  // The bridge forwarded lifecycle events onto the existing hook bus.
+  assert.ok(observedHooks.includes('TaskCreated'), 'hookManager observed TaskCreated via the bridge');
+  assert.ok(observedHooks.includes('TaskCompleted'), 'hookManager observed TaskCompleted via the bridge');
+  assert.ok(observedHooks.includes('ToolCompleted'), 'hookManager observed ToolCompleted via the bridge');
+  offTaskCreated();
+  offTaskCompleted();
+  offToolCompleted();
 
   const { ApplyPatchSkill } = await import('../src/skills/patch');
   const patchSkill = new ApplyPatchSkill();

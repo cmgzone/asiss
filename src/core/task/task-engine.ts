@@ -583,7 +583,12 @@ export class TaskEngine {
   }
 
   private async emit(name: TaskEventName, taskId: string, data?: Record<string, unknown>): Promise<void> {
-    await this.bus.emit({ name, taskId, timestamp: Date.now(), data });
+    // Self-contained event data: taskId + sessionId let subscribers (telemetry,
+    // recovery, the hooks bridge) attribute events without querying the store.
+    const record = this.store.get(taskId);
+    const payload: Record<string, unknown> = { ...(data || {}), taskId };
+    if (record?.sessionId) payload.sessionId = record.sessionId;
+    await this.bus.emit({ name, taskId, timestamp: Date.now(), data: payload });
   }
 }
 

@@ -19,3 +19,4 @@ export * from './task-events';
 export * from './task-store';
 export * from './task';
 export * from './task-engine';
+export * from './task-hooks-bridge';

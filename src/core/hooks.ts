@@ -2,7 +2,21 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-export type HookEventName = 'before_tool' | 'after_tool' | 'tool_error' | 'model_fallback' | 'checkpoint_created' | 'agent_complete' | 'mcp_status';
+import type { TaskEventName } from './task/task-events';
+
+// Internal hook event names. Task/tool lifecycle events (TaskCreated,
+// ToolFailed, ...) are forwarded onto the same bus by the task-hooks bridge so
+// existing hook subscribers (audit file, telemetry, recovery) observe the
+// canonical Task system without any direct coupling to it.
+export type HookEventName =
+  | 'before_tool'
+  | 'after_tool'
+  | 'tool_error'
+  | 'model_fallback'
+  | 'checkpoint_created'
+  | 'agent_complete'
+  | 'mcp_status'
+  | TaskEventName;
 export interface HookEvent {
   name: HookEventName;
   timestamp: number;

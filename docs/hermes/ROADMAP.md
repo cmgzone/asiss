@@ -17,7 +17,7 @@
 | 0 | Freeze baseline | `docs/hermes/BASELINE.md`, `AGENT_RUNNER_FLOW.md`, `SUBSYSTEM_INVENTORY.md`, `scripts/smoke-baseline.ts` | [x] |
 | 1 | Canonical Task system | `src/core/task/` (types, state, events, store, engine) | [x] |
 | 2 | TaskEngine ownership | AgentRunner creates a Task per mission, records tools/checkpoints/cost/progress, finalizes on every exit | [x] |
-| 3 | Event system | Task/Tool/Agent/Checkpoint/Test events on an internal bus | [ ] |
+| 3 | Event system | TaskEventBus bridged to hookManager (audit + subscribers); events carry taskId/sessionId | [x] |
 | 4 | ToolEngine | Extract tool dispatch from AgentRunner (`src/core/tools/`) | [ ] |
 | 5 | PolicyEngine | ALLOW / ASK / DENY before tool execution | [ ] |
 | 6 | ModelEngine | Capability/reliability/cost scoring instead of naive routing | [ ] |
@@ -45,5 +45,9 @@ Task per mission (`kind: 'mission'`), advances it through the lifecycle
 cost and progress, and finalizes it on every exit path (success -> COMPLETED;
 blocked / step-limit / thrown errors -> FAILED) via try/finally. Existing
 behavior is unchanged: the engine only records, it does not execute. Verified
-end-to-end by `scripts/smoke-agent-runtime.ts`. Phase 3 next: route the
-TaskEventBus into telemetry/recovery via hookManager.
+end-to-end by `scripts/smoke-agent-runtime.ts`. Phase 3 is also done: the
+task-hooks bridge (`src/core/task/task-hooks-bridge.ts`) auto-subscribes the
+process-wide TaskEventBus and forwards every task/tool lifecycle event onto
+hookManager (extended HookEventName union), so telemetry/recovery/audit observe
+the canonical Task system without AgentRunner wiring anything. Phase 4 next:
+extract tool dispatch into a ToolEngine.
