@@ -40,7 +40,8 @@
     "smoke:execute-workflow": "ts-node scripts/smoke-execute-workflow.ts",
     "smoke:web-api": "ts-node scripts/smoke-web-api.ts",
     "smoke:casual": "ts-node scripts/smoke-casual-conversation.ts",
-    "smoke:repetition": "ts-node scripts/smoke-repetition-guard.ts"
+    "smoke:repetition": "ts-node scripts/smoke-repetition-guard.ts",
+    "smoke:baseline": "ts-node scripts/smoke-baseline.ts"
   },
   "keywords": [],
   "author": "",
