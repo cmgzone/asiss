@@ -9,12 +9,17 @@ async function main() {
   fs.writeFileSync('SOUL.md', '# Test Soul\nFinish action tasks with tools and verification.\n');
   fs.writeFileSync('AGENTS.md', '# Test Workspace\n');
   fs.writeFileSync('USER.md', '# Test User\n');
+  // A file whose path matches the mission goal tokens, so the Phase 10
+  // goal-aware retry hint has a file to name.
+  fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(tempDir, 'src/fix-result.ts'), 'export function fixResult() { return true; }\n');
   fs.writeFileSync('config.json', JSON.stringify({
     model: 'mock',
     agent: {
       maxTurns: 12,
       autoContinue: { enabled: true, maxBatches: 1, notify: false },
-      maxPrematureCompletions: 4
+      maxPrematureCompletions: 4,
+      context: { repository: { enabled: true } }
     },
     modelRouter: {
       enabled: true,
@@ -119,7 +124,7 @@ async function main() {
     senderId: 'runtime-user',
     content: 'Please fix the file and test the result.',
     timestamp: Date.now(),
-    metadata: { username: 'Runtime User' }
+    metadata: { username: 'Runtime User', projectWorkspacePath: tempDir }
   });
 
   assert.strictEqual(turns, 6, 'runtime continues through premature prose, mutation, failed verification, recovery, and success');
@@ -179,6 +184,20 @@ async function main() {
   offTaskCompleted();
   offToolCompleted();
 
+  // Phase 10: the failed verification tool must have injected a goal-aware
+  // retry hint naming the files the index matched for the mission goal.
+  const allMemories = (runner as any).memory.getAll('runtime-session') as any[];
+  const retryHints = allMemories.filter((m) => m.metadata?.type === 'goal_retry_hint');
+  assert.ok(retryHints.length >= 1, 'a goal-aware retry hint was injected on tool failure');
+  assert.ok(
+    retryHints.some((m) => String(m.content).includes('src/fix-result.ts')),
+    'the retry hint names the goal-matched file'
+  );
+  assert.ok(
+    String(retryHints[0].content).includes('Inspect these files and target the retry'),
+    'the retry hint tells the model to target the retry at those files'
+  );
+
   const { ApplyPatchSkill } = await import('../src/skills/patch');
   const patchSkill = new ApplyPatchSkill();
   fs.writeFileSync('patch-target.txt', 'alpha\nbeta\ngamma\n');
@@ -213,6 +232,7 @@ async function main() {
   assert.strictEqual(portableList.exitCode, 0, 'common ls -la inspection works on the current platform');
 
   console.log(JSON.stringify({
+    goalRetryHint: retryHints.length >= 1,
     success: true,
     tempDir,
     turns,

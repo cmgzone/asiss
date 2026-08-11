@@ -128,6 +128,7 @@ export class AgentRunner {
   // Phase 7: budgeted, relevance-based context construction.
   private contextEngine: ContextEngine;
   private readonly repoWarmers = new Map<string, () => void>();
+  private readonly lastRetryHint = new Map<string, string>();
   // Keys already warned about (tool-capping) so truncation warnings are logged
   // once per process run instead of on every message.
   private advertisedWarnings = new Set<string>();
@@ -485,6 +486,40 @@ export class AgentRunner {
         : undefined;
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * Phase 10: when a tool call fails, surface the files the repository index
+   * matched for the goal so the retry is targeted instead of blind. Gated by
+   * the same repository section config; deduped per session; advisory only —
+   * never throws into the failure path.
+   */
+  private injectGoalRetryHint(sessionId: string, goal: string, workspacePathValue: unknown): void {
+    if (!goal) return;
+    try {
+      const contextCfg = this.loadConfig()?.agent?.context || {};
+      if (contextCfg.repository?.enabled !== true) return;
+      const workspace = this.getValidWorkspacePath(workspacePathValue);
+      if (!workspace) return;
+      const files = this.contextEngine.relevantFiles(workspace, goal, 8);
+      if (!files || files.length === 0) return;
+      const paths = files.map((f: any) => f.path || String(f)).slice(0, 8);
+      const hint =
+        `A tool call failed. Files the repository index matched for the goal '${goal.slice(0, 120)}':\n` +
+        paths.map((p: string) => `- ${p}`).join('\n') +
+        '\nInspect these files and target the retry at them instead of repeating the failed approach.';
+
+      if (this.lastRetryHint.get(sessionId) === hint) return;
+      this.lastRetryHint.set(sessionId, hint);
+      this.memory.add(sessionId, {
+        role: 'system',
+        content: hint,
+        timestamp: Date.now(),
+        metadata: { type: 'goal_retry_hint' }
+      });
+    } catch {
+      // Advisory only.
     }
   }
 
@@ -2228,6 +2263,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
                   tool: result.name,
                   error: String(result.error || 'Unknown error')
                 }, sessionId);
+                this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath);
                 return {
                   success: false,
                   call: call,
@@ -2249,6 +2285,7 @@ ${context ? `\nSystem Context: ${context}` : ''}
                 tool: call.name,
                 error: err?.message || String(err)
               }, sessionId);
+              this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath);
               return {
                 success: false,
                 call: call,

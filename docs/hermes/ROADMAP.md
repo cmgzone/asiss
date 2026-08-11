@@ -151,6 +151,14 @@ stay fresh between turns instead of only at the next prompt build. AgentRunner
 attaches one watcher per session when the repository section is enabled.
 Verified by smoke:repo-index section 13 (non-mutating tools ignored,
 ToolFailed warms, unsubscribe stops).
-Phase 10 next: keep the execution loop honest — step/session limits already
-exist; add a repository-aware retry policy that suggests the files matched by
-the goal when a coding step fails.
+Phase 10 is done: goal-aware retries. When a tool call fails inside the
+mission loop, `injectGoalRetryHint` queries the (now trustworthy) repository
+index for the files matched by the goal and adds a `goal_retry_hint` system
+memory naming them, so the model's retry is targeted instead of blind —
+gated by the same `agent.context.repository.enabled` config, deduped per
+session, advisory-only. The e2e runtime smoke now asserts the hint fires on
+the failed verification step and names the goal-matched file. With the index
+fresh (Phase 9 warm + telemetry) and failures now carrying file suggestions,
+recovery decisions are both observable and targeted.
+Phase 11 next: verification-driven recovery — when a step fails, run the
+goal-matched tests and feed their output back before the next retry.
