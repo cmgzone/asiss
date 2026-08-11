@@ -79,6 +79,7 @@ import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { taskEngine, taskEventBus } from '../core/task';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
+import { ContextEngine } from '../core/context';
 import { ToolEngine, normalizeToolRequest } from '../core/tools';
 import fs from 'fs';
 import path from 'path';
@@ -123,6 +124,8 @@ export class AgentRunner {
   // Phase 5 ASK path: real user approvals instead of silent default outcomes.
   private approvalCoordinator: ApprovalCoordinator;
   private policyEngine: PolicyEngine;
+  // Phase 7: budgeted, relevance-based context construction.
+  private contextEngine: ContextEngine;
   // Keys already warned about (tool-capping) so truncation warnings are logged
   // once per process run instead of on every message.
   private advertisedWarnings = new Set<string>();
@@ -206,6 +209,8 @@ export class AgentRunner {
       approvalHandler: (verdict, ctx) => this.approvalCoordinator.requestApproval(verdict, ctx)
     });
     this.forwardApprovalEventsToGateway();
+    // Phase 7 ContextEngine: budgeted, relevance-based context construction.
+    this.contextEngine = new ContextEngine();
 
     // Canonical ToolEngine (Phase 4): one consistent tool execution mechanism
     // for native skills, MCP tools and dynamic tools.
@@ -1741,23 +1746,17 @@ export class AgentRunner {
         // The `this.memory.get` fetches the latest state including what we just added.
         // However, for the *very first* message (Goal), we want to make sure it's labeled clearly if we are skipping.
 
-        // Truncate function for context
-        const truncateForContext = (content: string, maxLen: number = 20000) => {
-          if (content.length <= maxLen) return content;
-          return content.slice(0, maxLen) + `\n... [Truncated ${content.length - maxLen} chars] ...`;
-        };
-
-        const currentHistoryText = contextMemories.map((m, index) => {
-          const truncatedContent = truncateForContext(m.content);
-          if (m.role === "user") {
-            return m.metadata?.__missionMarker === missionMarker
-              ? `User (Current Mission): ${truncatedContent}`
-              : `User: ${truncatedContent}`;
-          }
-          if (m.role === "assistant") return `Assistant: ${truncatedContent}`;
-          if (m.role === "system") return `System: ${truncatedContent}`;
-          return `System: ${truncatedContent}`;
-        }).join('\n');
+        // Phase 7 ContextEngine: the engine owns the history renderer (same
+        // labels + truncation as before) so budgets/relevance can be added
+        // later without changing prompt output.
+        const currentHistoryText = this.contextEngine.renderHistory(
+          contextMemories.map((m) => ({
+            role: m.role,
+            content: m.content,
+            missionMarker: m.metadata?.__missionMarker === missionMarker
+          })),
+          { truncateChars: 20000 }
+        );
 
         // Dynamic Identity Injection
         const agentName = config.name || "Gitu";
@@ -1770,6 +1769,21 @@ export class AgentRunner {
         const username = lastUserMsg?.metadata?.username || msg.metadata?.username || "User";
         systemPrompt += `\n\nYou are speaking with ${username}.`;
         systemPrompt += this.buildProjectPrompt(msg.metadata);
+
+        // Phase 7 opt-in: surface the files most relevant to the goal from the
+        // attached workspace (indexed on demand). Off by default.
+        const contextCfg = this.loadConfig()?.agent?.context || {};
+        if (contextCfg.repository?.enabled === true) {
+          const repoWorkspace = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
+          if (repoWorkspace) {
+            try {
+              const repoText = this.contextEngine.repositorySection(repoWorkspace, msg.content);
+              if (repoText) systemPrompt += `\n\n${repoText}`;
+            } catch (contextError: any) {
+              console.warn('[ContextEngine] repository section failed:', contextError?.message || contextError);
+            }
+          }
+        }
 
         const prompt = `
 Conversation and current mission:

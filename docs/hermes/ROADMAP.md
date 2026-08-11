@@ -21,7 +21,7 @@
 | 4 | ToolEngine | Extract tool dispatch from AgentRunner (`src/core/tools/`) | [x] |
 | 5 | PolicyEngine | ALLOW / ASK / DENY before tool execution | [x] |
 | 6 | ModelEngine | Capability/reliability/cost scoring instead of naive routing | [x] |
-| 7 | ContextEngine | Budgeted relevance-based context construction | [ ] |
+| 7 | ContextEngine | Budgeted relevance-based context construction | [x] |
 | 8 | Repository intelligence | Symbol/file/test index for coding tasks | [ ] |
 | 9 | ExecutionScheduler | Real parallelism: deps, priorities, timeouts, retries | [ ] |
 | 10 | Swarm on TaskEngine | AgentSwarm -> child Tasks -> AgentEngine | [ ] |
@@ -38,7 +38,7 @@
 
 ## Current milestone
 
-Phases 0-5 are complete. `AgentRunner.processMessage` now creates a canonical
+Phases 0-7 are complete. `AgentRunner.processMessage` now creates a canonical
 Task per mission (`kind: 'mission'`), advances it through the lifecycle
 (CREATED -> ANALYZING -> PLANNING -> EXECUTING), records tool executions
 (ToolStarted/ToolCompleted/ToolFailed), automatic workspace checkpoints, token
@@ -93,4 +93,15 @@ engine; resilient providers expose which provider actually fulfilled the call
 so performance is attributed accurately. Verified by
 `scripts/smoke-model-engine.ts` and the end-to-end runtime smoke.
 
-Phase 7 next: ContextEngine — budgeted relevance-based context construction.
+Phase 7 is also done: `src/core/context/` owns budgeted, relevance-based
+context construction (relevance scoring, token budgeting with priority
+trimming, injectable summarizer with cache, on-demand repository indexing that
+surfaces goal-matched files, and a builder that assembles history / decisions /
+project / repository / tools / notes into one observable ContextPackage).
+AgentRunner's history renderer now delegates to the engine's `renderHistory`
+(byte-identical output — the e2e runtime smoke passes unchanged), and an
+opt-in repository section (`agent.context.repository.enabled`) surfaces the
+files most relevant to the goal. Verified by `scripts/smoke-context.ts`
+(7 sections) and all prior smokes.
+Phase 8 next: repository intelligence — persistent index with symbols,
+imports and tests for coding tasks.
