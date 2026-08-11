@@ -38,7 +38,9 @@ import {
   matchBySymbols,
   PersistentIndexOptions,
   PersistentRepositoryIndex,
-  renderGoalFileHints
+  renderGoalFileHints,
+  resolveSymbols as resolveIndexSymbols,
+  SymbolResolution
 } from './repo-index';
 
 export interface ContextEngineConfig {
@@ -151,6 +153,17 @@ export class ContextEngine {
     return hints ? `${staticText}
 
 ${hints}` : staticText;
+  }
+
+  /**
+   * Resolve bare symbol references in a goal ("fix authenticate()") to the
+   * files that export them, via the persistent index's exportedSymbols map.
+   * Returns [] for lightweight indexes or when nothing resolves.
+   */
+  resolveSymbols(root: string, goal: string, limit = 8): SymbolResolution[] {
+    const index = this.indexRepository(root);
+    if (!index || !isPersistentIndex(index)) return [];
+    return resolveIndexSymbols(index, goal, limit);
   }
 
   /** Per-goal "files relevant to the current goal" hint (symbol-aware). */

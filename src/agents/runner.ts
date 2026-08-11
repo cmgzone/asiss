@@ -40,6 +40,7 @@ import { OpenCodeProvider } from './opencode-provider';
 import { SerperSkill } from '../skills/serper';
 import { MemorySkill } from '../skills/memory';
 import { CodeSearchSkill } from '../skills/code-search';
+import { SymbolSkill } from '../skills/symbol';
 import { GitSkill } from '../skills/git';
 import { CodeReviewSkill } from '../skills/code-review';
 import { PlanModeSkill } from '../skills/plan-mode';
@@ -282,6 +283,7 @@ export class AgentRunner {
     SkillRegistry.register(new SerperSkill());
     SkillRegistry.register(new MemorySkill(this.memory));
     SkillRegistry.register(new CodeSearchSkill());
+    SkillRegistry.register(new SymbolSkill({ contextEngine: this.contextEngine }));
     SkillRegistry.register(new GitSkill());
     SkillRegistry.register(new CodeReviewSkill());
     SkillRegistry.register(new PlanModeSkill());

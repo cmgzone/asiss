@@ -22,7 +22,8 @@ import assert from 'assert';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { ContextEngine } from '../src/core/context';
+import { ContextEngine, resolveSymbols } from '../src/core/context';
+import { SymbolSkill } from '../src/skills/symbol';
 import {
   buildPersistentIndex,
   extractImports,
@@ -328,20 +329,79 @@ const helper = require('./util');
   }
 }
 
-console.log(JSON.stringify({
-  symbols: true,
-  imports: true,
-  classification: true,
-  fullIndex: true,
-  symbolMatching: true,
-  roundTrip: true,
-  incrementalRefresh: true,
-  engineIntegration: true,
-  goalHints: true
-}));
+async function main(): Promise<void> {
+  // ---- 10. Bare-symbol resolution + /symbol skill ----
+  {
+    const root = tmpRepo('repo-index-10-');
+    const dataRoot = tmpRepo('repo-data-10-');
+    try {
+      write(root, 'src/auth/auth.ts', 'export function authenticate(u: string) { return true; }\nexport class AuthService {}\n');
+      write(root, 'src/app.ts', "import { authenticate } from './auth/auth';\nexport function main() { authenticate('u'); }\n");
+      write(root, 'README.md', '# demo\n');
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+      const index = engine.indexRepository(root) as any;
 
-main();
+      // resolveSymbols: "fix authenticate()" -> the defining file.
+      const resolved = resolveSymbols(index, 'fix authenticate()');
+      assert.strictEqual(resolved.length, 1, 'authenticate resolves');
+      assert.strictEqual(resolved[0].symbol, 'authenticate', 'resolved symbol name');
+      assert.deepStrictEqual(resolved[0].files.map((f: any) => f.path), ['src/auth/auth.ts'], 'resolved to defining file');
 
-function main(): void {
-  // All sections run synchronously above; nothing async needed.
+      // Case-insensitive fallback: AUTHENTICATE resolves to authenticate.
+      const ci = resolveSymbols(index, 'AUTHENTICATE failed again');
+      assert.ok(ci.some((r) => r.symbol === 'AUTHENTICATE' && r.files.some((f: any) => f.path === 'src/auth/auth.ts')), 'case-insensitive lookup');
+
+      // Class symbol resolves with its kind.
+      const cls = resolveSymbols(index, 'AuthService is broken');
+      assert.strictEqual(cls[0].key, 'AuthService', 'class resolves');
+
+      // No match -> empty (not noise).
+      assert.strictEqual(resolveSymbols(index, 'zzz qqq none').length, 0, 'no resolution for unrelated goal');
+
+      // ContextEngine wrapper mirrors the module function.
+      const viaEngine = engine.resolveSymbols(root, 'fix authenticate()');
+      assert.strictEqual(viaEngine.length, 1, 'engine.resolveSymbols works');
+
+      // SymbolSkill end-to-end (hermetic engine injected).
+      const skill = new SymbolSkill({ contextEngine: engine });
+      const result = await skill.execute({ goal: 'fix authenticate()', __workspacePath: root });
+      assert.strictEqual(result.count, 1, 'skill resolves one symbol');
+      assert.strictEqual(result.results[0].symbol, 'authenticate', 'skill symbol');
+      const entry = result.results[0].files[0];
+      assert.strictEqual(entry.path, 'src/auth/auth.ts', 'skill file path');
+      assert.strictEqual(entry.kind, 'function', 'skill symbol kind');
+      assert.ok(typeof entry.line === 'number', 'skill line present');
+
+      // Skill by explicit symbol name.
+      const byName = await skill.execute({ symbol: 'AuthService', __workspacePath: root });
+      assert.strictEqual(byName.count, 1, 'skill resolves by name');
+      assert.strictEqual(byName.results[0].files[0].kind, 'class', 'class kind via skill');
+
+      // Skill with no match reports count 0 + note, not an error.
+      const miss = await skill.execute({ symbol: 'NopeNope', __workspacePath: root });
+      assert.strictEqual(miss.count, 0, 'skill no-match count');
+      assert.ok(miss.note, 'skill no-match note');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+  }
+
+  console.log(JSON.stringify({
+    symbols: true,
+    imports: true,
+    classification: true,
+    fullIndex: true,
+    symbolMatching: true,
+    roundTrip: true,
+    incrementalRefresh: true,
+    engineIntegration: true,
+    goalHints: true,
+    symbolResolution: true
+  }));
 }
+
+main().then(() => process.exit(0)).catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

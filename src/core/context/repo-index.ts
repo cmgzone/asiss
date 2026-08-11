@@ -495,3 +495,70 @@ export function renderGoalFileHints(index: RepositoryIndex, goal: string, option
   for (const file of files) lines.push(`- ${file.path}`);
   return lines.join('\n');
 }
+
+/** ------------------------------------------------------------------ */
+/* Bare-symbol resolution via the exportedSymbols map.                  */
+/** ------------------------------------------------------------------ */
+
+const SYMBOL_IDENT = /[A-Za-z_$][\w$]{1,}/g;
+const SYMBOL_STOP = new Set([
+  'the', 'and', 'for', 'are', 'was', 'you', 'not', 'but', 'can', 'with',
+  'from', 'have', 'will', 'your', 'please', 'this', 'that', 'fix', 'bug',
+  'issue', 'error', 'code', 'function', 'class', 'method', 'test', 'tests',
+  'make', 'add', 'update', 'remove', 'refactor', 'improve', 'broken',
+  'does', 'why', 'how', 'what', 'where', 'is', 'it', 'to', 'of', 'in',
+  'on', 'my', 'me', 'our', 'us', 'work', 'works', 'working', 'need', 'help'
+]);
+
+/** Identifiers in a goal that could be bare symbol references. */
+export function goalSymbols(goal: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of String(goal || '').match(SYMBOL_IDENT) || []) {
+    if (SYMBOL_STOP.has(m.toLowerCase())) continue;
+    if (/^[a-z]{1,2}$/.test(m)) continue; // 1-2 char lowercase: function words
+    if (seen.has(m)) continue;
+    seen.add(m);
+    out.push(m);
+  }
+  return out;
+}
+
+export interface SymbolResolution {
+  /** The identifier as it appeared in the goal. */
+  symbol: string;
+  /** The canonical exportedSymbols key it resolved to (for kind lookup). */
+  key: string;
+  /** Defining files for the symbol. */
+  files: IndexedFileDetail[];
+}
+
+/**
+ * Resolve bare symbol references in a goal to defining file paths via the
+ * persistent index's exportedSymbols map: "fix authenticate()" ->
+ * [{ symbol: 'authenticate', files: [src/auth/auth.ts] }]. Exact matches
+ * first, case-insensitive fallback. Empty when nothing resolves.
+ */
+export function resolveSymbols(index: PersistentRepositoryIndex, goal: string, limit = 8): SymbolResolution[] {
+  const byPath = new Map(index.files.map((f) => [f.path, f]));
+  const lowerKeys = new Map<string, string[]>();
+  const out: SymbolResolution[] = [];
+  for (const name of goalSymbols(goal)) {
+    const direct = index.exportedSymbols[name];
+    let keys = direct ? [name] : lowerKeys.get(name.toLowerCase());
+    if (!direct && !keys) {
+      keys = [];
+      for (const key of Object.keys(index.exportedSymbols)) {
+        if (key.toLowerCase() === name.toLowerCase()) keys.push(key);
+      }
+      lowerKeys.set(name.toLowerCase(), keys);
+    }
+    if (!keys || keys.length === 0) continue;
+    const files = keys
+      .flatMap((key) => (index.exportedSymbols[key] || []).map((p) => byPath.get(p)))
+      .filter((f): f is IndexedFileDetail => Boolean(f))
+      .slice(0, limit);
+    if (files.length > 0) out.push({ symbol: name, key: keys[0], files });
+  }
+  return out;
+}

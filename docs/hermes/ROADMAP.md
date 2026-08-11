@@ -123,6 +123,10 @@ stem-aware matcher ("authentication" hits `authenticate`/`auth`) and gated so
 unrelated goals inject no noise. Verified by `scripts/smoke-repo-index.ts`
 (9 sections: extraction, imports, classification, full index, symbol
 matching, disk round-trip, incremental refresh, engine integration, goal
-hints) and all prior smokes.
+hints) and all prior smokes. Symbol references now also resolve
+directly through the index's exportedSymbols map ("fix authenticate()" ->
+src/auth/auth.ts, exact + case-insensitive) via `ContextEngine.resolveSymbols`,
+and a `symbol` skill answers "where does this symbol live?" with the defining
+files, kinds, and lines.
 Phase 9 next: keep the index warm — a lightweight watcher or on-demand
 refresh in the mission loop so symbols never go stale during long sessions.
