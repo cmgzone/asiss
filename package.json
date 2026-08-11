@@ -45,7 +45,8 @@
     "smoke:baseline": "ts-node scripts/smoke-baseline.ts",
     "smoke:tools": "ts-node scripts/smoke-tools.ts",
     "smoke:policy": "ts-node scripts/smoke-policy.ts",
-    "smoke:context": "ts-node scripts/smoke-context.ts"
+    "smoke:context": "ts-node scripts/smoke-context.ts",
+    "smoke:repo-index": "ts-node scripts/smoke-repo-index.ts"
   },
   "keywords": [],
   "author": "",

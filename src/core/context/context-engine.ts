@@ -33,12 +33,18 @@ import {
   RepositoryContextOptions,
   RepositoryIndex
 } from './repository-context';
+import {
+  getRepositoryIndex,
+  matchBySymbols,
+  PersistentRepositoryIndex,
+  PersistentIndexOptions
+} from './repo-index';
 
 export interface ContextEngineConfig {
   /** Token budget for the assembled context. Default 32000. */
   maxTokens?: number;
   /** Repository context: surfaced when enabled and a workspace exists. */
-  repository?: { enabled?: boolean; maxFiles?: number; maxDepth?: number; maxListed?: number };
+  repository?: { enabled?: boolean; persistent?: boolean; maxFiles?: number; maxDepth?: number; maxListed?: number; dataRoot?: string };
   /** Summarize long sections via an injectable model. */
   summarize?: { enabled?: boolean; maxChars?: number };
   /** Cap history render truncation (chars per memory). Default 20000. */
@@ -98,19 +104,33 @@ export class ContextEngine {
       .join('\n');
   }
 
-  /** Repository index for a workspace (cached per root). */
+  /**
+   * Repository index for a workspace (cached per root). Prefers the Phase 8
+   * persistent, symbol-aware index (load -> incremental refresh -> save);
+   * falls back to the lightweight Phase 7 index when persistence is disabled
+   * or unavailable.
+   */
   indexRepository(root: string): RepositoryIndex | undefined {
     if (this.injectedIndex) return this.injectedIndex;
     if (!root) return undefined;
     const cached = this.indexCache.get(root);
     if (cached) return cached;
+    let index: RepositoryIndex | undefined;
     try {
-      const index = indexWorkspace(root, this.repositoryOptions());
-      this.indexCache.set(root, index);
-      return index;
+      if (this.config.repository?.persistent !== false) {
+        index = getRepositoryIndex(root, this.persistentOptions(), this.dataRoot());
+      } else {
+        index = indexWorkspace(root, this.repositoryOptions());
+      }
     } catch {
-      return undefined;
+      try {
+        index = indexWorkspace(root, this.repositoryOptions());
+      } catch {
+        return undefined;
+      }
     }
+    if (index) this.indexCache.set(root, index);
+    return index;
   }
 
   /** Rendered repository context block for a workspace + goal. */
@@ -120,10 +140,11 @@ export class ContextEngine {
     return renderRepositoryContext(index, goal, { maxListed: this.config.repository?.maxListed ?? 40 });
   }
 
-  /** Relevant files for the goal (Phase 8 builds on this). */
+  /** Relevant files for the goal: symbol-aware when the index is persistent. */
   relevantFiles(root: string, goal: string, limit = 12) {
     const index = this.indexRepository(root);
     if (!index) return [];
+    if (isPersistentIndex(index)) return matchBySymbols(index, goal, limit);
     return matchFiles(index, goal, limit);
   }
 
@@ -147,6 +168,19 @@ export class ContextEngine {
       maxDepth: repo.maxDepth
     };
   }
+
+  private persistentOptions(): PersistentIndexOptions {
+    return this.repositoryOptions();
+  }
+
+  private dataRoot(): string | undefined {
+    return this.config.repository?.dataRoot;
+  }
+}
+
+/** True when the index carries the Phase 8 symbol/import enrichment. */
+function isPersistentIndex(index: RepositoryIndex): index is PersistentRepositoryIndex {
+  return (index as PersistentRepositoryIndex).version !== undefined;
 }
 
 /** Process-wide default ContextEngine (pure defaults: no summarization model). */

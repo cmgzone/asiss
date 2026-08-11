@@ -103,5 +103,20 @@ AgentRunner's history renderer now delegates to the engine's `renderHistory`
 opt-in repository section (`agent.context.repository.enabled`) surfaces the
 files most relevant to the goal. Verified by `scripts/smoke-context.ts`
 (7 sections) and all prior smokes.
-Phase 8 next: repository intelligence — persistent index with symbols,
-imports and tests for coding tasks.
+Phase 8 is done: `src/core/context/repo-index.ts` builds a persistent,
+symbol-aware repository index on top of Phase 7's on-demand index. For each
+source file it extracts symbols (functions/classes/interfaces/types by
+language family), imports (a module graph), and test/config classification,
+then persists the index under the standard data root (`repo-index/<hash>.json`)
+and refreshes it incrementally — only files whose mtime/size changed are
+re-parsed, and vanished/new files are dropped/added. ContextEngine now prefers
+the persistent index by default (load -> refresh -> save, corrupt files
+rebuild; `repository.persistent: false` restores the lightweight walk), and
+`matchBySymbols` resolves goals to files via path + symbol + import signals
+with test/config bonuses ("fix authentication" -> src/auth/auth.ts and
+tests/auth/*; "add tests" surfaces test files; "docker deploy" surfaces
+Dockerfile). Verified by `scripts/smoke-repo-index.ts` (8 sections:
+extraction, imports, classification, full index, symbol matching, disk
+round-trip, incremental refresh, engine integration) and all prior smokes.
+Phase 9 next: keep the index warm — a lightweight watcher or on-demand
+refresh in the mission loop so symbols never go stale during long sessions.
