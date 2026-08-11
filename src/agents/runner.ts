@@ -79,7 +79,7 @@ import { chainOfThought } from '../core/chain-of-thought';
 import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
-import { taskEngine, taskEventBus } from '../core/task';
+import { installTaskEventProjections, taskEngine, taskEventBus } from '../core/task';
 import { loadHermesConfig } from '../core/config';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
 import { ContextEngine, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
@@ -153,53 +153,6 @@ export class AgentRunner {
     };
   }
 
-  /** Push approval lifecycle TaskEvents to the session's gateway (UI/Telegram). */
-  private forwardApprovalEventsToGateway(): void {
-    const map: Array<['ApprovalRequired' | 'ApprovalGranted' | 'ApprovalDenied', 'approval_required' | 'approval_granted' | 'approval_denied']> = [
-      ['ApprovalRequired', 'approval_required'],
-      ['ApprovalGranted', 'approval_granted'],
-      ['ApprovalDenied', 'approval_denied']
-    ];
-    for (const [busName, streamType] of map) {
-      taskEventBus.on(busName, (event) => {
-        const sessionId = String(event.data?.sessionId || '');
-        const approvalId = String(event.data?.approvalId || '');
-        if (!sessionId) return;
-        void this.gateway.sendStreamEvent(sessionId, {
-          type: streamType,
-          runId: `approval:${approvalId}`,
-          messageId: `approval:${approvalId}`,
-          approvalId,
-          name: String(event.data?.tool || 'tool'),
-          tool: String(event.data?.tool || 'tool'),
-          arguments: event.data?.arguments,
-          risk: Number(event.data?.risk || 0),
-          riskLabel: String(event.data?.riskLabel || 'low'),
-          reasons: Array.isArray(event.data?.reasons) ? (event.data.reasons as string[]) : [],
-          ...(event.name !== 'ApprovalRequired' ? { allowed: event.data?.allowed === true } : {})
-        });
-      });
-    }
-  }
-
-  /** Push repository-index warmth refreshes to the session's gateway (Web UI). */
-  private forwardRepositoryEventsToGateway(): void {
-    taskEventBus.on('RepositoryIndexRefreshed', (event) => {
-      const sessionId = String(event.data?.sessionId || '');
-      if (!sessionId) return;
-      void this.gateway.sendStreamEvent(sessionId, {
-        type: 'repository_refreshed',
-        runId: 'repo-index',
-        messageId: 'repo-index',
-        root: String(event.data?.root || ''),
-        fileCount: Number(event.data?.fileCount || 0),
-        filesReParsed: Number(event.data?.filesReParsed || 0),
-        symbolsRefreshed: Number(event.data?.symbolsRefreshed || 0),
-        timestamp: Number(event.timestamp || Date.now())
-      });
-    });
-  }
-
   constructor(gateway: IGateway) {
     this.gateway = gateway;
     this.memory = new MemoryManager();
@@ -231,8 +184,10 @@ export class AgentRunner {
     this.policyEngine = new PolicyEngine({
       approvalHandler: (verdict, ctx) => this.approvalCoordinator.requestApproval(verdict, ctx)
     });
-    this.forwardApprovalEventsToGateway();
-    this.forwardRepositoryEventsToGateway();
+    // Move 3: typed event-to-channel projection — the canonical table maps
+    // TaskEvents (approvals, repo warmth, recovery) to stream events; the
+    // runner no longer hand-wires forwards per event.
+    installTaskEventProjections(this.gateway);
     // Phase 7 ContextEngine: budgeted, relevance-based context construction.
     this.contextEngine = new ContextEngine({ config: this.loadConfig()?.agent?.context });
 

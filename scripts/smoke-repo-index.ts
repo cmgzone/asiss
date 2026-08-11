@@ -23,7 +23,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { ContextEngine, detectTestCommand, matchedTestFiles, resolveSymbols, runGoalTests, stemOf, warmOnToolEvents } from '../src/core/context';
-import { TaskEngine, TaskEventBus, TaskStore } from '../src/core/task';
+import { TaskEngine, TaskEventBus, TaskStore, installTaskEventProjections } from '../src/core/task';
 import { SymbolSkill } from '../src/skills/symbol';
 import { WarmthSkill } from '../src/skills/warmth';
 import {
@@ -731,6 +731,62 @@ async function main(): Promise<void> {
     }
   }
 
+
+  // ---- 17. Typed event-to-channel projection (Move 3) ----
+  {
+    const bus = new TaskEventBus();
+    const received: Array<{ sessionId: string; type: string }> = [];
+    const sink = {
+      sendStreamEvent(sessionId: string, event: any): void {
+        received.push({ sessionId, type: event.type });
+      }
+    };
+    const unsubscribe = installTaskEventProjections(sink, { bus });
+
+    // Approvals flow through the table.
+    await bus.emit({
+      name: 'ApprovalRequired',
+      taskId: 't1',
+      timestamp: Date.now(),
+      data: { sessionId: 's1', approvalId: 'a1', tool: 'shell', risk: 5, riskLabel: 'medium', reasons: ['destructive'] }
+    });
+    await bus.emit({
+      name: 'ApprovalGranted',
+      taskId: 't1',
+      timestamp: Date.now(),
+      data: { sessionId: 's1', approvalId: 'a1', tool: 'shell', allowed: true }
+    });
+
+    // Repository warmth reaches the sidebar indicator.
+    await bus.emit({
+      name: 'RepositoryIndexRefreshed',
+      taskId: 't2',
+      timestamp: Date.now(),
+      data: { sessionId: 's2', root: '/ws', fileCount: 42, filesReParsed: 3, symbolsRefreshed: 17 }
+    });
+
+    // Move 2 recovery events map to the compact recovery stream type.
+    await bus.emit({ name: 'TaskVerifying', taskId: 't3', timestamp: Date.now(), data: { sessionId: 's3' } });
+    await bus.emit({ name: 'TestFailed', taskId: 't3', timestamp: Date.now(), data: { sessionId: 's3', command: 'node --test x.test.js', exitCode: 1 } });
+
+    // Events without a projection are simply not routed.
+    await bus.emit({ name: 'TaskCreated', taskId: 't4', timestamp: Date.now(), data: { sessionId: 's4' } });
+
+    const types = new Set(received.map((r) => r.type));
+    assert.ok(received.some((r) => r.sessionId === 's1' && r.type === 'approval_required'), 'approval_required delivered');
+    assert.ok(received.some((r) => r.sessionId === 's1' && r.type === 'approval_granted'), 'approval_granted delivered');
+    assert.ok(received.some((r) => r.sessionId === 's2' && r.type === 'repository_refreshed'), 'repository_refreshed delivered');
+    assert.ok(received.some((r) => r.sessionId === 's3' && r.type === 'recovery'), 'recovery event delivered');
+    assert.ok(!received.some((r) => r.type === 'assistant_start'), 'no unprojected event routed');
+    assert.ok(!received.some((r) => r.sessionId === 's4'), 'TaskCreated has no projection');
+    assert.ok(types.has('recovery'), 'recovery type present');
+
+    // Unsubscribe stops delivery.
+    unsubscribe();
+    await bus.emit({ name: 'TestPassed', taskId: 't5', timestamp: Date.now(), data: { sessionId: 's5' } });
+    assert.ok(!received.some((r) => r.sessionId === 's5'), 'unsubscribe stops delivery');
+  }
+
   console.log(JSON.stringify({
     symbols: true,
     imports: true,
@@ -747,7 +803,8 @@ async function main(): Promise<void> {
     eventWarming: true,
     verifyThenRetry: true,
     warmthSkill: true,
-    diagnoseRecovery: true
+    diagnoseRecovery: true,
+    eventProjection: true
   }));
 }
 

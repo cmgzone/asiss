@@ -217,5 +217,21 @@ Verified by smoke-repo-index section 16 (events, records, transitions,
 diagnoser-failure survival, terminal no-op, end-to-end repository
 diagnoser) and the e2e runtime mission now asserting the canonical Task
 carries unit verification records and bumped attempts.
-Next: review Move 3 — typed event-to-channel projection, then the second
-architecture audit.
+Review Move 3 is done: typed event-to-channel projection.
+`src/core/task/task-event-projection.ts` replaces the runner's hand-wired
+forwards with one typed table (`TaskEventName -> stream-event factory`):
+approvals (required/granted/denied), repository warmth, and the Move 2
+recovery events (one compact `recovery` stream type, stage-discriminated
+for verifying/verified/verification_failed/test_passed/test_failed).
+Events without a projection are explicitly absent from the table and
+simply not routed; adding a TaskEventName grows the table type so hosts
+must decide. AgentRunner now just calls `installTaskEventProjections(this
+.gateway)` — no per-event forwarder edits. Verified by smoke-repo-index
+section 17 (approval/warmth/recovery routing, unprojected events ignored,
+unsubscribe) and the e2e runtime mission (behavior unchanged).
+All three review moves are done. Next: the second architecture audit —
+verify single-source-of-truth per concern (Task/Context/Tools/Policy/
+Models/Events/Repository/Recovery/Verification/Checkpoints/Memory/
+Learning/Telemetry), consolidate any remaining duplicate, then decide the
+next phase. GoalEngine stays a design decision for that audit, not a new
+abstraction now.
