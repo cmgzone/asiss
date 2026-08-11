@@ -10,3 +10,4 @@
 export * from './policy-types';
 export * from './policy-rules';
 export * from './policy-engine';
+export * from './policy-approval';

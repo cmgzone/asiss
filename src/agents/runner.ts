@@ -76,7 +76,8 @@ import { chainOfThought } from '../core/chain-of-thought';
 import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
-import { taskEngine } from '../core/task';
+import { taskEngine, taskEventBus } from '../core/task';
+import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
 import { ToolEngine, normalizeToolRequest } from '../core/tools';
 import fs from 'fs';
 import path from 'path';
@@ -118,6 +119,9 @@ export class AgentRunner {
   private scheduler: SchedulerManager;
   private dynamicTools: DynamicToolManager;
   private toolEngine: ToolEngine;
+  // Phase 5 ASK path: real user approvals instead of silent default outcomes.
+  private approvalCoordinator: ApprovalCoordinator;
+  private policyEngine: PolicyEngine;
   // Keys already warned about (tool-capping) so truncation warnings are logged
   // once per process run instead of on every message.
   private advertisedWarnings = new Set<string>();
@@ -140,6 +144,35 @@ export class AgentRunner {
     };
   }
 
+  /** Push approval lifecycle TaskEvents to the session's gateway (UI/Telegram). */
+  private forwardApprovalEventsToGateway(): void {
+    const map: Array<['ApprovalRequired' | 'ApprovalGranted' | 'ApprovalDenied', 'approval_required' | 'approval_granted' | 'approval_denied']> = [
+      ['ApprovalRequired', 'approval_required'],
+      ['ApprovalGranted', 'approval_granted'],
+      ['ApprovalDenied', 'approval_denied']
+    ];
+    for (const [busName, streamType] of map) {
+      taskEventBus.on(busName, (event) => {
+        const sessionId = String(event.data?.sessionId || '');
+        const approvalId = String(event.data?.approvalId || '');
+        if (!sessionId) return;
+        void this.gateway.sendStreamEvent(sessionId, {
+          type: streamType,
+          runId: `approval:${approvalId}`,
+          messageId: `approval:${approvalId}`,
+          approvalId,
+          name: String(event.data?.tool || 'tool'),
+          tool: String(event.data?.tool || 'tool'),
+          arguments: event.data?.arguments,
+          risk: Number(event.data?.risk || 0),
+          riskLabel: String(event.data?.riskLabel || 'low'),
+          reasons: Array.isArray(event.data?.reasons) ? (event.data.reasons as string[]) : [],
+          ...(event.name !== 'ApprovalRequired' ? { allowed: event.data?.allowed === true } : {})
+        });
+      });
+    }
+  }
+
   constructor(gateway: IGateway) {
     this.gateway = gateway;
     this.memory = new MemoryManager();
@@ -160,13 +193,27 @@ export class AgentRunner {
         return '';
       }
     });
+    // Phase 5 ASK path: approvals become TaskEvents (every client sees the
+    // same state) and are pushed to the session's gateway as stream events.
+    this.approvalCoordinator = new ApprovalCoordinator({
+      taskEngine,
+      bus: taskEventBus,
+      timeoutMs: 10 * 60 * 1000,
+      onTimeout: 'deny'
+    });
+    this.policyEngine = new PolicyEngine({
+      approvalHandler: (verdict, ctx) => this.approvalCoordinator.requestApproval(verdict, ctx)
+    });
+    this.forwardApprovalEventsToGateway();
+
     // Canonical ToolEngine (Phase 4): one consistent tool execution mechanism
     // for native skills, MCP tools and dynamic tools.
     this.toolEngine = new ToolEngine({
       skills: SkillRegistry,
       mcp: this.mcpManager,
       dynamicTools: this.dynamicTools,
-      checkpoints: checkpointManager
+      checkpoints: checkpointManager,
+      policyEngine: this.policyEngine
     });
 
     this.scheduler = new SchedulerManager(async (job) => {
@@ -1453,6 +1500,18 @@ export class AgentRunner {
   }
 
   async processMessage(sessionId: string, msg: Message) {
+    // Phase 5 ASK path: a user (or another client) answered a pending approval.
+    // Resolve it and unblock the waiting tool call without entering the loop.
+    if (typeof msg.metadata?.approvalId === 'string') {
+      const approved = msg.metadata?.allowed === true;
+      const resolved = await this.approvalCoordinator.resolveApproval(
+        msg.metadata.approvalId,
+        approved,
+        { userId: typeof msg.metadata?.userId === 'string' ? msg.metadata.userId : msg.senderId }
+      );
+      console.log(`[AgentRunner] ${resolved ? `Approval ${msg.metadata.approvalId} resolved: ${approved ? 'allowed' : 'denied'}` : `Approval ${msg.metadata.approvalId} not found (already resolved)`}`);
+      return;
+    }
     console.log(`[AgentRunner] Processing message for session ${sessionId}`);
     const isBackgroundMessage = msg.channel === 'background' || Boolean(msg.metadata?.backgroundGoalId);
 

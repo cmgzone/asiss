@@ -1449,6 +1449,28 @@ export class WebChannel implements ChannelAdapter {
           return;
         }
 
+        // Phase 5 ASK path: the UI answered a pending approval (Allow/Deny).
+        if (payload && typeof payload === 'object' && payload.type === 'approval_response'
+          && typeof payload.approvalId === 'string') {
+          if (this.handler) {
+            const user = this.auth.getUserBySession(socket.id);
+            const stableUserId = user?.id || socket.data.userId || socket.id;
+            this.handler({
+              id: uuidv4(),
+              channel: 'approval',
+              senderId: `${stableUserId}:approval`,
+              content: payload.allowed === true ? 'allow' : 'deny',
+              timestamp: Date.now(),
+              metadata: {
+                approvalId: payload.approvalId,
+                allowed: payload.allowed === true,
+                userId: stableUserId
+              }
+            });
+          }
+          return;
+        }
+
         const text = typeof payload === 'string'
           ? payload
           : (typeof payload?.text === 'string' ? payload.text : '');

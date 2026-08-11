@@ -22,7 +22,7 @@ export interface MediaPayload {
   filename?: string;
 }
 
-export type StreamEventType = 'assistant_start' | 'assistant_delta' | 'assistant_done' | 'assistant_error' | 'assistant_update' | 'tool_start' | 'tool_delta' | 'tool_done';
+export type StreamEventType = 'assistant_start' | 'assistant_delta' | 'assistant_done' | 'assistant_error' | 'assistant_update' | 'tool_start' | 'tool_delta' | 'tool_done' | 'approval_required' | 'approval_granted' | 'approval_denied';
 
 export interface StreamEventPayload {
   type: StreamEventType;
@@ -38,6 +38,14 @@ export interface StreamEventPayload {
   output?: string;
   status?: string;
   error?: string;
+  /** Approval flow (ASK path): unique request id, tool, risk, decision. */
+  approvalId?: string;
+  tool?: string;
+  risk?: number;
+  riskLabel?: string;
+  reasons?: string[];
+  arguments?: unknown;
+  allowed?: boolean;
 }
 
 export interface ChannelAdapter {

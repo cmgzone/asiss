@@ -33,6 +33,10 @@ export type TaskEventName =
   | 'ToolStarted'
   | 'ToolCompleted'
   | 'ToolFailed'
+  // User approval (Phase 5 ASK path)
+  | 'ApprovalRequired'
+  | 'ApprovalGranted'
+  | 'ApprovalDenied'
   // Agents / delegation
   | 'AgentSpawned'
   | 'AgentCompleted'

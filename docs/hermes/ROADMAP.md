@@ -70,7 +70,16 @@ pure allow mode — every rule defaults to 'allow' and unresolved ASKs default
 to allow — so adopting the engine changed nothing in production; the Phase 4
 workspace guard and allow/deny lists moved into the engine with identical
 scope (native tools). ToolEngine now runs the PolicyEngine for every tool
-before execution and attaches the full verdict to denied results. Verified by
-`scripts/smoke-policy.ts` (14 sections) and by all prior smokes unchanged.
+before execution and attaches the full verdict to denied results. The ASK path
+is finished too: `ApprovalCoordinator` (`src/core/policy/policy-approval.ts`)
+turns an ASK verdict into a real user decision — it emits `ApprovalRequired`
+on the TaskEventBus (forwarded to hookManager audit and, via AgentRunner, to
+the session's gateway as `approval_required` stream events), waits for the
+user, and on Allow/Deny emits `ApprovalGranted`/`ApprovalDenied` plus a
+decision record on the canonical Task. The web channel routes
+`approval_response` payloads back into the coordinator, and the UI renders an
+approval card with Allow/Deny buttons; unresolved requests fail closed after
+10 minutes. Verified by `scripts/smoke-policy.ts` (15 sections) and by all
+prior smokes unchanged.
 Phase 6 next: ModelEngine — capability/reliability/cost scoring instead of
 naive model routing.

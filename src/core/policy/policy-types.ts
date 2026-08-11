@@ -33,6 +33,10 @@ export interface PolicyCheck {
 }
 
 export interface PolicyVerdict {
+  /** The tool this verdict applies to. */
+  tool: string;
+  /** The request arguments, for approval UIs and audit. */
+  arguments?: Record<string, unknown>;
   decision: PolicyDecision;
   /** Human-readable summary of why. */
   reasons: string[];

@@ -86,6 +86,8 @@ export class PolicyEngine {
 
     if (config.enabled === false) {
       return {
+        tool: request.name,
+        arguments: (request.arguments as Record<string, unknown>) || {},
         decision: 'ALLOW',
         reasons: ['Policy engine disabled (policy.enabled = false).'],
         checks: [{ rule: 'policy-disabled', decision: 'N/A', reason: 'policy.enabled = false', risk: 0, config: 'policy.enabled' }],
@@ -119,6 +121,8 @@ export class PolicyEngine {
     const denies = checks.filter((c) => c.decision === 'DENY');
     if (denies.length > 0) {
       return {
+        tool: request.name,
+        arguments: (request.arguments as Record<string, unknown>) || {},
         decision: 'DENY',
         reasons: reasons.length > 0 ? reasons : ['Denied by policy.'],
         checks,
@@ -133,6 +137,8 @@ export class PolicyEngine {
       // High-risk tasks escalate ASK -> DENY when configured.
       if (taskRisk === 'high' && config.escalateAskOnHighRisk !== false) {
         return {
+          tool: request.name,
+          arguments: (request.arguments as Record<string, unknown>) || {},
           decision: 'DENY',
           reasons: [...reasons, `ASK escalated to DENY: task risk is ${taskRisk}.`],
           checks,
@@ -140,7 +146,7 @@ export class PolicyEngine {
           taskRisk
         };
       }
-      const pending: PolicyVerdict = { decision: 'ASK', reasons, checks, risk, taskRisk };
+      const pending: PolicyVerdict = { tool: request.name, arguments: (request.arguments as Record<string, unknown>) || {}, decision: 'ASK', reasons, checks, risk, taskRisk };
       const approve = ctx.approve || this.approvalHandler;
       let approved: boolean;
       if (typeof approve === 'function') {
@@ -158,7 +164,7 @@ export class PolicyEngine {
       return { ...pending, decision: 'DENY', approved: false };
     }
 
-    return { decision: 'ALLOW', reasons, checks, risk, taskRisk };
+    return { tool: request.name, arguments: (request.arguments as Record<string, unknown>) || {}, decision: 'ALLOW', reasons, checks, risk, taskRisk };
   }
 }
 
