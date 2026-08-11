@@ -22,7 +22,7 @@ export interface MediaPayload {
   filename?: string;
 }
 
-export type StreamEventType = 'assistant_start' | 'assistant_delta' | 'assistant_done' | 'assistant_error' | 'assistant_update' | 'tool_start' | 'tool_delta' | 'tool_done' | 'approval_required' | 'approval_granted' | 'approval_denied';
+export type StreamEventType = 'assistant_start' | 'assistant_delta' | 'assistant_done' | 'assistant_error' | 'assistant_update' | 'tool_start' | 'tool_delta' | 'tool_done' | 'approval_required' | 'approval_granted' | 'approval_denied' | 'repository_refreshed';
 
 export interface StreamEventPayload {
   type: StreamEventType;
@@ -46,6 +46,12 @@ export interface StreamEventPayload {
   reasons?: string[];
   arguments?: unknown;
   allowed?: boolean;
+  /** Repository index warmth (Phase 9 telemetry): refresh stats per workspace. */
+  root?: string;
+  fileCount?: number;
+  filesReParsed?: number;
+  symbolsRefreshed?: number;
+  timestamp?: number;
 }
 
 export interface ChannelAdapter {

@@ -1471,6 +1471,43 @@ export class WebChannel implements ChannelAdapter {
           return;
         }
 
+        // Repository warmth: the UI asked for an on-demand index refresh.
+        if (payload && typeof payload === 'object' && payload.type === 'repo_refresh') {
+          if (this.handler) {
+            const user = this.auth.getUserBySession(socket.id);
+            const stableUserId = user?.id || socket.data.userId || socket.id;
+            const projectContext = this.resolveProjectContext(payload?.projectId);
+            const requestedConversationId = typeof payload?.conversationId === 'string'
+              ? payload.conversationId.trim()
+              : '';
+            const conversation = !projectContext && requestedConversationId
+              ? conversationManager.getOwned(requestedConversationId, stableUserId)
+              : undefined;
+            const resolvedWorkspacePath = projectContext?.workspacePath
+              || conversation?.workspacePath;
+            if (resolvedWorkspacePath) {
+              this.handler({
+                id: uuidv4(),
+                channel: 'web',
+                senderId: `${stableUserId}:repo-refresh`,
+                content: '__repo_refresh__',
+                timestamp: Date.now(),
+                metadata: {
+                  repoRefresh: true,
+                  username: user ? user.username : 'Anonymous',
+                  baseUserId: stableUserId,
+                  projectId: projectContext?.id,
+                  conversationId: conversation?.id,
+                  projectWorkspacePath: resolvedWorkspacePath
+                }
+              });
+            } else {
+              socket.emit('error', 'No attached workspace to refresh. Attach a project folder first.');
+            }
+          }
+          return;
+        }
+
         const text = typeof payload === 'string'
           ? payload
           : (typeof payload?.text === 'string' ? payload.text : '');

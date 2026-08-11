@@ -41,6 +41,7 @@ import { SerperSkill } from '../skills/serper';
 import { MemorySkill } from '../skills/memory';
 import { CodeSearchSkill } from '../skills/code-search';
 import { SymbolSkill } from '../skills/symbol';
+import { WarmthSkill } from '../skills/warmth';
 import { GitSkill } from '../skills/git';
 import { CodeReviewSkill } from '../skills/code-review';
 import { PlanModeSkill } from '../skills/plan-mode';
@@ -180,6 +181,24 @@ export class AgentRunner {
     }
   }
 
+  /** Push repository-index warmth refreshes to the session's gateway (Web UI). */
+  private forwardRepositoryEventsToGateway(): void {
+    taskEventBus.on('RepositoryIndexRefreshed', (event) => {
+      const sessionId = String(event.data?.sessionId || '');
+      if (!sessionId) return;
+      void this.gateway.sendStreamEvent(sessionId, {
+        type: 'repository_refreshed',
+        runId: 'repo-index',
+        messageId: 'repo-index',
+        root: String(event.data?.root || ''),
+        fileCount: Number(event.data?.fileCount || 0),
+        filesReParsed: Number(event.data?.filesReParsed || 0),
+        symbolsRefreshed: Number(event.data?.symbolsRefreshed || 0),
+        timestamp: Number(event.timestamp || Date.now())
+      });
+    });
+  }
+
   constructor(gateway: IGateway) {
     this.gateway = gateway;
     this.memory = new MemoryManager();
@@ -212,6 +231,7 @@ export class AgentRunner {
       approvalHandler: (verdict, ctx) => this.approvalCoordinator.requestApproval(verdict, ctx)
     });
     this.forwardApprovalEventsToGateway();
+    this.forwardRepositoryEventsToGateway();
     // Phase 7 ContextEngine: budgeted, relevance-based context construction.
     this.contextEngine = new ContextEngine();
 
@@ -286,6 +306,7 @@ export class AgentRunner {
     SkillRegistry.register(new MemorySkill(this.memory));
     SkillRegistry.register(new CodeSearchSkill());
     SkillRegistry.register(new SymbolSkill({ contextEngine: this.contextEngine }));
+    SkillRegistry.register(new WarmthSkill({ contextEngine: this.contextEngine }));
     SkillRegistry.register(new GitSkill());
     SkillRegistry.register(new CodeReviewSkill());
     SkillRegistry.register(new PlanModeSkill());
@@ -1583,6 +1604,34 @@ export class AgentRunner {
         { userId: typeof msg.metadata?.userId === 'string' ? msg.metadata.userId : msg.senderId }
       );
       console.log(`[AgentRunner] ${resolved ? `Approval ${msg.metadata.approvalId} resolved: ${approved ? 'allowed' : 'denied'}` : `Approval ${msg.metadata.approvalId} not found (already resolved)`}`);
+      return;
+    }
+    // Repository warmth: the Web UI asked for an on-demand index refresh.
+    if (msg.metadata?.repoRefresh === true) {
+      const workspace = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
+      if (!workspace) {
+        void this.gateway.sendResponse(sessionId, 'No attached workspace to refresh.');
+        return;
+      }
+      const refreshed = this.contextEngine.refreshRepository(workspace, {
+        force: true,
+        sessionId,
+        taskId: typeof msg.metadata?.taskId === 'string' ? msg.metadata.taskId : undefined
+      });
+      const warmth = this.contextEngine.indexWarmth(workspace);
+      void this.gateway.sendStreamEvent(sessionId, {
+        type: 'repository_refreshed',
+        runId: 'repo-index',
+        messageId: 'repo-index',
+        root: workspace,
+        fileCount: Number(warmth?.fileCount || 0),
+        filesReParsed: Number(warmth?.filesReParsed || 0),
+        symbolsRefreshed: Number(warmth?.symbolsRefreshed || 0),
+        timestamp: Date.now()
+      });
+      void this.gateway.sendResponse(sessionId, refreshed
+        ? `Repository index refreshed: ${warmth?.fileCount || 0} files, ${warmth?.symbolsRefreshed || 0} symbols re-parsed.`
+        : 'Repository index is already up to date.');
       return;
     }
     console.log(`[AgentRunner] Processing message for session ${sessionId}`);

@@ -25,6 +25,7 @@ import path from 'path';
 import { ContextEngine, detectTestCommand, matchedTestFiles, resolveSymbols, runGoalTests, stemOf, warmOnToolEvents } from '../src/core/context';
 import { TaskEventBus } from '../src/core/task';
 import { SymbolSkill } from '../src/skills/symbol';
+import { WarmthSkill } from '../src/skills/warmth';
 import {
   buildPersistentIndex,
   extractImports,
@@ -597,6 +598,48 @@ async function main(): Promise<void> {
     }
   }
 
+
+  // ---- 15. Warmth skill (Phase 11 follow-up) ----
+  {
+    const root = tmpRepo('repo-index-15-');
+    const dataRoot = tmpRepo('repo-data-15-');
+    try {
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+      const skill = new WarmthSkill({ contextEngine: engine });
+      assert.ok(skill.capabilities.includes('index_warmth'), 'warmth capability registered');
+
+      // Before any index exists the skill reports never_warmed with guidance.
+      const never = await skill.execute({ action: 'status', __workspacePath: root });
+      assert.strictEqual(never.freshness, 'never_warmed', 'never-warmed status');
+
+      // After a build, status reports the recorded warmth.
+      engine.indexRepository(root);
+      engine.refreshRepository(root, { force: true, sessionId: 'warmth-skill-test' });
+      const status = await skill.execute({ action: 'status', __workspacePath: root });
+      assert.strictEqual(status.freshness, 'fresh', 'fresh after build');
+      assert.ok(typeof status.fileCount === 'number', 'file count present');
+      assert.ok(typeof status.lastRefreshMsAgo === 'number', 'age present');
+
+      // A new exported symbol is invisible to the cached index...
+      write(root, 'src/added.ts', 'export function brandNewThing() {}\n');
+      const before = engine.indexWarmth(root)!.filesReParsed;
+      // ...until refresh re-parses it; the skill's refresh action forces it.
+      const refreshed = await skill.execute({ action: 'refresh', __workspacePath: root });
+      assert.strictEqual(refreshed.action, 'refresh', 'refresh action echoed');
+      const after = engine.indexWarmth(root)!.filesReParsed;
+      assert.ok(after > before, 'refresh re-parsed the new file');
+      const resolved = resolveSymbols(engine.indexRepository(root) as any, 'brandNewThing', 4);
+      assert.ok(resolved.length > 0, 'fresh symbol resolves after skill refresh');
+
+      // Default action is status.
+      const defaulted = await skill.execute({ __workspacePath: root });
+      assert.strictEqual(defaulted.action, 'status', 'default action is status');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+  }
+
   console.log(JSON.stringify({
     symbols: true,
     imports: true,
@@ -611,7 +654,8 @@ async function main(): Promise<void> {
     warmRefresh: true,
     warmthTelemetry: true,
     eventWarming: true,
-    verifyThenRetry: true
+    verifyThenRetry: true,
+    warmthSkill: true
   }));
 }
 

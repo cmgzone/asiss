@@ -171,6 +171,16 @@ output cap), advisory-only, opt-out via `verifyOnFailure.enabled`. Verified
 by smoke-repo-index section 14 (stems, matching, detection, passing +
 failing runs) and the e2e runtime smoke (the failed verification step now
 runs the sibling `node --test` and records `exit 0` in context).
-Phase 12 next: index warmth as a first-class skill (`/warmth`), then a
-subtle warmth indicator in the web UI — then reassess the architecture
-before the next major phase.
+The warmth skill (`/warmth`, `WarmthSkill`, capability `index_warmth`) is
+done: it reports per-workspace freshness (fresh / recent / stale /
+never_warmed), last-refresh age, file/symbol counts from the Phase 9
+warmth snapshots, and a `refresh` action that forces the incremental
+re-index — so Hermes can reason about its own repository intelligence.
+The web UI now shows a subtle Repository indicator in the sidebar: a
+green/amber/red dot for freshness, last-refresh age, files/symbols
+re-parsed per refresh (from `RepositoryIndexRefreshed` events forwarded
+as `repository_refreshed` stream events), and a ⟳ button that requests an
+on-demand refresh through the socket (`repo_refresh` → runner
+force-warm). Verified by smoke-repo-index section 15 and the e2e runtime
+smoke.
+Architecture reassessment is the next step before any new major phase.
