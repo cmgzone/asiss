@@ -328,3 +328,38 @@ tool-producing, failed, verification-required, multi-turn continuation,
 sequential enforcement, blocked, engine-owned completion) and by all prior
 smokes unchanged (`smoke:baseline`, `smoke:runtime` e2e mission,
 `smoke:repo-index`, `smoke:tools`).
+
+**Phase 12, Move 2 — the completion verdict hook (done).** The runner's old
+`completionBlocked` / `continuationReason` inline decision is gone. The
+completion decision now lives in the turn contract: `TaskEngine.runTurn()`
+accepts an optional `verdict` plus a `TaskCompletionEvidence` payload, and
+when the verdict is omitted it asks its **completion-verdict hook** (per-call
+via `TaskTurnRunOptions.completionVerdict`, engine-level via
+`TaskEngineOptions.completionVerdict`, else rejects) "is completion allowed?"
+The hook answers `continue` / `verify` / `complete` / `fail` / `blocked`; the
+engine owns the resulting lifecycle transition, records the answer as a
+`TaskDecision`, and surfaces the verdict `reason` on `TaskTurnResult`. The
+runner now supplies the evidence (tool counts, batch failure, verification
+state, forced-continuation budget, final draft) and reacts to the engine's
+returned `action` — it no longer computes `missionCompleted` from its own
+boolean. Constraint honored: **the decision moved, it was not duplicated** —
+`rg completionBlocked src/agents/runner.ts` matches only the explanatory
+comment; the verdict is a declared answer to the engine's question and the
+Task's terminal state is set inside `runTurn`. The old heuristic survives as
+`AgentRunner.completionVerdict()` — host domain knowledge that classifies the
+goal/tool evidence and draft text — answering the engine's question, with a
+task-less degraded fallback that still routes the same judgment. Verified by
+`npm run smoke:turn-contract` (12 sections — 4 new: hook continue, hook
+blocked on exhausted budget, hook complete, engine-level hook + guard) and by
+`npm run smoke:runtime` (the 6-turn e2e mission still completes through the
+moved decision).
+
+**Phase 12, Move 3 (planned) — verify/diagnose in-loop.** Route the mission's
+verification-pending continuations and late-failure recoveries through the
+engine's in-loop `diagnose` authority via the `verify` verdict already wired in
+Move 1/2, so the "run verification before completion" and "recover after
+failure" decisions also stop being host-side bools.
+
+**Phase 12, Move 4 (planned) — delegate the loop body.** Turn the mission
+loop's model+tool batch body into the host hook the turn contract drives, so
+AgentRunner stops owning the loop.

@@ -16,6 +16,16 @@
  *   6. sequential enforcement — non-sequential turn numbers are rejected
  *   7. blocked turn — verdict blocked -> FAILED with PARTIAL outcome
  *   8. engine-owned completion — complete verdict records outcome + 100%
+ *   9. completion-verdict hook (continue) — no explicit verdict: the engine
+ *      asks the host hook "is completion allowed?", owns the transition, and
+ *      records the answer as a decision
+ *   10. completion-verdict hook (blocked) — evidence with an exhausted retry
+ *       budget and a failed batch -> blocked -> FAILED with PARTIAL outcome
+ *   11. completion-verdict hook (complete) — hook's complete answer terminates
+ *       the task with SUCCESS + 100%
+ *   12. engine-level hook + missing-hook guard — engine-level hook answers
+ *       when no per-call hook is passed; runTurn without a verdict and without
+ *       any hook rejects
  */
 
 import assert from 'assert';
@@ -209,7 +219,103 @@ async function main() {
     console.log('8. engine-owned completion                      ok');
   }
 
-  console.log(JSON.stringify({ success: true, sections: 8 }));
+  // ---- 9. completion-verdict hook: engine asks, host answers (continue) ---
+  {
+    const { engine } = setup();
+    const task = await mission(engine);
+    let asked = false;
+    const result = await engine.runTurn(task.id, {
+      turn: 1,
+      evidence: { toolRequired: true, totalToolCalls: 0, forcedContinuations: 0, maxForcedContinuations: 4 }
+    }, {
+      completionVerdict: async ({ evidence }) => {
+        asked = true;
+        assert.strictEqual(evidence.toolRequired, true, 'engine passes the host evidence');
+        return { type: 'continue', reason: 'The action task has not used any tools yet.' };
+      }
+    });
+    assert.ok(asked, 'engine asked the host for the completion verdict');
+    assert.strictEqual(result.action, 'continue', 'continue action returned');
+    assert.strictEqual(result.reason, 'The action task has not used any tools yet.', 'reason surfaced to the host');
+    assert.strictEqual(result.task.status, 'EXECUTING', 'task stays EXECUTING');
+    assert.ok(
+      result.task.decisions.some((d) => d.summary.includes('completion verdict: continue')),
+      'completion verdict recorded as a decision'
+    );
+    console.log('9. completion-verdict hook (continue)            ok');
+  }
+
+  // ---- 10. completion-verdict hook: blocked on exhausted budget ----
+  {
+    const { engine } = setup();
+    const task = await mission(engine);
+    const result = await engine.runTurn(task.id, {
+      turn: 1,
+      evidence: { lastBatchHadFailure: true, forcedContinuations: 4, maxForcedContinuations: 4 }
+    }, {
+      // Mirrors the runner's old text/tool/verification completionBlocked
+      // heuristic, now answered as a verdict the engine owns.
+      completionVerdict: async ({ evidence }) => {
+        const withinBudget = (evidence.forcedContinuations ?? 0) < (evidence.maxForcedContinuations ?? 4);
+        const blocked = Boolean(evidence.lastBatchHadFailure);
+        return withinBudget && !blocked
+          ? { type: 'continue', reason: 'recover' }
+          : blocked
+            ? { type: 'blocked', error: 'Required tool work or verification did not succeed.', reason: 'tool work failed' }
+            : { type: 'complete', summary: evidence.finalDraft };
+      }
+    });
+    assert.strictEqual(result.action, 'blocked', 'blocked action returned');
+    assert.strictEqual(result.task.status, 'FAILED', 'blocked task is FAILED');
+    assert.strictEqual(result.task.outcome?.status, 'PARTIAL', 'blocked outcome is PARTIAL');
+    assert.strictEqual(result.error, 'Required tool work or verification did not succeed.', 'blocked error surfaced');
+    console.log('10. completion-verdict hook (blocked)            ok');
+  }
+
+  // ---- 11. completion-verdict hook: complete ----
+  {
+    const { engine } = setup();
+    const task = await mission(engine);
+    const result = await engine.runTurn(task.id, {
+      turn: 1,
+      evidence: { finalDraft: 'fixed and verified for real this time', toolRequired: true, totalToolCalls: 2 }
+    }, {
+      completionVerdict: async ({ evidence }) => ({
+        type: 'complete',
+        summary: (evidence.finalDraft || '').slice(0, 80)
+      })
+    });
+    assert.strictEqual(result.action, 'complete', 'complete action returned');
+    assert.strictEqual(result.task.status, 'COMPLETED', 'task COMPLETED');
+    assert.strictEqual(result.task.outcome?.status, 'SUCCESS', 'SUCCESS outcome');
+    assert.strictEqual(result.task.progress, 100, 'completed task has 100% progress');
+    assert.strictEqual(result.task.outcome?.summary, 'fixed and verified for real this time', 'summary recorded');
+    console.log('11. completion-verdict hook (complete)           ok');
+  }
+
+  // ---- 12. engine-level hook + missing-hook guard ----
+  {
+    const engine = new TaskEngine({
+      store: new TaskStore({ filePath: '' }),
+      bus: new TaskEventBus(),
+      completionVerdict: async () => ({ type: 'continue', reason: 'engine-level hook' })
+    });
+    const task = await mission(engine);
+    const result = await engine.runTurn(task.id, { turn: 1, evidence: { toolRequired: true } });
+    assert.strictEqual(result.action, 'continue', 'engine-level hook answers when the host omits a per-call hook');
+    assert.strictEqual(result.reason, 'engine-level hook', 'engine-level reason surfaced');
+
+    const bare = new TaskEngine({ store: new TaskStore({ filePath: '' }), bus: new TaskEventBus() });
+    const bareTask = await mission(bare);
+    await assert.rejects(
+      () => bare.runTurn(bareTask.id, { turn: 1, evidence: { finalDraft: 'x' } }),
+      /requires either a `verdict` or a completionVerdict hook/,
+      'runTurn without a verdict and without any hook rejects'
+    );
+    console.log('12. engine-level hook + guard                   ok');
+  }
+
+  console.log(JSON.stringify({ success: true, sections: 12 }));
 }
 
 main().then(() => process.exit(0)).catch((err) => {

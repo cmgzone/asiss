@@ -79,6 +79,7 @@ import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { installTaskEventProjections, taskEngine, taskEventBus, taskMemory } from '../core/task';
+import type { TaskCompletionContext, TaskCompletionEvidence, TaskTurnAction, TaskTurnVerdict } from '../core/task';
 import { loadHermesConfig } from '../core/config';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
 import { ContextEngine, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
@@ -674,6 +675,56 @@ export class AgentRunner {
     const opening = value.slice(0, 320);
     return /\b(i(?:'ll| will| am going to)|let me|next i(?:'ll| will)|i need to|i should now|i can now|we(?:'ll| will) now|proceeding to|starting (?:with|by)|continue by)\b/i.test(opening)
       || /(?:^|\n)\s*(?:next|now|then)\s*[:,-]/i.test(opening);
+  }
+
+  /**
+   * Phase 12 Move 2 — the completion judgment (host domain knowledge). Answers
+   * the engine's "is completion allowed?" question from the evidence the mission
+   * loop supplies. The engine owns the lifecycle transition; this only supplies
+   * the verdict, never terminates a Task directly.
+   */
+  private completionVerdict(evidence: TaskCompletionEvidence): TaskTurnVerdict {
+    const withinBudget = (evidence.forcedContinuations ?? 0) < (evidence.maxForcedContinuations ?? 4);
+    if (withinBudget) {
+      if (evidence.toolRequired && (evidence.totalToolCalls ?? 0) === 0) {
+        return { type: 'continue', reason: 'The action task has not used any tools yet.' };
+      }
+      if (evidence.lastBatchHadFailure) {
+        return { type: 'continue', reason: 'The latest tool batch failed and needs a recovery attempt.' };
+      }
+      if (evidence.verificationRequired && (evidence.lastMutationSequence ?? -1) > (evidence.lastVerificationSequence ?? -1)) {
+        return { type: 'continue', reason: 'Changes were made but no later verification command has run.' };
+      }
+      if (this.looksLikeProgressOnly(evidence.finalDraft || '')) {
+        return { type: 'continue', reason: 'The draft only promises future work instead of completing it.' };
+      }
+    }
+    const blocked = evidence.lastBatchHadFailure
+      || (evidence.toolRequired && (evidence.totalToolCalls ?? 0) === 0)
+      || (evidence.verificationRequired && (evidence.lastMutationSequence ?? -1) > (evidence.lastVerificationSequence ?? -1));
+    if (blocked) {
+      return {
+        type: 'blocked',
+        error: 'Required tool work or verification did not succeed.',
+        reason: evidence.lastBatchHadFailure ? 'tool work failed' : 'required tool work or verification is missing'
+      };
+    }
+    return { type: 'complete', summary: (evidence.finalDraft || '').trim() || undefined };
+  }
+
+  /** Bound form the engine's completion-verdict hook expects (Phase 12 Move 2). */
+  private readonly completionVerdictHook = async (context: TaskCompletionContext): Promise<TaskTurnVerdict> =>
+    this.completionVerdict(context.evidence);
+
+  private verdictAction(verdict: TaskTurnVerdict): TaskTurnAction {
+    switch (verdict.type) {
+      case 'continue': return 'continue';
+      case 'verify': return 'verify';
+      case 'complete': return 'complete';
+      case 'fail': return 'failed';
+      case 'blocked': return 'blocked';
+      default: return 'complete';
+    }
   }
 
   private isMutationToolCall(call: any): boolean {
@@ -1798,6 +1849,7 @@ export class AgentRunner {
         ? Math.max(1, Math.floor(agentConfig.maxPrematureCompletions))
         : 3);
     let forcedContinuations = 0;
+    let missionTurn = 0;
     let totalToolCalls = 0;
     let lastBatchHadFailure = false;
     let lastToolError = '';
@@ -2726,25 +2778,47 @@ export class AgentRunner {
           // Continue loop to let model interpret results
         } else {
           const text = (response.content || "").trim();
-          let continuationReason = '';
-          if (forcedContinuations < maxForcedContinuations) {
-            if (toolRequired && totalToolCalls === 0) {
-              continuationReason = 'The action task has not used any tools yet.';
-            } else if (lastBatchHadFailure) {
-              continuationReason = 'The latest tool batch failed and needs a recovery attempt.';
-            } else if (verificationRequired && lastMutationSequence > lastVerificationSequence) {
-              continuationReason = 'Changes were made but no later verification command has run.';
-            } else if (this.looksLikeProgressOnly(text)) {
-              continuationReason = 'The draft only promises future work instead of completing it.';
-            }
+
+          // Phase 12 Move 2 — the completion decision moves into the engine's
+          // turn contract. The host supplies the evidence; the engine asks its
+          // completion-verdict hook "is completion allowed?" and owns the
+          // resulting lifecycle transition (continue / verify / complete /
+          // fail / blocked). The runner no longer computes completionBlocked.
+          missionTurn += 1;
+          const evidence: TaskCompletionEvidence = {
+            toolRequired,
+            totalToolCalls,
+            lastBatchHadFailure,
+            verificationRequired,
+            lastMutationSequence,
+            lastVerificationSequence,
+            forcedContinuations,
+            maxForcedContinuations,
+            finalDraft: text
+          };
+          let action: TaskTurnAction;
+          let reason: string | undefined;
+          if (missionTaskId) {
+            const turnResult = await taskEngine.runTurn(missionTaskId, { turn: missionTurn, evidence }, {
+              completionVerdict: this.completionVerdictHook
+            });
+            action = turnResult.action;
+            reason = turnResult.reason;
+          } else {
+            // Degraded path (beginMissionTask failed): the host still answers
+            // the completion question, but there is no canonical Task to
+            // transition. The judgment stays in one place either way.
+            const verdict = this.completionVerdict(evidence);
+            action = this.verdictAction(verdict);
+            reason = 'reason' in verdict ? verdict.reason : ('error' in verdict ? verdict.error : undefined);
           }
 
-          if (continuationReason) {
+          if (action === 'continue' || action === 'verify') {
             forcedContinuations += 1;
             this.memory.add(sessionId, {
               role: 'system',
               content: [
-                `Runtime completion check: ${continuationReason}`,
+                `Runtime completion check: ${reason || 'The mission is not yet complete.'}`,
                 'Continue autonomously now. Use the next required tool, recover from the error, or run verification.',
                 'Do not repeat the draft and do not ask the user to continue.'
               ].join('\n'),
@@ -2754,13 +2828,12 @@ export class AgentRunner {
             continue;
           }
 
-          const completionBlocked = lastBatchHadFailure
-            || (toolRequired && totalToolCalls === 0)
-            || (verificationRequired && lastMutationSequence > lastVerificationSequence);
-          const finalDraft = text || (completionBlocked
+          const completed = action === 'complete';
+          const blocked = !completed;
+          const finalDraft = text || (blocked
             ? 'I could not complete the task because the required tool work or verification did not succeed.'
             : 'The task completed, but the model returned no final summary.');
-          if (completionBlocked) {
+          if (blocked) {
             executionStateManager.markBlocked(sessionId, finalDraft);
           }
           const sanitized = guardrailManager.sanitizeOutput(finalDraft);
@@ -2769,26 +2842,26 @@ export class AgentRunner {
             role: 'assistant',
             content: cleanContent,
             timestamp: Date.now(),
-            metadata: { final: true, completed: !completionBlocked, reasoning: turnReasoning }
+            metadata: { final: true, completed, reasoning: turnReasoning }
           });
           await this.deliverFinalResponse(
             sessionId,
             cleanContent,
             turnRunId,
             turnMessageId,
-            !completionBlocked,
+            completed,
             turnReasoning
           );
-          missionCompleted = !completionBlocked;
+          missionCompleted = completed;
           missionSummary = cleanContent;
-          if (completionBlocked) {
+          if (blocked) {
             missionError = 'Required tool work or verification did not succeed.';
           }
           if (!isBackgroundMessage) {
             void this.learning.recordInteraction(sessionId, msg.content, cleanContent);
           }
           const currentGoal = mainGoalManager.getCurrent(sessionId);
-          if (!completionBlocked && currentGoal?.origin === 'auto') {
+          if (completed && currentGoal?.origin === 'auto') {
             mainGoalManager.completeGoal(sessionId, 'Completed by the autonomous execution loop.');
           }
           stoppedByStepLimit = false;

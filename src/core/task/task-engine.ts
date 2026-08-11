@@ -103,11 +103,55 @@ export interface TaskRunOutcome {
 export interface TaskEngineOptions {
   store?: TaskStore;
   bus?: TaskEventBus;
-  analyzer?: TaskAnalyzer;
-  planner?: TaskPlanner;
+  analyze?: TaskAnalyzer;
+  plan?: TaskPlanner;
+  exec?: TaskExecutor; // spelling kept for backward compat (was `executor` in Phase 1)
   executor?: TaskExecutor;
-  verifier?: TaskVerifier;
+  verify?: TaskVerifier;
+  repair?: TaskRepairer;
+  /** Engine-level completion-verdict hook (Phase 12 Move 2). */
+  completionVerdict?: TaskCompletionVerdictHook;
 }
+
+/**
+ * Evidence the host supplies for a completion verdict. The engine asks its
+ * completion-verdict hook "is completion allowed?"; the host answers using
+ * this evidence. The engine owns the resulting lifecycle transition, so the
+ * host never independently terminates a Task outside runTurn.
+ */
+export interface TaskCompletionEvidence {
+  /** True when the mission goal requires tool use at all. */
+  toolRequired?: boolean;
+  /** Total tool calls executed so far. */
+  totalToolCalls?: number;
+  /** True when the latest tool batch failed. */
+  lastBatchHadFailure?: boolean;
+  /** True when the mission goal requires post-mutation verification. */
+  verificationRequired?: boolean;
+  /** Highest mutation-tool sequence completed. */
+  lastMutationSequence?: number;
+  /** Highest verification-tool sequence completed. */
+  lastVerificationSequence?: number;
+  /** Forced-continuation budget already used (host turn state). */
+  forcedContinuations?: number;
+  /** Maximum premature-completion continuations allowed. */
+  maxForcedContinuations?: number;
+  /** The model's final draft text (basis for the host's text judgment). */
+  finalDraft?: string;
+}
+
+/** Context passed to a completion-verdict hook. */
+export interface TaskCompletionContext {
+  task: Task;
+  turn: number;
+  evidence: TaskCompletionEvidence;
+}
+
+/**
+ * The host answers the engine's completion question. The engine owns what the
+ * answer means for the Task lifecycle; the host only supplies the judgment.
+ */
+export type TaskCompletionVerdictHook = (context: TaskCompletionContext) => TaskTurnVerdict | Promise<TaskTurnVerdict>;
 
 export interface TaskRunOptions {
   executor?: TaskExecutor;
@@ -153,7 +197,13 @@ export type TaskTurnVerdict =
 export interface TaskTurnInput {
   /** 1-based turn number. Must increase by exactly one per call. */
   turn: number;
-  verdict: TaskTurnVerdict;
+  /** Explicit verdict, or omit it and let the completion-verdict hook answer. */
+  verdict?: TaskTurnVerdict;
+  /**
+   * Completion evidence. Required when `verdict` is omitted: the engine asks
+   * its completion-verdict hook (per-call or engine-level) for the verdict.
+   */
+  evidence?: TaskCompletionEvidence;
   /** Tools executed during this turn (recorded on the Task). */
   tools?: TaskTurnToolExecution[];
   /** Model used for this turn (recorded via assignModel when different). */
@@ -172,12 +222,20 @@ export interface TaskTurnResult {
   task: Task;
   /** Present after a 'verify' verdict: the diagnosis evidence gathered. */
   diagnosis?: TaskDiagnosis;
+  /** Verdict reason surfaced to the host (continue/verify verdicts). */
+  reason?: string;
   error?: string;
 }
 
 export interface TaskTurnRunOptions {
   /** Used by the 'verify' verdict: gathers recovery evidence in-loop. */
   diagnoser?: TaskDiagnoser;
+  /**
+   * Per-call completion-verdict hook. When `input.verdict` is omitted, the
+   * engine asks this hook (falling back to the engine-level hook) for the
+   * verdict and owns the resulting lifecycle transition.
+   */
+  completionVerdict?: TaskCompletionVerdictHook;
 }
 
 // --------------------------------------------------------------------- engine
@@ -189,14 +247,16 @@ export class TaskEngine {
   private readonly planner?: TaskPlanner;
   private readonly executor?: TaskExecutor;
   private readonly verifier?: TaskVerifier;
+  private readonly completionVerdict?: TaskCompletionVerdictHook;
 
   constructor(options: TaskEngineOptions = {}) {
     this.store = options.store || taskStore;
     this.bus = options.bus || taskEventBus;
-    this.analyzer = options.analyzer;
-    this.planner = options.planner;
+    this.analyzer = options.analyze;
+    this.planner = options.plan;
     this.executor = options.executor;
-    this.verifier = options.verifier;
+    this.verifier = options.verify;
+    this.completionVerdict = options.completionVerdict;
   }
 
   // ------------------------------------------------------------- queries
@@ -384,9 +444,16 @@ export class TaskEngine {
       throw new Error(`runTurn() turn must be sequential: expected ${expectedTurn}, got ${input.turn}.`);
     }
 
+    // Phase 12 Move 2 — the completion decision lives in the turn contract.
+    // The host either supplies an explicit verdict, or the engine asks its
+    // completion-verdict hook "is completion allowed?" and the hook answers
+    // (continue / verify / complete / fail / blocked). The engine owns the
+    // resulting lifecycle transition either way.
+    const verdict = input.verdict ?? await this.askCompletionVerdict(taskId, input, options);
+
     await this.emit('TaskTurnStarted', taskId, {
       turn: input.turn,
-      verdict: input.verdict.type,
+      verdict: verdict.type,
       ...(input.summary ? { summary: input.summary } : {})
     });
 
@@ -428,46 +495,49 @@ export class TaskEngine {
     let action: TaskTurnAction;
     let diagnosis: TaskDiagnosis | undefined;
     let error: string | undefined;
-    switch (input.verdict.type) {
+    let reason: string | undefined;
+    switch (verdict.type) {
       case 'continue':
         this.persistTurn(taskId, input.turn);
         action = 'continue';
+        reason = verdict.reason;
         break;
       case 'verify': {
         const outcome = await this.diagnose(taskId, {
           diagnoser: options.diagnoser,
-          detail: input.verdict.reason || input.summary
+          detail: verdict.reason || input.summary
         });
         diagnosis = outcome.diagnosis;
         this.persistTurn(taskId, input.turn);
         action = 'verify';
+        reason = verdict.reason;
         break;
       }
       case 'complete':
         await this.complete(taskId, {
           status: 'SUCCESS',
-          summary: input.verdict.summary || input.summary,
-          result: input.verdict.result,
-          confidence: input.verdict.confidence
+          summary: verdict.summary || input.summary,
+          result: verdict.result,
+          confidence: verdict.confidence
         });
         this.persistTurn(taskId, input.turn);
         action = 'complete';
         break;
       case 'fail':
-        await this.failTask(taskId, input.verdict.error, 'EXECUTING');
-        this.persist(new TaskEntity(this.store.require(taskId)).setOutcome({ status: 'FAILURE', summary: input.verdict.error }).record, {
+        await this.failTask(taskId, verdict.error, 'EXECUTING');
+        this.persist(new TaskEntity(this.store.require(taskId)).setOutcome({ status: 'FAILURE', summary: verdict.error }).record, {
           turns: input.turn
         });
         action = 'failed';
-        error = input.verdict.error;
+        error = verdict.error;
         break;
       case 'blocked': {
-        const failed = await this.failTask(taskId, input.verdict.error, 'EXECUTING');
-        this.persist(new TaskEntity(failed).setOutcome({ status: 'PARTIAL', summary: input.verdict.reason }).record, {
+        const failed = await this.failTask(taskId, verdict.error, 'EXECUTING');
+        this.persist(new TaskEntity(failed).setOutcome({ status: 'PARTIAL', summary: verdict.reason }).record, {
           turns: input.turn
         });
         action = 'blocked';
-        error = input.verdict.error;
+        error = verdict.error;
         break;
       }
       default:
@@ -476,7 +546,7 @@ export class TaskEngine {
 
     await this.emit('TaskTurnCompleted', taskId, {
       turn: input.turn,
-      verdict: input.verdict.type,
+      verdict: verdict.type,
       action,
       ...(error ? { error } : {})
     });
@@ -486,8 +556,37 @@ export class TaskEngine {
       action,
       task: this.store.require(taskId),
       ...(diagnosis ? { diagnosis } : {}),
+      ...(reason ? { reason } : {}),
       ...(error ? { error } : {})
     };
+  }
+
+  /**
+   * Asks the host "is completion allowed?" (Phase 12 Move 2). Used when the
+   * host omits the explicit verdict and instead supplies completion evidence.
+   * Records the host's answer as a decision so the canonical Task carries the
+   * completion-verdict evidence — the decision the runner used to make inline
+   * as `completionBlocked`.
+   */
+  private async askCompletionVerdict(taskId: string, input: TaskTurnInput, options: TaskTurnRunOptions): Promise<TaskTurnVerdict> {
+    const hook = options.completionVerdict || this.completionVerdict;
+    if (!hook) {
+      throw new Error('runTurn() requires either a `verdict` or a completionVerdict hook.');
+    }
+    const verdict = await hook({
+      task: this.require(taskId),
+      turn: input.turn,
+      evidence: input.evidence || {}
+    });
+    const detail = 'reason' in verdict
+      ? verdict.reason
+      : ('error' in verdict ? verdict.error : undefined);
+    await this.recordDecision(
+      taskId,
+      `completion verdict: ${verdict.type}`,
+      detail || 'no reason given'
+    );
+    return verdict;
   }
 
   /**
