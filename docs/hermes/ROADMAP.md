@@ -260,5 +260,20 @@ smoke asserts the summary matches the legacy format and that
 `current_task.json` is never written. Determinism fix: `mem.start`'s
 new-task path monotonic-touches so a mission and a tracked resume created
 in the same millisecond still resolve current() deterministically.
-Remaining Phase 12: D1 (ContextEngine.build in the mission prompt),
-D3 (bridge-only tool lifecycle), then adopt taskEngine.run() for missions.
+**Phase 12, D1 — mission prompt assembly is a ContextEngine call (done).**
+`ContextEngine.buildMissionPrompt(input)` reproduces AgentRunner's inline
+assembly byte-for-byte — base + workspace + time + user line + project +
+repository (opt-in) + notes, plus the `
+Conversation and current mission:`
+body with the mission-marker history — while routing the same sources
+through `build()` so the budgeted, sectioned pipeline genuinely
+participates (sections/tokens/warnings on the returned package, without
+changing default output). The runner now passes its pre-rendered
+workspace/time/user/project blocks (host state) and the engine owns the
+assembly + history + repository text. The warm/event-warming wiring stays
+in the host. Smoke-context section 8 proves byte-identical system prompt
+and body (with and without repository/notes/system-context), minimal
+omission behavior, package sections, and that a tight budget never changes
+the assembled prompt. The e2e runtime mission (repository enabled)
+exercises the full path. Remaining Phase 12: D3 (bridge-only tool
+lifecycle), then adopt taskEngine.run() for missions.

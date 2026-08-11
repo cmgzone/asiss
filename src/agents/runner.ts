@@ -1846,30 +1846,25 @@ export class AgentRunner {
 
         // Phase 7 ContextEngine: the engine owns the history renderer (same
         // labels + truncation as before) so budgets/relevance can be added
-        // later without changing prompt output.
-        const currentHistoryText = this.contextEngine.renderHistory(
-          contextMemories.map((m) => ({
-            role: m.role,
-            content: m.content,
-            missionMarker: m.metadata?.__missionMarker === missionMarker
-          })),
-          { truncateChars: 20000 }
-        );
+        // later without changing prompt output. The history + mission prompt
+        // assembly itself is engine-owned too (Phase 12 D1): the sources are
+        // handed to buildMissionPrompt below.
 
         // Dynamic Identity Injection
         const agentName = config.name || "Gitu";
-        let systemPrompt = this.baseSystemPrompt.replace("{{AGENT_NAME}}", agentName);
-        systemPrompt += this.buildWorkspacePrompt(msg.channel, sessionId, msg.content);
-        systemPrompt += `\n\n${this.buildTimePrompt()}`;
+        const baseSystemPrompt = this.baseSystemPrompt.replace("{{AGENT_NAME}}", agentName);
+        const workspacePrompt = this.buildWorkspacePrompt(msg.channel, sessionId, msg.content);
+        const timePrompt = this.buildTimePrompt();
 
         // User Context Injection
         const lastUserMsg = [...allMemories].reverse().find(m => m.role === "user");
         const username = lastUserMsg?.metadata?.username || msg.metadata?.username || "User";
-        systemPrompt += `\n\nYou are speaking with ${username}.`;
-        systemPrompt += this.buildProjectPrompt(msg.metadata);
+        const userLine = `You are speaking with ${username}.`;
+        const projectPrompt = this.buildProjectPrompt(msg.metadata);
 
         // Phase 7 opt-in: surface the files most relevant to the goal from the
         // attached workspace (indexed on demand). Off by default.
+        let repositorySection = '';
         const contextCfg = this.loadConfig()?.agent?.context || {};
         if (contextCfg.repository?.enabled === true) {
           const repoWorkspace = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
@@ -1896,29 +1891,40 @@ export class AgentRunner {
                   console.warn('[ContextEngine] event-warming not attached:', warmError?.message || warmError);
                 }
               }
-              const repoText = this.contextEngine.repositorySection(repoWorkspace, msg.content);
-              if (repoText) systemPrompt += `\n\n${repoText}`;
+              repositorySection = this.contextEngine.repositorySection(repoWorkspace, msg.content);
             } catch (contextError: any) {
               console.warn('[ContextEngine] repository section failed:', contextError?.message || contextError);
             }
           }
         }
 
-        const prompt = `
-Conversation and current mission:
-${currentHistoryText}
-
-${i === 0 && continuationBatch === 0
-  ? 'Begin the current mission from the user message above.'
-  : 'Continue the current mission from the latest tool results above.'}
-${context ? `\nSystem Context: ${context}` : ''}
-`;
-
-        // Inject Long-Term Memory (Scratchpad)
-        const notesSummary = scratchpad.getSummary();
-        if (notesSummary) {
-          systemPrompt += `\n\n${notesSummary}`;
-        }
+        // Phase 12 D1: the mission prompt assembly is a ContextEngine call —
+        // byte-identical default output (same drop-in discipline as
+        // renderHistory) while the same sources flow through build() so the
+        // budgeted, sectioned pipeline participates. The host still owns the
+        // pre-rendered workspace/time/user/project blocks (they read host
+        // state); the engine owns the assembly + history + repository text.
+        const missionPrompt = await this.contextEngine.buildMissionPrompt({
+          baseSystemPrompt,
+          workspacePrompt,
+          timePrompt,
+          userLine,
+          projectPrompt,
+          repositorySection: repositorySection || undefined,
+          notes: scratchpad.getSummary() || undefined,
+          history: contextMemories.map((m) => ({
+            role: m.role,
+            content: m.content,
+            missionMarker: m.metadata?.__missionMarker === missionMarker
+          })),
+          missionInstruction: i === 0 && continuationBatch === 0
+            ? 'Begin the current mission from the user message above.'
+            : 'Continue the current mission from the latest tool results above.',
+          systemContext: context || undefined,
+          goal: msg.content
+        });
+        let systemPrompt = missionPrompt.systemPrompt;
+        const prompt = missionPrompt.prompt;
 
         // Apply thinking level enhancement
         const thinkingPrompt = thinkingManager.getThinkingPrompt(sessionId);

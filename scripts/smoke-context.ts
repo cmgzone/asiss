@@ -209,6 +209,83 @@ async function main() {
     assert.ok(!selected.some((t) => t.name === 'web_search'), 'irrelevant tool filtered');
   }
 
+
+  // ---- 8. buildMissionPrompt: byte-identical mission assembly (Phase 12 D1) ----
+  {
+    const engine = new ContextEngine();
+    const history = [
+      { role: 'user' as const, content: 'fix the login bug', missionMarker: true },
+      { role: 'assistant' as const, content: "I'll inspect the auth flow." },
+      { role: 'system' as const, content: "Tool 'read_file' Output: {\"ok\":true}" }
+    ];
+    const input = {
+      baseSystemPrompt: 'You are Hermes, a coding agent.',
+      workspacePrompt: '\n\nWorkspace Context:\nAGENTS.md:\nBe careful.\n',
+      timePrompt: 'Current date/time (authoritative):\n- Today: Monday',
+      userLine: 'You are speaking with Alice.',
+      projectPrompt: '\n\nActive project context:\n- Project ID: p1\n',
+      repositorySection: 'Repository context:\n- 3 files',
+      notes: 'Scratchpad: auth is in src/auth',
+      history,
+      missionInstruction: 'Begin the current mission from the user message above.',
+      systemContext: '[System Info]: {cpu: 2}',
+      goal: 'fix the login bug'
+    };
+    const result = await engine.buildMissionPrompt(input);
+
+    // Byte-identical reproduction of AgentRunner's inline assembly:
+    const expectedSystemPrompt =
+      input.baseSystemPrompt +
+      input.workspacePrompt +
+      '\n\n' + input.timePrompt +
+      '\n\n' + input.userLine +
+      input.projectPrompt +
+      '\n\n' + input.repositorySection +
+      '\n\n' + input.notes;
+    assert.strictEqual(result.systemPrompt, expectedSystemPrompt, 'system prompt byte-identical to inline assembly');
+
+    const expectedPrompt =
+      '\nConversation and current mission:\n' +
+      'User (Current Mission): fix the login bug\n' +
+      "Assistant: I'll inspect the auth flow.\n" +
+      "System: Tool 'read_file' Output: {\"ok\":true}\n\n" +
+      input.missionInstruction +
+      '\n\nSystem Context: ' + input.systemContext + '\n';
+    assert.strictEqual(result.prompt, expectedPrompt, 'mission body byte-identical to inline template');
+
+    // Optional blocks are omitted cleanly when absent.
+    const minimal = await engine.buildMissionPrompt({
+      baseSystemPrompt: 'You are Hermes.',
+      workspacePrompt: '',
+      timePrompt: 't',
+      userLine: 'You are speaking with Bob.',
+      projectPrompt: '',
+      history: [{ role: 'user', content: 'hi', missionMarker: true }],
+      missionInstruction: 'Begin the current mission from the user message above.',
+      goal: 'hi'
+    });
+    assert.strictEqual(minimal.systemPrompt, 'You are Hermes.\n\nt\n\nYou are speaking with Bob.', 'minimal system prompt');
+    assert.ok(!minimal.systemPrompt.includes('Repository context'), 'no repository block when absent');
+    assert.ok(!minimal.systemPrompt.includes('Scratchpad'), 'no notes block when absent');
+    assert.strictEqual(minimal.prompt, '\nConversation and current mission:\nUser (Current Mission): hi\n\nBegin the current mission from the user message above.\n\n', 'minimal body without system context');
+
+    // The same sources flow through build(): the package is budgeted and
+    // sectioned (history first), and its text matches the history rendering.
+    assert.ok(result.package.totalTokens > 0, 'package has tokens');
+    assert.strictEqual(result.package.sections[0].name, 'history', 'history is the top section');
+    assert.ok(result.package.sections.some((s) => s.name === 'repository'), 'repository section in package');
+    assert.ok(result.package.sections.some((s) => s.name === 'notes'), 'notes section in package');
+    assert.ok(result.package.text.includes('User (Current Mission): fix the login bug'), 'package history labeled');
+
+    // A tight budget only affects the package (observability), never the
+    // assembled prompt — default output stays byte-identical.
+    const tight = await engine.buildMissionPrompt({ ...input, maxTokens: 10 });
+    assert.strictEqual(tight.systemPrompt, result.systemPrompt, 'budget never changes the system prompt');
+    assert.strictEqual(tight.prompt, result.prompt, 'budget never changes the mission body');
+    assert.ok(tight.package.warnings.length > 0, 'tight budget records warnings on the package');
+  }
+
+
   console.log(JSON.stringify({
     relevance: true,
     budget: true,
@@ -216,7 +293,8 @@ async function main() {
     repositoryContext: true,
     engineBuild: true,
     renderHistory: true,
-    toolRelevance: true
+    toolRelevance: true,
+    missionAssembly: true
   }));
 }
 

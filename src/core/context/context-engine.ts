@@ -23,7 +23,7 @@
  */
 
 import { TaskEventBus, taskEventBus } from '../task/task-events';
-import { buildContextPackage, ContextMemory, ContextSourceInput, ContextTool } from './context-builder';
+import { buildContextPackage, ContextMemory, ContextPackage, ContextSourceInput, ContextTool } from './context-builder';
 import { estimateTokens, truncateChars } from './context-budget';
 import { Summarizer } from './summarizer';
 import { selectRelevant } from './relevance';
@@ -72,6 +72,48 @@ export interface HistoryRenderOptions {
   truncateChars?: number;
 }
 
+/**
+ * Phase 12 D1: pieces the host currently assembles inline for the mission
+ * system prompt + body. Each block is pre-rendered by the host (workspace /
+ * time / user / project read host state); the engine owns the assembly and
+ * runs the same sources through build() for the budgeted package.
+ */
+export interface MissionPromptInput {
+  /** Base system prompt with {{AGENT_NAME}} already substituted. */
+  baseSystemPrompt: string;
+  /** Pre-rendered workspace prompt block (may be ''). */
+  workspacePrompt: string;
+  /** Pre-rendered time prompt block. */
+  timePrompt: string;
+  /** Greeting line, e.g. 'You are speaking with Alice.' */
+  userLine: string;
+  /** Pre-rendered project prompt block (may be ''). */
+  projectPrompt: string;
+  /** Pre-rendered repository section (may be ''). */
+  repositorySection?: string;
+  /** Scratchpad notes summary (may be ''). */
+  notes?: string;
+  /** Conversation history for the mission body. */
+  history: ContextMemory[];
+  /** Mission instruction line ('Begin the current mission...' / 'Continue...'). */
+  missionInstruction: string;
+  /** Optional extra system context block (e.g. /sys output). */
+  systemContext?: string;
+  /** Goal text (used by the context package). */
+  goal: string;
+  /** Token budget for the context package (defaults to config.maxTokens). */
+  maxTokens?: number;
+}
+
+export interface MissionPromptResult {
+  /** Assembled system prompt — byte-identical to AgentRunner's inline code. */
+  systemPrompt: string;
+  /** Assembled mission body prompt — byte-identical to AgentRunner's template. */
+  prompt: string;
+  /** Budgeted context package from build() — observability, unused by default. */
+  package: ContextPackage;
+}
+
 /** Warmth snapshot for one workspace root (Phase 9 telemetry). */
 export interface RepositoryWarmth {
   root: string;
@@ -110,6 +152,50 @@ export class ContextEngine {
       maxTokens,
       summarizer: this.config.summarize?.enabled ? this.summarizer : undefined
     });
+  }
+
+  /**
+   * Phase 12 D1: assemble the mission prompt the way AgentRunner does inline
+   * (base + workspace + time + user + project + repository + notes, then the
+   * conversation body with history) so the host's inline assembly becomes a
+   * call into the engine. Byte-identical default output — same drop-in
+   * discipline as renderHistory. The same sources are ALSO run through
+   * build() so the budgeted, sectioned pipeline genuinely participates
+   * (sections/tokens/warnings are available to a later phase without
+   * changing default output).
+   */
+  async buildMissionPrompt(input: MissionPromptInput): Promise<MissionPromptResult> {
+    // Byte-identical reproduction of AgentRunner's inline assembly:
+    //   systemPrompt = base + workspace + '\n\n' + time + '\n\n' + userLine
+    //                + project + ('\n\n' + repository) + ('\n\n' + notes)
+    let systemPrompt = input.baseSystemPrompt;
+    systemPrompt += input.workspacePrompt;
+    systemPrompt += `\n\n${input.timePrompt}`;
+    systemPrompt += `\n\n${input.userLine}`;
+    systemPrompt += input.projectPrompt;
+    if (input.repositorySection) systemPrompt += `\n\n${input.repositorySection}`;
+    if (input.notes) systemPrompt += `\n\n${input.notes}`;
+
+    // Byte-identical reproduction of AgentRunner's mission body template:
+    //   \nConversation and current mission:\n${history}\n\n${instruction}
+    //   \n${context ? '\nSystem Context: ' + context : ''}\n
+    const historyText = this.renderHistory(input.history, {
+      truncateChars: this.config.truncateChars ?? 20000
+    });
+    const prompt = `\nConversation and current mission:\n${historyText}\n\n${input.missionInstruction}\n${input.systemContext ? `\nSystem Context: ${input.systemContext}` : ''}\n`;
+
+    const pkg = await this.build(
+      {
+        goal: input.goal,
+        history: input.history,
+        project: input.projectPrompt || undefined,
+        repository: input.repositorySection || undefined,
+        notes: input.notes || undefined
+      },
+      { maxTokens: input.maxTokens }
+    );
+
+    return { systemPrompt, prompt, package: pkg };
   }
 
   /**
