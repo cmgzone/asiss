@@ -183,4 +183,11 @@ as `repository_refreshed` stream events), and a ⟳ button that requests an
 on-demand refresh through the socket (`repo_refresh` → runner
 force-warm). Verified by smoke-repo-index section 15 and the e2e runtime
 smoke.
-Architecture reassessment is the next step before any new major phase.
+Architecture reassessment is done: `docs/hermes/ARCHITECTURE_REVIEW.md`
+documents the five engines, their composition, strengths, seven ranked
+gaps (runner as orchestrator, untyped config, two execution models,
+hand-wired projections, config-less runner ContextEngine, state sprawl,
+doc drift) and the agreed next moves: typed validated config first, then
+recovery moved into TaskEngine, then a typed event-to-channel projection.
+The phase table above is stale (Phase 8 shipped; rows 9-11 renumbered) and
+is the next doc task.
