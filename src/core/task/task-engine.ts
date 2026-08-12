@@ -46,6 +46,18 @@ export type TaskAnalyzer = (task: Task, engine: TaskEngine) => void | Promise<vo
 export type TaskPlanner = (task: Task, engine: TaskEngine) => TaskPlanStep[] | void | Promise<TaskPlanStep[] | void>;
 export type TaskExecutor = (task: Task, engine: TaskEngine) => TaskExecutionResult | Promise<TaskExecutionResult>;
 export type TaskVerifier = (task: Task, engine: TaskEngine) => TaskVerificationResult | Promise<TaskVerificationResult>;
+/**
+ * Optional repair handler for the engine's `retry()` resume path (FAILED →
+ * DIAGNOSING → REPAIRING → EXECUTING). Phase 17 Move 3 (AUDIT_8 F2): the
+ * single AUTONOMOUS repair authority is retry-as-loop — the mission loop
+ * continues with targeted evidence (diagnose records, goal_retry_hint /
+ * goal_verify_output, the verification gate's test output), the model IS the
+ * repairer, bounded by runMission's turn budget. This hook is a declared-only
+ * future seam: no origin wires it (only the baseline smoke exercises the
+ * resume API), so an autonomous repair engine (patch-apply style) has a
+ * documented place to land without recreating a competing repair authority.
+ * Do not wire it outside `retry()`.
+ */
 export type TaskRepairer = (task: Task, engine: TaskEngine) => void | Promise<void>;
 
 export interface TaskExecutionResult {
@@ -109,6 +121,8 @@ export interface TaskEngineOptions {
   exec?: TaskExecutor; // spelling kept for backward compat (was `executor` in Phase 1)
   executor?: TaskExecutor;
   verify?: TaskVerifier;
+  /** Declared-only future seam (Phase 17 Move 3) — invoked only by the engine's
+   *  `retry()` resume path; no origin wires it. See TaskRepairer. */
   repair?: TaskRepairer;
   /** Engine-level completion-verdict hook (Phase 12 Move 2). */
   completionVerdict?: TaskCompletionVerdictHook;
@@ -164,6 +178,8 @@ export type TaskCompletionVerdictHook = (context: TaskCompletionContext) => Task
 export interface TaskRunOptions {
   executor?: TaskExecutor;
   verifier?: TaskVerifier;
+  /** Declared-only future seam (Phase 17 Move 3) — invoked only by the engine's
+   *  `retry()` resume path; no origin wires it. See TaskRepairer. */
   repair?: TaskRepairer;
 }
 
@@ -240,6 +256,15 @@ export interface TaskTurnResult {
 export interface TaskTurnRunOptions {
   /** Used by the 'verify' verdict: gathers recovery evidence in-loop. */
   diagnoser?: TaskDiagnoser;
+  /**
+   * Phase 17 Move 2 — terminal verification gate for the 'verify' verdict.
+   * When wired, a completion-point 'verify' answer runs this verifier
+   * (EXECUTING -> VERIFYING -> COMPLETED on pass). On fail the mission
+   * recovers to EXECUTING for repair while `maxTurns` allows, then FAILED.
+   */
+  verifier?: TaskVerifier;
+  /** Mission turn budget (runMission passes it) — bounds gate-failure repairs. */
+  maxTurns?: number;
   /**
    * Per-call completion-verdict hook. When `input.verdict` is omitted, the
    * engine asks this hook (falling back to the engine-level hook) for the
@@ -606,6 +631,25 @@ export class TaskEngine {
         reason = verdict.reason;
         break;
       case 'verify': {
+        const verifier = options.verifier || this.verifier;
+        if (verifier) {
+          // Phase 17 Move 2 — the terminal verification gate: a completion
+          // point that answers 'verify' runs the verifier (goal-matched
+          // tests). Pass -> COMPLETED; fail -> recover to EXECUTING for
+          // repair while the turn budget allows, then FAILED. This replaces
+          // the sequencing heuristic with a real test decision at completion.
+          const gate = await this.runCompletionVerificationGate(
+            taskId,
+            verifier,
+            input.turn,
+            options.maxTurns
+          );
+          this.persistTurn(taskId, input.turn);
+          action = gate.action;
+          error = gate.error;
+          reason = gate.reason;
+          break;
+        }
         const outcome = await this.diagnose(taskId, {
           diagnoser: options.diagnoser,
           detail: verdict.reason || input.summary
@@ -743,7 +787,11 @@ export class TaskEngine {
         tools: iteration.usedTools === true ? undefined : iteration.tools,
         model: iteration.model,
         ...(typeof iteration.progress === 'number' ? { progress: iteration.progress } : {})
-      }, options);
+      }, {
+        ...options,
+        // Phase 17 Move 2 — the gate's repair budget is the mission turn budget.
+        maxTurns
+      });
 
       if (typeof options.onTurn === 'function') {
         await options.onTurn(result, ctx);
@@ -840,6 +888,59 @@ export class TaskEngine {
       throw new Error(`verify() requires an EXECUTING task, got ${entity.status}.`);
     }
     return this.runVerification(taskId, options);
+  }
+
+  /**
+   * Phase 17 Move 2 — the terminal verification gate (EXECUTING -> VERIFYING).
+   * Runs the verifier (goal-matched tests) at a completion point: pass ->
+   * COMPLETED with the verification evidence; fail -> recover to EXECUTING
+   * (attempts+1, TaskRetrying) so the host's repair loop re-runs the gate at
+   * the next completion point while the turn budget allows; once the budget
+   * is exhausted the task goes FAILED (terminal) so the failure feeds memory.
+   */
+  private async runCompletionVerificationGate(
+    taskId: string,
+    verifier: TaskVerifier,
+    turn: number,
+    maxTurns?: number
+  ): Promise<{ action: TaskTurnAction; error?: string; reason?: string }> {
+    const entity = new TaskEntity(this.store.require(taskId));
+    this.persist(entity.transition('VERIFYING').record, { verifyingAt: Date.now() });
+    await this.emit('TaskVerifying', taskId);
+    await this.recordVerification(taskId, 'custom', 'RUNNING', 'completion verification gate');
+    let result: TaskVerificationResult;
+    try {
+      result = await verifier(this.store.require(taskId), this);
+    } catch (error: any) {
+      result = { passed: false, detail: error?.message || String(error) };
+    }
+    if (result?.passed) {
+      await this.recordVerification(taskId, 'custom', 'PASSED', result.detail);
+      await this.emit('TaskVerified', taskId, { detail: result.detail });
+      await this.complete(taskId, {
+        status: 'SUCCESS',
+        summary: result.detail || 'Completion verification passed.',
+        result: { verification: result }
+      });
+      return { action: 'complete', reason: result.detail || 'Completion verification passed.' };
+    }
+    await this.recordVerification(taskId, 'custom', 'FAILED', result?.detail);
+    await this.emit('TaskVerificationFailed', taskId, { detail: result?.detail });
+    const budgetRemains = typeof maxTurns === 'number' && turn < maxTurns;
+    if (budgetRemains) {
+      // Repair: back to EXECUTING so the host's loop can fix the failing
+      // tests; the next completion point re-runs the gate.
+      const current = this.store.require(taskId);
+      const recovered = this.persist(new TaskEntity(current).transition('EXECUTING').record, {
+        attempts: current.timing.attempts + 1
+      });
+      await this.emit('TaskRetrying', taskId, { stage: 'verification-gate', detail: result?.detail });
+      return { action: 'verify', reason: result?.detail || 'Completion verification failed; repairing.' };
+    }
+    // Budget exhausted while verification still fails: terminal FAILED so the
+    // failure feeds episodic capture + lessons.
+    await this.fail(taskId, 'VERIFYING', result?.detail || 'Completion verification failed.');
+    return { action: 'failed', error: result?.detail || 'Completion verification failed.' };
   }
 
   /**
@@ -963,6 +1064,9 @@ export class TaskEngine {
   /**
    * FAILED -> DIAGNOSING -> REPAIRING -> EXECUTING, then re-executes.
    * An optional `repair` handler runs during the REPAIRING phase.
+   * This is the engine's HOST-DRIVEN resume path — not the autonomous repair
+   * authority (that is retry-as-loop via the mission loop; see TaskRepairer).
+   * No origin calls retry() today; only the baseline smoke exercises it.
    */
   async retry(taskId: string, options: TaskRunOptions = {}): Promise<TaskRunOutcome> {
     const record = this.require(taskId);

@@ -960,4 +960,68 @@ behavior/configuration, AgentEngine = execution authority, TaskEngine = work
 lifecycle authority, ToolEngine = tool execution authority, Unified Memory =
 knowledge authority, TaskEvents = execution history.**
 
+**Phase 17 — Self-repair coding loop (in progress, docs/hermes/AUDIT_8.md).**
+
+> code → test → diagnose → repair → verify, with failure memory. The audit
+> found the loop mostly built on the Phase 15/16 foundations (diagnose is
+> TaskEngine-owned, verify-then-retry is host-wired evidence, failure memory
+> is Phase 14's unified memory) with two real gaps: no completion-driven
+> verification gate (the engine's terminal `verify()`/`TaskVerifier` sits
+> unused), and a declared-but-never-invoked `TaskRepairer` seam.
+
+**Phase 17, Move 1 — Self-repair audit (done, docs only).** Mapped the
+target loop (code → test → diagnose → repair → verify → failure memory)
+against what exists: **code** (mission loop), **test** (verify-then-retry via
+the repository diagnoser on failure), **diagnose** (TaskEngine-owned,
+EXECUTING → VERIFYING → EXECUTING with TaskVerification records + events),
+**repair** (retry-as-loop with goal_retry_hint + goal_verify_output in
+context), **verify** (failure-driven only — no completion gate), **failure
+memory** (Phase 14 episodes + lessons rendered into the mission prompt,
+restart-recall proven). Findings: **F1** — the engine's terminal
+`TaskEngine.verify` / `TaskVerifier` (EXECUTING → VERIFYING → COMPLETED/
+FAILED) is never called; the completion verdict's `verify` routes to
+non-terminal `diagnose`, and completion has no test-based gate
+(pendingVerification is tool-sequencing, not goal-test pass). **F2** —
+`TaskRepairer` is declared but never invoked; decision deferred to Move 3
+(recommended: document retry-as-loop as the repair authority, keep the hook
+as the future seam). **F3/F4** — failure memory and retry-as-loop are
+by-design, no consolidation.
+
+**Phase 17, Move 2 — the terminal verification gate (done).** The `verify`
+verdict, when a verifier is wired, now runs the engine's
+`runCompletionVerificationGate` (EXECUTING → VERIFYING) instead of only
+in-loop diagnose: **pass** → COMPLETED with a PASSED verification record +
+TaskVerified; **fail** → recover to EXECUTING (attempts+1, TaskRetrying)
+while `turn < maxTurns` so the mission's repair loop re-runs the gate at the
+next completion point; fail until the budget exhausts → FAILED (terminal,
+feeding episodic capture + lessons). `TaskTurnRunOptions` gains
+`verifier`/`maxTurns`; `runMission` passes the turn budget so the gate shares
+it. The runner builds a goal-matched-test `TaskVerifier` (`buildMissionVerifier`,
+fail-open when nothing is gateable) sharing one `goalTestEvidence` helper
+with the failure diagnoser — one authority for "what the goal's tests are" —
+and wires it into runMission; the completion verdict logic is unchanged
+(`verify` still fires when verification is pending, now gated on real tests).
+The gate failure reason (test output) reaches the model via the
+completion-check memory so repairs are targeted. Verified by
+`smoke:turn-contract` section 16 (pass → complete; fail → repair → pass with
+attempts bumped; fail → budget exhaust → FAILED) + `smoke:phase16`
+(phase17_gateWired assertion) + the full battery green in one pass — the
+runtime smoke caught a real refactor regression (`matchedFiles` → `matched`
+key rename breaking the diagnoser's retry hint), fixed.
+
+**Phase 17, Move 3 — the repair-seam decision (done).** Retry-as-loop is the
+single autonomous repair authority — the mission loop continues with targeted
+evidence (diagnose records, `goal_retry_hint` / `goal_verify_output`, the Move
+2 gate's test output); the model IS the repairer, bounded by runMission's turn
+budget. `TaskRepairer` stays a declared-only future seam: the audit's F2 was
+sharpened (the hook is invoked exactly once — inside the engine's `retry()`
+host-resume path, FAILED → DIAGNOSING → REPAIRING → EXECUTING — but no origin
+calls `retry()` and no production call site passes the `repair` option), and
+the engine documents the authority statement at all three seam touchpoints
+(type + both option fields + `retry()`). smoke:phase16 gains **Gate 8**
+(phase17_repairSeam): `TaskRepairer` exists only in task-engine.ts, no
+`repair:` option at any production call site, and the hook is invoked exactly
+once via `options.repair(` inside `retry()`. **Next: Move 4** — verification
+(AUDIT_8 + ROADMAP + full battery) closes Phase 17.
+
 

@@ -83,7 +83,7 @@ import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { installTaskEventProjections, taskEngine, taskEventBus, taskMemory } from '../core/task';
-import type { TaskCompletionContext, TaskCompletionEvidence, TaskDiagnoser, TaskMissionIteration, TaskToolKind, TaskTurnVerdict } from '../core/task';
+import type { TaskCompletionContext, TaskCompletionEvidence, TaskDiagnoser, TaskMissionIteration, TaskToolKind, TaskTurnVerdict, TaskVerifier } from '../core/task';
 import { loadHermesConfig } from '../core/config';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
 import { ContextEngine, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
@@ -767,35 +767,76 @@ export class AgentRunner {
    */
   private buildMissionDiagnoser(goal: string, workspacePathValue: unknown, workspaceFallback?: string): TaskDiagnoser {
     return async (task) => {
-      const contextCfg = this.loadConfig()?.agent?.context || {};
-      const verifyCfg = contextCfg.repository?.verifyOnFailure || {};
       const taskWorkspace = this.getValidWorkspacePath(task.context?.workspacePath) || workspaceFallback || '';
       const taskGoal = task.goal || goal;
       const workspace = taskWorkspace || this.getValidWorkspacePath(workspacePathValue) || '';
       if (!workspace) return {};
-      const files = this.contextEngine.relevantFiles(workspace, taskGoal, 8);
-      const matched = (files || []).map((f: any) => f.path || String(f)).slice(0, 8);
-      const diag: any = { matchedFiles: matched };
-      if (contextCfg.repository?.enabled === true && verifyCfg.enabled !== false) {
-        const index = this.contextEngine.indexRepository(workspace);
-        if (index) {
-          const testFiles = matchedTestFiles(index, taskGoal, files);
-          const run = await runGoalTests(workspace, testFiles, {
-            timeoutMs: verifyCfg.timeoutMs,
-            maxOutputChars: verifyCfg.maxOutputChars
-          });
-          if (run.ran) {
-            diag.tests = [{
-              command: run.command || '',
-              exitCode: run.exitCode ?? -1,
-              output: String(run.output || ''),
-              passed: run.exitCode === 0
-            }];
-            diag.evidence = `Goal-matched verification ran \`${run.command}\` (exit ${run.exitCode}):\n${run.output}`;
-          }
+      return this.goalTestEvidence(workspace, taskGoal);
+    };
+  }
+
+  /**
+   * Phase 17 Move 2 — the completion verification gate's verifier: the
+   * goal-matched tests must PASS before the mission completes. Fail-open when
+   * there is nothing to gate on (no workspace / no goal-matched tests / the
+   * verifier itself cannot run) — the engine decides pass -> COMPLETED,
+   * fail -> repair-until-budget -> FAILED.
+   */
+  private buildMissionVerifier(goal: string, workspacePathValue: unknown, workspaceFallback?: string): TaskVerifier {
+    return async (task) => {
+      const taskWorkspace = this.getValidWorkspacePath(task.context?.workspacePath) || workspaceFallback || '';
+      const taskGoal = task.goal || goal;
+      const workspace = taskWorkspace || this.getValidWorkspacePath(workspacePathValue) || '';
+      if (!workspace) return { passed: true, detail: 'No workspace — completion trusted.' };
+      try {
+        const evidence = await this.goalTestEvidence(workspace, taskGoal);
+        const tests = evidence.tests || [];
+        if (tests.length === 0) {
+          return { passed: true, detail: `No goal-matched tests for '${taskGoal.slice(0, 80)}' — completion trusted.` };
         }
+        const failed = tests.filter(t => !t.passed);
+        return {
+          passed: failed.length === 0,
+          detail: evidence.evidence || tests.map(t => `\`${t.command}\` exit ${t.exitCode}`).join('; ')
+        };
+      } catch (error: any) {
+        return { passed: true, detail: `Verifier failed to run: ${error?.message || String(error)} — completion trusted.` };
       }
-      return diag;
+    };
+  }
+
+  /**
+   * Phase 17 Move 2 — shared goal-matched-test evidence, used by BOTH the
+   * failure diagnoser (verify-then-retry) and the completion verifier gate.
+   * One authority for what "the goal's tests" means.
+   */
+  private async goalTestEvidence(
+    workspace: string,
+    goal: string
+  ): Promise<{ matchedFiles: string[]; tests?: any[]; evidence?: string }> {
+    const contextCfg = this.loadConfig()?.agent?.context || {};
+    const verifyCfg = contextCfg.repository?.verifyOnFailure || {};
+    const files = this.contextEngine.relevantFiles(workspace, goal, 8);
+    const matchedFiles = (files || []).map((f: any) => f.path || String(f)).slice(0, 8);
+    if (contextCfg.repository?.enabled !== true || verifyCfg.enabled === false) return { matchedFiles };
+    const index = this.contextEngine.indexRepository(workspace);
+    if (!index) return { matchedFiles };
+    const testFiles = matchedTestFiles(index, goal, files);
+    if (!testFiles.length) return { matchedFiles };
+    const run = await runGoalTests(workspace, testFiles, {
+      timeoutMs: verifyCfg.timeoutMs,
+      maxOutputChars: verifyCfg.maxOutputChars
+    });
+    if (!run.ran) return { matchedFiles };
+    return {
+      matchedFiles,
+      tests: [{
+        command: run.command || '',
+        exitCode: run.exitCode ?? -1,
+        output: String(run.output || ''),
+        passed: run.exitCode === 0
+      }],
+      evidence: `Goal-matched verification ran \`${run.command}\` (exit ${run.exitCode}):\n${run.output}`
     };
   }
 
@@ -2253,6 +2294,10 @@ export class AgentRunner {
         budget: { maxTurns: missionTurnBudget, maxForcedContinuations },
         completionVerdict: this.completionVerdictHook,
         diagnoser: this.buildMissionDiagnoser(msg.content, msg.metadata?.projectWorkspacePath),
+        // Phase 17 Move 2 — the terminal verification gate: a completion point
+        // that answers 'verify' runs the goal-matched tests; pass -> complete,
+        // fail -> repair until the turn budget exhausts -> FAILED.
+        verifier: this.buildMissionVerifier(msg.content, msg.metadata?.projectWorkspacePath),
         iterate: async ({ turn }): Promise<TaskMissionIteration> => {
         const i = turn - 1;
         iterationPresentation = undefined;

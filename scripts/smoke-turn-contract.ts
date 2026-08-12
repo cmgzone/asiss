@@ -26,6 +26,15 @@
  *   12. engine-level hook + missing-hook guard — engine-level hook answers
  *       when no per-call hook is passed; runTurn without a verdict and without
  *       any hook rejects
+ *   13. verify verdict runs the in-loop diagnose authority
+ *   14. recordToolKind drives verification-pending
+ *   15. runMission drives the loop (tool batch -> final answer, step limit,
+ *       host-recorded tools, explicit forced-final verdict)
+ *   16. (Phase 17 Move 2) terminal verification gate — the 'verify' verdict
+ *       runs a verifier (goal-matched tests): pass -> COMPLETED with PASSED
+ *       verification; fail -> repair (recover to EXECUTING, attempts+1) and
+ *       re-run at the next completion point; fail until the turn budget
+ *       exhausts -> FAILED (terminal, feeds failure memory)
  */
 
 import assert from 'assert';
@@ -444,7 +453,68 @@ async function main() {
     console.log('15. runMission drives the loop                     ok');
   }
 
-  console.log(JSON.stringify({ success: true, sections: 15 }));
+  // ---- 16. Phase 17 Move 2 — terminal verification gate (verify verdict) ----
+  {
+    // 16a. gate pass -> COMPLETED with PASSED verification evidence.
+    const { engine, events } = setup();
+    const task = await mission(engine, 'fix the flaky test');
+    let gateCalls = 0;
+    const result = await engine.runMission(task.id, {
+      iterate: async () => ({ content: 'patched and ready.', verdict: { type: 'verify', reason: 'completion gate' } }),
+      verifier: async () => { gateCalls += 1; return { passed: true, detail: 'node --test exit 0' }; },
+      budget: { maxTurns: 3 }
+    });
+    assert.strictEqual(result.action, 'complete', 'gate pass completes the mission');
+    assert.strictEqual(result.task.status, 'COMPLETED', 'task COMPLETED on gate pass');
+    assert.strictEqual(gateCalls, 1, 'gate ran once on pass');
+    assert.ok(result.task.verification.some(v => v.status === 'PASSED' && v.kind === 'custom'), 'PASSED custom verification recorded');
+    assert.ok(events.some(e => e.name === 'TaskVerifying'), 'TaskVerifying emitted by the gate');
+    assert.ok(events.some(e => e.name === 'TaskVerified'), 'TaskVerified emitted on gate pass');
+
+    // 16b. gate fail -> repair -> gate pass -> COMPLETED (attempts bumped).
+    const { engine: e2 } = setup();
+    const task2 = await mission(e2, 'fix the flaky test');
+    let calls = 0;
+    const iterations: string[] = [];
+    const result2 = await e2.runMission(task2.id, {
+      iterate: async ({ turn }) => {
+        iterations.push(`t${turn}`);
+        return { content: turn === 1 ? 'first repair attempt' : 'second repair attempt', verdict: { type: 'verify', reason: 'completion gate' } };
+      },
+      verifier: async () => {
+        calls += 1;
+        return calls === 1
+          ? { passed: false, detail: 'node --test exit 1: test failed' }
+          : { passed: true, detail: 'node --test exit 0' };
+      },
+      budget: { maxTurns: 3 }
+    });
+    assert.strictEqual(result2.action, 'complete', 'repair loop completes after the gate passes');
+    assert.deepStrictEqual(iterations, ['t1', 't2'], 'gate failure consumed a repair iteration');
+    assert.strictEqual(calls, 2, 'gate ran twice (fail then pass)');
+    assert.strictEqual(result2.task.status, 'COMPLETED', 'task COMPLETED after repair');
+    assert.ok(result2.task.timing.attempts >= 2, 'gate failure bumped attempts (recovery)');
+    assert.ok(result2.task.verification.some(v => v.status === 'FAILED'), 'FAILED verification recorded for the first gate run');
+    assert.ok(result2.task.verification.some(v => v.status === 'PASSED'), 'PASSED verification recorded after repair');
+
+    // 16c. gate fail until the budget exhausts -> FAILED (terminal, feeds memory).
+    const { engine: e3, events: ev3 } = setup();
+    const task3 = await mission(e3, 'fix the flaky test');
+    const result3 = await e3.runMission(task3.id, {
+      iterate: async () => ({ content: 'still broken.', verdict: { type: 'verify', reason: 'completion gate' } }),
+      verifier: async () => ({ passed: false, detail: 'node --test exit 1: still failing' }),
+      budget: { maxTurns: 2 }
+    });
+    assert.strictEqual(result3.action, 'failed', 'budget-exhausted verification fails the mission');
+    assert.strictEqual(result3.task.status, 'FAILED', 'task FAILED when the repair budget is exhausted');
+    assert.ok(ev3.some(e => e.name === 'TaskVerificationFailed'), 'TaskVerificationFailed emitted on gate fail');
+    assert.ok(ev3.some(e => e.name === 'TaskRetrying'), 'TaskRetrying emitted for the gate-failure repair');
+    assert.ok(ev3.some(e => e.name === 'TaskFailed'), 'TaskFailed emitted on budget-exhausted gate failure');
+
+    console.log('16. terminal verification gate (pass/repair/exhaust) ok');
+  }
+
+  console.log(JSON.stringify({ success: true, sections: 16 }));
 }
 
 main().then(() => process.exit(0)).catch((err) => {

@@ -16,6 +16,10 @@
  *   Gate 2 — the Agent contract still declares all five Move 2 fields
  *            (instructions / contextPolicy / memoryPolicy / executionLimits /
  *            handoffPolicy) so every origin resolves the same contract.
+ *   Gate 8 — the repair authority stays retry-as-loop (Phase 17 Move 3):
+ *            TaskRepairer exists only in task-engine.ts, no origin passes the
+ *            repair option, and the hook is invoked exactly once — inside the
+ *            engine's retry() resume path. A declared-only future seam.
  *
  * The behavioral matrix (which implementation actually executed per origin)
  * is proven by the battery — mission (smoke:runtime), delegation
@@ -113,11 +117,57 @@ async function main() {
     assert(agentTypes.includes(`${field}?`) || agentTypes.includes(`${field}:`), `Agent contract field '${field}' present`);
   }
 
+  // ------------------------------------------------------------------ Phase 17
+  // Move 2 — the runner actually wires the terminal verification gate into
+  // runMission (the engine-level behavior is proven by smoke:turn-contract
+  // section 16; this keeps the host wiring from silently regressing).
+  assert(
+    runnerSrc.includes('private buildMissionVerifier(') && runnerSrc.includes('verifier: this.buildMissionVerifier('),
+    'runner wires the goal-matched-test verifier into runMission (Phase 17 Move 2 gate)'
+  );
+
+  // ------------------------------------------------------------------ Gate 8
+  // Move 3 — the single repair authority is retry-as-loop, model-driven
+  // (mission loop + diagnose + the verification gate). TaskRepairer stays a
+  // declared-only future seam: no origin may wire it. The hook may be invoked
+  // only by the engine's retry() resume path, and only the baseline smoke
+  // exercises that API. Comments are stripped so the seam's own documentation
+  // cannot trip the check.
+  const nonEngineSrc = stripComments(
+    collectTsFiles(srcDir)
+      .filter((f) => !f.endsWith('task-engine.ts'))
+      .map((f) => fs.readFileSync(f, 'utf-8'))
+      .join('\n')
+  );
+  assert.strictEqual(
+    /TaskRepairer/.test(nonEngineSrc),
+    false,
+    'TaskRepairer exists only in task-engine.ts (declared seam, never wired)'
+  );
+  assert.strictEqual(
+    /repair\s*:/.test(nonEngineSrc),
+    false,
+    'no production call site passes the repair option (retry-as-loop is the repair authority)'
+  );
+  const engineStripped = stripComments(fs.readFileSync(path.join(srcDir, 'core', 'task', 'task-engine.ts'), 'utf-8'));
+  assert.strictEqual(
+    (engineStripped.match(/repair\s*\(/g) || []).length === 1 && engineStripped.includes('options.repair('),
+    true,
+    'the TaskRepairer hook is invoked exactly once, inside the engine retry() resume path'
+  );
+
   console.log(JSON.stringify({
     success: true,
-    gates: { gate1_swarmFragmentGone: true, gate2_contractFields: true, gate3_taskAsRun: true, gate7_noAgentRunBookkeeping: true },
+    gates: {
+      gate1_swarmFragmentGone: true,
+      gate2_contractFields: true,
+      gate3_taskAsRun: true,
+      gate7_noAgentRunBookkeeping: true,
+      phase17_gateWired: true,
+      phase17_repairSeam: true
+    },
     scannedTsFiles: collectTsFiles(srcDir).length + collectTsFiles(scriptsDir).length,
-    note: 'Behavioral matrix per origin is proven by the battery (see AUDIT_7 §8).'
+    note: 'Behavioral matrix per origin is proven by the battery (see AUDIT_7 §8); Phase 17 gate behavior in smoke:turn-contract §16.'
   }, null, 2));
 }
 
