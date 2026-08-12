@@ -543,4 +543,21 @@ learned-skill-creation path is unchanged. Verified by smoke:agent-execution
 section 6 (kind-'background' child Task + linkage metadata),
 smoke:agent-task-profile (background task-scope selection), and all prior
 smokes unchanged.
-via `selectForProfile` for swarm/background assignments.
+
+**Step 9.3 — scheduled jobs are canonical Tasks (done).** Audit first
+(`docs/hermes/SCHEDULER_MIGRATION_MAP.md`): the scheduler is a WHEN-only
+trigger — it already delegates execution to TaskEngine via processMessage, so
+it is not a second execution authority. The gaps were the task kind (scheduled
+work recorded as 'mission' while kind 'scheduled' sat unused), no worker
+selection (WHO), and no job linkage. The runner's scheduler onRun now runs each
+job through `AgentEngine.executeTask` as a canonical kind-'scheduled' Task:
+worker via `selectForProfile` (prompt hints + task-scope 'scheduled', falling
+back to an ephemeral Scheduled Worker agent), `metadata.schedulerJobId` /
+`schedulerJobType` linkage on the child Task, and the completed result
+delivered back into the job's session. Scheduler semantics are preserved
+byte-for-byte: timing, scheduler.json persistence, cancellation, no retries
+(`retries: 0`), and the same overlap behavior; on any failure the legacy
+mission path takes over. `AgentTaskScope` gained 'scheduled'. Verified by
+smoke:agent-execution section 7 (kind-'scheduled' child Task + linkage),
+smoke:agent-task-profile (scheduled task-scope selection), and all prior
+smokes unchanged.

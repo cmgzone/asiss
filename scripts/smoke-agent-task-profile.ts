@@ -9,7 +9,7 @@
  *   2. Capability filtering (explicit + goal-text hints).
  *   3. preferredRole filtering.
  *   4. taskScope filtering via profile.kind ('mission' vs 'delegation' vs
- *      'background').
+ *      'background' vs 'scheduled').
  *   5. requiredTools + permission filtering (deniedTools / allowedTools).
  *   6. Workspace grant filtering (allowedWorkspacePaths).
  *   7. selectForTask / selectForTaskId integrate with taskEngine.
@@ -87,6 +87,13 @@ async function main() {
     taskScope: 'background'
   });
   agentRegistry.register({
+    name: 'ScheduledTester', role: 'tester',
+    description: 'Scheduled-only tester',
+    capabilities: ['testing'],
+    tools: ['test_runner'],
+    taskScope: 'scheduled'
+  });
+  agentRegistry.register({
     name: 'BroadCoder', role: 'general',
     description: 'Coder with broader coverage',
     capabilities: ['coding', 'typescript', 'debugging', 'repository-analysis'],
@@ -145,6 +152,8 @@ async function main() {
   assert.strictEqual(missionTester!.agent.name, 'MissionTester', 'mission scope filter');
   const backgroundTester = engine.selectForProfile({ goal: 'run the tests', kind: 'background' });
   assert.strictEqual(backgroundTester!.agent.name, 'BackgroundTester', 'background scope filter');
+  const scheduledTester = engine.selectForProfile({ goal: 'run the tests', kind: 'scheduled' });
+  assert.strictEqual(scheduledTester!.agent.name, 'ScheduledTester', 'scheduled scope filter');
 
   // ------------------------------------------------------------------ 5.
   const auditPick = engine.selectForProfile({ goal: 'x', requiredTools: ['audit'] });

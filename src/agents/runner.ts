@@ -11,7 +11,7 @@ import { SystemSkill, TimeSkill } from '../skills/system';
 import { NotesSkill } from '../skills/notes';
 import { ShellSkill } from '../skills/shell';
 import { WebFetchSkill, WebSearchSkill } from '../skills/web';
-import { SchedulerManager } from '../core/scheduler';
+import { SchedulerManager, type ScheduledJob } from '../core/scheduler';
 import { SchedulerSkill } from '../skills/scheduler';
 import { PlaywrightSkill } from '../skills/playwright';
 import { BraveSearchSkill } from '../skills/brave';
@@ -214,6 +214,18 @@ export class AgentRunner {
     });
 
     this.scheduler = new SchedulerManager(async (job) => {
+      // Step 9.3 — scheduled jobs run as canonical kind-'scheduled' Tasks
+      // through AgentEngine.executeTask (AgentEngine owns WHO, TaskEngine owns
+      // HOW); the scheduler keeps owning WHEN (timers, persistence, cancel).
+      // On any failure the legacy mission path takes over.
+      const canonical = await this.runScheduledJobViaEngine(job);
+      if (canonical.ok) {
+        if (canonical.output) {
+          await this.deliverScheduledResult(job, canonical.output);
+        }
+        return;
+      }
+
       const scheduledMsg: Message = {
         id: uuidv4(),
         channel: 'scheduler',
@@ -450,7 +462,11 @@ export class AgentRunner {
       };
       let selected = agentEngine.selectForProfile(profile);
       if (!selected) {
-        selected = this.ensureBackgroundWorkerAgent();
+        selected = this.ensureAutonomousWorkerAgent(
+          'Background Worker',
+          'Default autonomous background worker.',
+          'You are an autonomous background worker. Complete the goal using tools, verify evidence, and return a concise structured report.'
+        );
       }
       progressCallback(20, `Selected worker ${selected.agent.name} for the background goal`);
 
@@ -484,23 +500,81 @@ export class AgentRunner {
     }
   }
 
-  /** Register (once) an ephemeral Background Worker agent with the full native tool surface. */
-  private ensureBackgroundWorkerAgent(): SelectResult {
-    const existing = agentRegistry.get('Background Worker');
+  /** Register (once) an ephemeral autonomous worker agent with the full native tool surface. */
+  private ensureAutonomousWorkerAgent(name: string, description: string, persona: string): SelectResult {
+    const existing = agentRegistry.get(name);
     if (existing) return { agent: existing, selected: true, missing: [] };
     const tools = SkillRegistry.getAll()
       .filter(s => Boolean(s.inputSchema) && s.name !== 'delegate_agent')
       .map(s => s.name);
     const agent = agentRegistry.register({
-      name: 'Background Worker',
-      description: 'Default autonomous background worker.',
-      persona: 'You are an autonomous background worker. Complete the goal using tools, verify evidence, and return a concise structured report.',
+      name,
+      description,
+      persona,
       capabilities: ['planning', 'coding', 'web-research', 'data-analysis', 'testing', 'reviewing', 'writing'],
       tools,
       taskScope: 'any',
       role: 'general'
     });
     return { agent, selected: true, missing: [] };
+  }
+
+  /**
+   * Step 9.3 — run a scheduled job as a canonical kind-'scheduled' Task through
+   * AgentEngine.executeTask. Selects a worker via the canonical registry
+   * (capability hints from the prompt + task-scope 'scheduled'), falls back to
+   * an ephemeral Scheduled Worker agent, and links the canonical Task id onto
+   * the job metadata (scheduler.json stays authoritative for schedule state).
+   * Returns { ok: false } on any failure so the caller falls back to the
+   * legacy mission-loop path.
+   */
+  private async runScheduledJobViaEngine(job: ScheduledJob): Promise<{ ok: boolean; output?: string }> {
+    try {
+      agentRegistry.refresh();
+      const profile: TaskProfile = { goal: job.prompt, kind: 'scheduled' };
+      let selected = agentEngine.selectForProfile(profile);
+      if (!selected) {
+        selected = this.ensureAutonomousWorkerAgent(
+          'Scheduled Worker',
+          'Default autonomous scheduled worker.',
+          'You are an autonomous scheduled worker. Complete the scheduled task using tools, verify evidence, and return a concise structured report.'
+        );
+      }
+
+      const exec = await agentEngine.executeTask({
+        agentId: selected.agent.id,
+        task: job.prompt,
+        kind: 'scheduled',
+        sessionId: job.sessionId,
+        maxTurns: 6,
+        retries: 0,
+        metadata: {
+          schedulerJobId: job.id,
+          schedulerJobType: job.type,
+          source: 'scheduler'
+        }
+      });
+
+      // A failed child mission must NOT be delivered as success — fall back so
+      // the legacy mission path decides the outcome.
+      if (!exec.success) return { ok: false };
+      const result = exec.result;
+      const output = result.finalOutput || result.summary || '';
+      if (!output) return { ok: false };
+      return { ok: true, output };
+    } catch (err: any) {
+      console.warn('[AgentRunner] Scheduled job via AgentEngine failed; falling back to the mission loop:', err?.message || err);
+      return { ok: false };
+    }
+  }
+
+  /** Deliver a completed scheduled job's result back into its session. */
+  private async deliverScheduledResult(job: ScheduledJob, output: string): Promise<void> {
+    try {
+      await this.gateway.sendResponse(job.sessionId, output);
+    } catch (err: any) {
+      console.warn('[AgentRunner] Delivering scheduled job result failed:', err?.message || err);
+    }
   }
 
   // Connect each configured MCP server, awaiting every result so connection

@@ -81,6 +81,7 @@ export type AgentTaskScope =
   | 'delegation'
   | 'swarm'
   | 'background'
+  | 'scheduled'
   | 'subtask';
 
 export interface Agent {

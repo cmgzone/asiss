@@ -22,6 +22,8 @@
  *      fails falls through to the declared fallback and the mission completes.
  *   10. (Step 9) Hosts can label the child Task kind — swarm jobs run as
  *      canonical kind-'swarm' Tasks on the same engine path.
+ *   11. (Step 9.3) Scheduled jobs run as canonical kind-'scheduled' Tasks
+ *      with schedulerJobId linkage on the child Task.
  *
  * Run: npm run smoke:agent-execution
  */
@@ -336,6 +338,25 @@ async function main() {
   assert.strictEqual(bgChild.kind, 'background', 'child task kind is background');
   assert.strictEqual(bgChild.metadata?.backgroundGoalId, 'bg-test-1', 'background goal id linked on the task');
   assert.strictEqual(bgChild.metadata?.backgroundGoalTitle, 'Math check', 'background goal title linked on the task');
+
+  // ------------------------------------------------------------ 7. Step 9.3 — scheduled kind
+  // Scheduled jobs run as canonical kind-'scheduled' Tasks; the scheduler job
+  // id rides on the child Task metadata so the canonical record points back
+  // to scheduler.json.
+  const schedParent = await taskEngine.create({ goal: 'Scheduled math.', kind: 'mission' });
+  const schedExec = await engine.executeTask({
+    agentId: 'MathBot',
+    task: 'Evaluate 2+2 at the scheduled time.',
+    kind: 'scheduled',
+    metadata: { schedulerJobId: 'job-1', schedulerJobType: 'agent_prompt' },
+    maxTurns: 2,
+    parentTaskId: schedParent.id
+  });
+  assert.strictEqual(schedExec.success, true, `scheduled-kind delegation succeeded (${schedExec.error || ''})`);
+  const schedChild = taskEngine.get(schedExec.taskId!)!;
+  assert.strictEqual(schedChild.kind, 'scheduled', 'child task kind is scheduled');
+  assert.strictEqual(schedChild.metadata?.schedulerJobId, 'job-1', 'scheduler job id linked on the task');
+  assert.strictEqual(schedChild.metadata?.schedulerJobType, 'agent_prompt', 'scheduler job type linked on the task');
 
   console.log('\n{"success":true,"turns":' + (child.timing.turns || 0) + '}');
 }
