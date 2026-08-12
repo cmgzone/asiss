@@ -416,3 +416,42 @@ completion counter, degraded task-less mission path, and finalizer are gone.
 surfaces `stoppedByStepLimit`; the host's `onTurn` renders continuation evidence
 and terminal UI after the engine transition. `AUDIT_3.md` records the final
 execution-authority audit.
+
+---
+
+**Phase 13 — AgentEngine: agents as first-class workers (in progress).**
+
+> TaskEngine owns the work. AgentEngine owns who performs the work.
+> Phase 13 must not create a second execution authority — delegated
+> children currently ARE one (bespoke `runChildLoop` in
+> `src/skills/delegate-agent.ts` bypasses ToolEngine, PolicyEngine,
+> memory, guardrails, and the canonical Task). This phase replaces the
+> four overlapping agent definitions with one canonical Agent, rebuilds
+> delegation/swarm on TaskEngine + AgentEngine, makes permissions
+> agent-aware, and standardizes results as evidence. Step 1 audit:
+> `docs/hermes/AGENT_ARCHITECTURE_AUDIT.md`. (This is the roadmap table's
+> Phase 16 "AgentEngine", pulled forward into the current track.)
+
+- [~] Step 1 — Agent architecture audit (`AGENT_ARCHITECTURE_AUDIT.md`)
+- [ ] Step 2 — Canonical `Agent` + unified registry over the existing
+      stores (`src/core/agent/`: `agent.ts`, `agent-role.ts`,
+      `agent-capabilities.ts`, `agent-registry.ts`, `agent-policy.ts`)
+- [ ] Step 3 — `AgentEngine` (`agent-engine.ts`): registerAgent /
+      getAgent / selectAgent / assignTask / executeTask / releaseAgent,
+      execution delegated to TaskEngine
+- [ ] Step 4 — Agent selection: capability matching against TaskProfile,
+      performance-ranked later
+- [ ] Step 5 — Kill `runChildLoop`; route delegation through canonical
+      Tasks (`kind: 'delegation'`) with agent policy injected via
+      iterate-style handlers
+- [ ] Step 6 — Agent permissions: feed `agentPermissions` into the
+      existing dead rule (`policy-rules.ts:152-165`); PolicyEngine stays
+      the single ALLOW/ASK/DENY authority
+- [ ] Step 7 — ModelPolicy: agent-width pin over ModelEngine's
+      task-shaped scoring
+- [ ] Step 8 — Canonical `AgentResult` (status, findings, evidence,
+      artifacts, recommendations, confidence, unresolvedQuestions) mapped
+      to/from `AgentTaskReport`, registered as task artifacts
+- [ ] Step 9 — Rebuild swarm on AgentEngine (assigned child Tasks,
+      selected workers); background goals adopt canonical Tasks
+      (`kind: 'background'`)
