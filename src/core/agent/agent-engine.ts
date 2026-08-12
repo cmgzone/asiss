@@ -42,6 +42,7 @@ import type { Task, TaskKind } from '../task';
 import { SkillRegistry } from '../skills';
 import { ToolEngine } from '../tools';
 import { TaskEngine, taskEngine as defaultTaskEngine } from '../task';
+import type { RetrieveOptions, RetrievedMemory } from '../memory-unified/memory-catalog';
 import type {
   ModelAttachment,
   ModelProvider,
@@ -117,6 +118,14 @@ export interface AgentEngineRuntime {
   listMcpTools: () => Promise<Tool[]>;
   toolEngine: ToolEngine;
   taskEngine?: TaskEngine;
+  /**
+   * Phase 16 Move 4 (D5) — unified-memory retrieval for child missions. The
+   * host wires the Phase 14 consolidation layer; AgentEngine only asks per the
+   * agent's memoryPolicy (injectLimit / minScore / minImportance / types /
+   * sources). AgentEngine has no knowledge of how memory is stored — policy
+   * decides, the memory system executes.
+   */
+  retrieveMemory?: (query: string, opts: RetrieveOptions) => RetrievedMemory[] | Promise<RetrievedMemory[]>;
 }
 
 export class AgentEngine {
@@ -181,6 +190,24 @@ export class AgentEngine {
   selectAgent(options: SelectAgentOptions = {}): SelectResult | null {
     const first = this.candidates(options).find(r => r.selected);
     return first || null;
+  }
+
+  /**
+   * Phase 16 Move 3b — the designated default agent for host-driven missions.
+   *
+   * Returns the first AVAILABLE agent explicitly designated `default: true`
+   * in metadata (deterministic: registry order). Designation-only by design:
+   * wrapped store agents (custom/profile/swarm) never become the mission's
+   * agent implicitly — the mission loop's behavior is byte-identical until
+   * someone registers a default. The mission loop then shares the SAME
+   * contract surface as AgentEngine children: `assignedAgent` on the mission
+   * Task, `modelPolicy.modelId` as the model pin, persona + instructions in
+   * the system prompt. Tool/context/memory policies follow in Move 4.
+   */
+  resolveDefaultAgent(): Agent | undefined {
+    return this.registry.list().find(
+      (a) => a.status === 'AVAILABLE' && a.metadata?.default === true
+    );
   }
 
   // ----------------------------------------------------- TaskProfile (Step 4)
@@ -328,8 +355,40 @@ export class AgentEngine {
       };
     }
 
-    const maxTurns = Math.min(20, Math.max(1, options.maxTurns || 6));
-    const maxAttempts = Math.min(3, Math.max(1, (options.retries ?? 1) + 1));
+    // Phase 16 Move 5 — handoffPolicy enforcement: a delegating agent can
+    // only hand off to allowed roles within maxDepth. executeTask is the ONLY
+    // delegation entry point, so every origin (delegation/swarm/background/
+    // scheduled) is covered here. The delegator is the parent Task's
+    // assignedAgent; refusal fails clearly with the policy reason and never
+    // creates a child Task.
+    const handoffBlocked = this.enforceHandoffPolicy(options.parentTaskId, agent);
+    if (handoffBlocked) {
+      return {
+        success: false,
+        attempts: 0,
+        taskIds: [],
+        result: {
+          agentId: agent.id,
+          agentName: agent.name,
+          status: 'failed',
+          summary: handoffBlocked,
+          findings: [],
+          evidence: [],
+          artifacts: [],
+          recommendations: [],
+          unresolvedQuestions: [],
+          errorSummary: handoffBlocked
+        },
+        error: handoffBlocked
+      };
+    }
+
+    // Phase 16 Move 2 — the agent's executionLimits feed the mission budgets
+    // when the caller does not override them, so the contract is not dead.
+    const limits = agent.executionLimits || {};
+    const maxTurns = Math.min(20, Math.max(1, options.maxTurns || limits.maxTurns || 6));
+    const retries = options.retries ?? (limits.maxAttempts ? limits.maxAttempts - 1 : 1);
+    const maxAttempts = Math.min(3, Math.max(1, retries + 1));
     const requested = new Set((options.allowedTools || []).map(t => t.trim()).filter(Boolean));
     const finalTools = (agent.tools || [])
       .filter(t => requested.size === 0 || requested.has(t))
@@ -339,6 +398,9 @@ export class AgentEngine {
     const allToolSchemas = await this.advertisedToolSchemas(runtime, finalTools);
 
     const taskIds: string[] = [];
+    // Phase 16 Move 4 — prior failed attempt outcomes, fed to later attempts
+    // when the agent's contextPolicy includes 'attempts'.
+    const priorOutcomes: Array<{ attempt: number; summary: string }> = [];
     let lastResult: AgentResult | undefined;
     const startedAt = new Date().toISOString();
 
@@ -386,7 +448,8 @@ export class AgentEngine {
           allToolSchemas,
           attempt,
           maxAttempts,
-          startedAt
+          startedAt,
+          priorOutcomes
         });
 
         lastResult = mission.result;
@@ -400,6 +463,14 @@ export class AgentEngine {
             taskIds
           };
         }
+        // Record this attempt's outcome so the next attempt's context can
+        // carry it (the 'attempts' contextPolicy source).
+        const failedTask = taskEngine.get(childTask.id);
+        const failedOutcome = failedTask?.outcome as any;
+        priorOutcomes.push({
+          attempt,
+          summary: failedOutcome?.result?.summary || failedOutcome?.summary || mission.result.summary || 'failed'
+        });
       } catch (err: any) {
         lastResult = {
           taskId: taskIds[taskIds.length - 1],
@@ -458,19 +529,21 @@ export class AgentEngine {
     return Array.from(byName.values());
   }
 
-  private buildChildSystemPrompt(agent: Agent, tools: Tool[]): string {
+  private buildChildSystemPrompt(agent: Agent, tools: Tool[], memorySection: string): string {
     const toolList = tools.length
       ? tools.map(tool => `- ${tool.name}: ${tool.description || 'No description'}`).join('\n')
       : '- No tools allowed for this delegation.';
 
     return [
       agent.persona || `You are ${agent.name}, a ${agent.role}.`,
+      ...(agent.instructions ? ['', agent.instructions] : []),
       '',
       'You are running as a delegated child agent on a canonical Task. Use only the tools provided in this call.',
       'Do not ask the user questions. If blocked, describe the blocker in the final report.',
       '',
       'Allowed tools:',
       toolList,
+      ...(memorySection ? ['', memorySection] : []),
       '',
       'When finished, respond with one JSON object and no extra prose:',
       '{',
@@ -493,13 +566,16 @@ export class AgentEngine {
     expectedOutput: string | undefined,
     reviewCriteria: string[] | undefined,
     attempt: number,
-    maxAttempts: number
+    maxAttempts: number,
+    priorOutcomes: Array<{ attempt: number; summary: string }> = []
   ): string {
     return [
       `Delegated task: ${task}`,
       expectedOutput ? `Expected output: ${expectedOutput}` : '',
       reviewCriteria?.length ? `Review criteria: ${reviewCriteria.join('; ')}` : '',
-      `Attempt ${attempt} of ${maxAttempts}.`
+      `Attempt ${attempt} of ${maxAttempts}.`,
+      ...(priorOutcomes.length ? ['Previous attempts:'] : []),
+      ...priorOutcomes.map(p => `- Attempt ${p.attempt}: ${p.summary}`)
     ].filter(Boolean).join('\n');
   }
 
@@ -531,15 +607,28 @@ export class AgentEngine {
       allToolSchemas: Tool[];
       attempt: number;
       startedAt: string;
+      priorOutcomes: Array<{ attempt: number; summary: string }>;
     }
   ): Promise<{ success: boolean; result: AgentResult }> {
-    const systemPrompt = this.buildChildSystemPrompt(agent, params.allToolSchemas);
+    // Phase 16 Move 4 (D2/D5) — the child context assembles from the agent's
+    // contextPolicy sources: task/instructions/history are structural (the
+    // task contract + loop contract — always rendered), 'memory' gates the
+    // unified-memory section (memoryPolicy drives retrieval), 'attempts' gates
+    // prior-attempt outcome lines, 'repo' is deferred (needs ContextEngine in
+    // the child runtime — tracked in AUDIT_7 D2).
+    const sources = new Set<string>(agent.contextPolicy?.sources || ['task', 'instructions', 'history']);
+    const memorySection = sources.has('memory') && (agent.memoryPolicy?.injectLimit || 0) > 0 && runtime.retrieveMemory
+      ? await this.buildChildMemorySection(runtime, agent, params.task, params.sessionId)
+      : '';
+    const systemPrompt = this.buildChildSystemPrompt(agent, params.allToolSchemas, memorySection);
+    const priorOutcomes = sources.has('attempts') ? params.priorOutcomes : [];
     const initialUser = this.buildChildTaskPrompt(
       params.task,
       params.expectedOutput,
       params.reviewCriteria,
       params.attempt,
-      params.maxAttempts
+      params.maxAttempts,
+      priorOutcomes
     );
     const history: Array<{ role: string; content: string }> = [
       { role: 'user', content: initialUser }
@@ -680,6 +769,102 @@ export class AgentEngine {
   }
 
   // ------------------------------------------------------------ internals
+
+  /**
+   * Phase 16 Move 5 — handoffPolicy enforcement (AgentHandoffPolicy).
+   *
+   * Walks the parent chain of a new delegation and answers whether the target
+   * agent may be delegated to:
+   *   - the immediate delegator (the parent Task's assignedAgent) must allow
+   *     delegation and, when allowedRoles is set, the target's role must be in
+   *     it;
+   *   - every ancestor delegator's maxDepth bounds the handoff chain
+   *     originating from it (depth 1 = its direct delegation, 2 = its
+   *     grandchild, ...).
+   * Returns a refusal message or null (allowed). Host-driven delegations
+   * (no parent, or no agent on the chain) are unrestricted. Never throws.
+   */
+  private enforceHandoffPolicy(parentTaskId: string | undefined, target: Agent): string | null {
+    if (!parentTaskId) return null;
+    const taskEngine = this.runtime?.taskEngine || defaultTaskEngine;
+    const chain: Array<{ agent: Agent; depthBelow: number }> = [];
+    let current: Task | undefined = taskEngine.get(parentTaskId);
+    while (current) {
+      if (current.assignedAgent) {
+        const delegator = this.registry.get(current.assignedAgent);
+        if (delegator && delegator.status !== 'RELEASED') {
+          chain.push({ agent: delegator, depthBelow: chain.length + 1 });
+        }
+      }
+      current = current.parentId ? taskEngine.get(current.parentId) : undefined;
+    }
+    if (chain.length === 0) return null;
+
+    const immediate = chain[0];
+    const immediatePolicy = immediate.agent.handoffPolicy || {};
+    if (immediatePolicy.allowDelegation === false) {
+      return `Agent '${immediate.agent.name}' does not allow delegation (handoffPolicy.allowDelegation = false).`;
+    }
+    if (
+      immediatePolicy.allowedRoles
+      && immediatePolicy.allowedRoles.length > 0
+      && !immediatePolicy.allowedRoles.includes(target.role)
+    ) {
+      return `Agent '${immediate.agent.name}' may only hand off to roles [${immediatePolicy.allowedRoles.join(', ')}], not '${target.role}' (${target.name}).`;
+    }
+    for (const link of chain) {
+      const maxDepth = link.agent.handoffPolicy?.maxDepth;
+      if (maxDepth != null && link.depthBelow > maxDepth) {
+        return `Handoff chain exceeds ${link.agent.name}'s maxDepth (${maxDepth}) — this delegation sits at depth ${link.depthBelow}.`;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Phase 16 Move 4 (D5) — render the child's unified-memory section per the
+   * agent's memoryPolicy. Retrieval goes through the runtime-provided
+   * retrieveMemory (the host's consolidation layer); AgentEngine only maps
+   * policy -> retrieve options and renders the hits. Never throws — memory is
+   * advisory context.
+   */
+  private async buildChildMemorySection(
+    runtime: AgentEngineRuntime,
+    agent: Agent,
+    task: string,
+    sessionId?: string
+  ): Promise<string> {
+    try {
+      const policy = agent.memoryPolicy || {};
+      const limit = Math.max(1, Math.floor(policy.injectLimit || 3));
+      const records = await runtime.retrieveMemory!(task, {
+        sessionId,
+        source: policy.sources && policy.sources.length > 0 ? (policy.sources[0] as any) : undefined,
+        types: policy.types as any,
+        limit,
+        minImportance: policy.minImportance as any
+      });
+      const hits = (Array.isArray(records) ? records : [])
+        .filter(r => (policy.minScore ?? 0) <= (r.score || 0))
+        .slice(0, limit);
+      if (hits.length === 0) return '';
+      const label = (t: string) => t.charAt(0).toUpperCase() + t.slice(1);
+      const lines = ['Memory context (unified):'];
+      for (const r of hits) {
+        const confidence = r.type === 'procedural' && r.confidence != null
+          ? ` (${Math.round(r.confidence * 100)}% confidence)`
+          : '';
+        lines.push(`- ${label(r.type)}${confidence}: ${this.compactLine(r.content)}`);
+      }
+      return lines.join('\n');
+    } catch {
+      return '';
+    }
+  }
+
+  private compactLine(text: string): string {
+    return String(text || '').replace(/\s+/g, ' ').trim();
+  }
 
   /**
    * Step 7 — resolve the model for a child mission from the agent's

@@ -30,7 +30,7 @@
 | 13 | Canonical scheduler -> Tasks | Delegation/swarm/background/scheduled all execute as canonical Tasks (Phase 13, done) | [x] |
 | 14 | Unified memory | Model + catalog, episodic capture, consolidation/lifecycle, MemorySkill retrieve, learning loop — restart-recall proven (docs/hermes/MEMORY_AUDIT.md) | [x] |
 | 15 | All autonomous work -> Tasks | Every origin funnels through canonical Tasks; skill creation + external research wrapped, legacy fallbacks retired (docs/hermes/AUDIT_6.md) | [x] |
-| 16 | Unified AgentEngine | One engine; agents are configurations (profiles, roles, model/tool/memory policies, handoffs) | [ ] |
+| 16 | Unified AgentEngine | One engine; agents are configurations (profiles, roles, model/tool/memory policies, handoffs) — one Agent contract, one canonical execution, policies consumed by both paths, handoff enforcement, AgentRun retirement verified, permanent verification gate (docs/hermes/AUDIT_7.md) | [x] |
 | 17 | Self-repair coding loop | code -> test -> diagnose -> repair -> verify with failure memory | [ ] |
 | 18 | Repository intelligence | Index/symbol/dependency graphs, change-impact analysis, minimal context | [ ] |
 | 19 | Verification & quality gates | Deterministic gates: lint/typecheck/tests/build/security/diff + acceptance criteria + evidence | [ ] |
@@ -774,8 +774,190 @@ lastError / lastFailedAt and persists; one-shots still disable) + `tsc
 origin — mission, delegation, swarm, background, scheduled, skill creation,
 external research — funnels through the canonical Task lifecycle, with one
 WHEN authority per trigger and store statuses authoritative via canonical
-linkage.** Next roadmap phase: **Phase 16 — unified AgentEngine** (agents as
-configurations of one engine: profiles, role instructions, tool/model/memory
-policies, handoffs).
+linkage.**
+
+**Phase 16 — Unified AgentEngine (in progress, docs/hermes/AUDIT_7.md).**
+
+> Task = what work needs to happen; AgentProfile = how this kind of agent
+> behaves; AgentEngine = who performs the work and how that execution is
+> configured. One engine, one contract; policies are configurations, not
+> separate systems.
+
+**Phase 16, Move 1 — Agent Execution Authority Audit (done, docs only).**
+Mapped every agent execution path (mission loop, delegation, swarm,
+background, scheduled, skill creation, external research, tool execution,
+model invocation) with the who-owns matrix (create/lifecycle/model/context/
+tools/failure/retry/persist/events/cancel). Already unified and preserved:
+`TaskEngine.runMission` is the one lifecycle driver, `ToolEngine.execute` the
+one tool execution mechanism, one `TaskEventBus` + hooks bridge, WHEN-only
+triggers (Phase 15), and `agentRunManager` deleted (Audit 5, zero references).
+Findings: **D1** — the swarm executor's non-delegate branch runs a bare
+`model.generate` with no Task/evidence (remove); **D2** — two context
+authorities (rich ContextEngine mission prompt vs flat AgentEngine child
+prompt — consolidate via contextPolicy); **D3** — two model-selection paths
+(router/engine vs agent modelPolicy — one ModelPolicy contract); **D4** — two
+tool-selection paths (single ToolEngine execution, split selection policy);
+**D5** — no memory injection into child missions (Phase 14 unified memory
+reaches agents via memoryPolicy); **D6/D7** — retry layering by design;
+streaming deferred. Agent contract gap: `Agent` lacks contextPolicy /
+memoryPolicy / handoffPolicy / executionLimits / instructions; decision is to
+keep **Task-as-run** (no new AgentRun record — avoids re-introducing the
+bookkeeping Audit 5 removed). **Next: Move 2** — extend the Agent contract;
+**Move 3** — canonical execution (remove D1, mission resolves the default
+profile through the same contract); **Move 4** — policies; **Move 5** —
+handoffs; **Move 6** — AgentRunManager retirement check; **Move 7** —
+verification.
+
+**Phase 16, Move 2 — extended Agent contract (done, docs/hermes/AUDIT_7.md §4).**
+The canonical `Agent` (agent-types.ts) gains the five missing fields:
+`instructions` (explicit imperative operating rules, rendered into the child
+system prompt AFTER persona so they win conflicts), `contextPolicy` (enabled
+context sources task/instructions/repo/memory/history/attempts + assembly
+budget), `memoryPolicy` (unified-memory retrieval/injection: injectLimit /
+minScore / minImportance / types / sources — children default to no
+injection, D5), `executionLimits` (maxTurns / maxAttempts / maxOutputTokens /
+timeoutMs / maxContextChars), and `handoffPolicy` (allowDelegation /
+allowedRoles / maxDepth, enforced in Move 5). Every wrapped agent
+(custom/profile/swarm/A2A) and every registry-born agent now carries a
+complete contract — adapters fill defaults (`contextPolicy.sources =
+task,instructions`, `memoryPolicy.injectLimit = 0`, delegation allowed,
+A2A cards disallow delegation), `register()` accepts the full AgentInput.
+**Task-as-run is kept and documented in the contract header**: the run IS the
+child canonical Task + assignedAgent + registry status projection — no
+AgentRun record, so Audit 5's removed run bookkeeping cannot re-materialize.
+Two wirings make the contract live now (the rest land in Moves 3-5):
+`executeTask` falls back to `executionLimits.maxTurns` / `maxAttempts` when
+callers don't override, and `instructions` render in the child system prompt.
+Verified by `smoke:agent-engine` section 7 (defaults on wrapped agents,
+full-contract register + storage, executionLimits.maxTurns feeding the child
+mission budget, instructions in the child system prompt, one child task =
+one run) + `tsc --noEmit`; the full battery green (delegation ×2,
+agent-execution, agent-task-profile, runtime, baseline, scheduler,
+memory-unified, learning).
+
+**Phase 16, Move 3a — swarm fragment (D1) removed (done).** The swarm
+executor's non-delegate branch is DELETED: when `delegate_agent` is
+unavailable it no longer runs a bare `model.generate(prompt,
+this.baseSystemPrompt, [])` (no Task, no ToolEngine, no events, no evidence)
+— it logs loudly and throws `delegate_agent skill is unavailable — cannot run
+swarm agent … outside the canonical Task lifecycle`, and the swarm store's
+`runAgent` catch marks the task `failed` with that message (swarm_data.json
+stays authoritative for swarm statuses, Audit 4 S2). This was the last
+fragment path where agent work happened outside the canonical lifecycle; the
+skill is registered unconditionally by the runner, so it was dead defensive
+code that Phase 16's "no competing agent execution path" rule forbids.
+Verified by `smoke:agent-execution` section 12 (throwing executor → result
+`success: false` + loud message on the task, agent released from working) +
+`tsc --noEmit`; the full battery green in one pass. The remaining
+`model.generate` sites are non-swarm by construction (canonical mission loop,
+summarization, dynamic-tool interpreter, proactive check-in, @-mention
+fallback).
+
+**Phase 16, Move 3b — the mission loop resolves a designated default
+AgentProfile (done).** `AgentEngine.resolveDefaultAgent()` returns the first
+AVAILABLE agent explicitly designated `metadata.default: true` (registry
+order, designation-only — wrapped store agents are NEVER implicit defaults,
+so production behavior is byte-identical until someone designates one). When
+resolved, the host-driven mission shares the SAME contract surface as
+AgentEngine children: the mission Task is created with
+`assignedAgent: <default id>`, the agent's `modelPolicy.modelId` is layered
+UNDER the explicit ModelRouter override as the model-selection pin (router
+wins; agent pin is the width — complementary per Audit 7 D3, closing half of
+the two-model-selection gap), and the agent's persona + instructions render
+into the mission system prompt (persona first, instructions last so they win
+conflicts). Tool/context/memory policies remain Move 4. Verified by
+`smoke:agent-engine` section 8 (designation semantics) + `smoke:runtime`
+e2e (mission Task assigned to the designated default, its instructions in the
+system prompt, its model pin honored with selection unchanged — the default
+pins the fake model) + `tsc --noEmit`; the full battery green in one pass.
+
+**Phase 16, Move 4 — policies wired into both paths (done).** All three
+remaining policies are consumed, keeping the guardrail *policy = decision,
+engine = execution, store = persistence* — no new mini-engines.
+**ToolPolicy (D4):** the designated default agent's `permissions` now shape
+the mission's advertised tool surface — denied tools always removed, an
+explicit allow list (or the agent's declared tools) intersects the surface,
+`permissions.maxToolCalls` becomes the mission tool-call budget when the host
+config doesn't set one; the child side already honored `agent.tools` ∩
+request-allowed. **MemoryPolicy (D5):** `AgentEngineRuntime` gains a
+`retrieveMemory` hook (the runner wires the Phase 14 consolidation layer);
+`runChildMission` maps the child agent's `memoryPolicy` (injectLimit /
+minScore / minImportance / types / sources) to a retrieval and renders a
+`Memory context (unified)` section in the child system prompt — children now
+receive unified memory (the audit's D5 gap), with AgentEngine ignorant of how
+memory is stored. The mission side applies the default agent's memoryPolicy
+as a filter on its existing unified-memory section. **ContextPolicy (D2):**
+the child context assembles from `contextPolicy.sources` — task /
+instructions / history are structural (task contract + loop contract, always
+rendered), 'memory' gates the injection, 'attempts' feeds prior failed-attempt
+outcome lines into later attempts (from the failed child Tasks); 'repo'
+(deferred — needs ContextEngine in the child runtime, tracked in AUDIT_7
+D2). Default context sources are task/instructions/history = today's child
+context exactly (zero behavior change). Verified by `smoke:agent-execution`
+section 13 (memory section + confidence in the child system prompt,
+executionLimits.maxAttempts → 2 attempts, prior-outcome lines on the second
+attempt), `smoke:runtime` e2e (deniedTools removed web_search from every
+advertised mission surface while apply_patch + shell stayed; mission
+completed), and `smoke:agent-engine` 7a (default sources); `tsc --noEmit`
+clean, full battery green in one pass.
+
+**Phase 16, Move 5 — handoffPolicy enforced (done).** Agent-to-agent
+collaboration stays Task-only (Phase 15's canonical delegation), and the
+`handoffPolicy` declared in Move 2 is now enforced at the single delegation
+entry point — `AgentEngine.executeTask`. The delegating agent is the parent
+Task's `assignedAgent`; enforcement walks the parent chain and answers:
+**allowDelegation** gates delegation at all (false → refused, no child Task
+created), **allowedRoles** restricts the target's role when set, and every
+ancestor delegator's **maxDepth** bounds the handoff chain originating from
+it (depth 1 = direct delegation, 2 = grandchild, …). Refusals return a clear
+failed AgentResult naming the exact policy ('does not allow delegation',
+'may only hand off to roles', 'maxDepth (1) — this delegation sits at depth
+2'). Host-driven delegations (no parent, or no agent on the chain) are
+unrestricted, and all registry defaults (allowDelegation true, maxDepth 3)
+preserve existing behavior byte-for-byte — only explicit configuration
+changes outcomes. Because every origin (delegation/swarm/background/
+scheduled) funnels through executeTask, the enforcement covers all of them.
+Verified by `smoke:agent-execution` section 14 (role refusal, allowed depth-1
+handoff, depth-2 refusal under maxDepth 1, allowDelegation=false refusal) +
+`tsc --noEmit`; the full battery green in one pass.
+
+**Phase 16, Move 6 — AgentRunManager retirement check (done).** Audit 5's
+deletion held: grep sweeps show zero `agentRunManager` references in src/ or
+scripts/, no `agent_runs.json` writes anywhere, and no `AgentRun` record type
+— the name exists only as the Task-as-run doc comment in agent-types.ts.
+Run state lives in Task + toolExecutions + TaskEvents, with agent status a
+registry projection. Two remnants consolidated: **dead analytics API removed**
+— `AnalyticsTracker.recordAgentRun` (zero call sites since the runner's
+delegation path stopped using it) and the never-emitted/never-consumed
+`'agent_run'` AnalyticsEvent type are gone; agent-run telemetry comes from
+TaskEvents via the hooks bridge, not a parallel analytics hook — and
+**stale skill docs fixed** — project-manager's `agent_run` / `agent_run_all`
+descriptions still claimed "AgentRunManager reports" while the
+implementation had already moved to canonical delegated child Tasks
+(`getAgentRunReports` → TaskEngine); they now name the canonical source. The
+delegation smoke still asserts `agent_runs.json` is never written. Verified
+by the sweeps + `tsc --noEmit`; the full battery green in one pass.
+
+**Phase 16, Move 7 — end-to-end verification gate (done) — Phase 16
+complete.** The behavioral matrix (docs/hermes/AUDIT_7.md §8) maps every
+origin — mission, delegation, swarm, background, scheduled, skill creation,
+external research — to the battery smoke that proves its contract cells
+(canonical Task, resolved AgentProfile, AgentEngine path, model/tool/
+memory/context policies, evidence). A permanent, comment-aware source gate
+lands in the regression suite: `npm run smoke:phase16`
+(`scripts/smoke-phase16.ts`, sweeps 191 TS files) keeps Gate 1 (the swarm
+executor block contains no bare `model.generate` and fails loudly when
+delegate_agent is unavailable), Gate 2 (all five contract fields declared),
+Gate 3 (no `\bAgentRun\b` — Task-as-run), and Gate 7 (`agentRunManager` /
+`recordAgentRun` / `agent_runs.json` writes at zero in src/ + scripts/,
+comments and the guard file itself excluded) green forever. **Phase 16 is
+complete and committed-ready**: one Agent contract (Move 2), one canonical
+execution path (Move 3a swarm fragment removed + Move 3b mission default
+profile), policies consumed by both paths (Move 4), handoff enforcement
+(Move 5), AgentRun retirement verified (Move 6), verification gated (Move 7).
+The architecture converges on: **Task = execution identity, AgentProfile =
+behavior/configuration, AgentEngine = execution authority, TaskEngine = work
+lifecycle authority, ToolEngine = tool execution authority, Unified Memory =
+knowledge authority, TaskEvents = execution history.**
 
 

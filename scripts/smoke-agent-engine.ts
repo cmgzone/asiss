@@ -11,6 +11,12 @@
  *   4. AgentResult adapters round-trip legacy AgentTaskReport data.
  *   5. executeTask is a guard (Step 3 wires execution onto TaskEngine).
  *   6. assign/release lifecycle state transitions.
+ *   7. Phase 16 Move 2 (AUDIT_7.md §4): the extended Agent contract —
+ *      instructions, contextPolicy, memoryPolicy, executionLimits,
+ *      handoffPolicy — defaults on wrapped agents, storage on registry-born
+ *      agents, and the two Move 2 wirings: executionLimits feed
+ *      executeTask's mission budgets, instructions render in the child
+ *      system prompt. Task-as-run kept (no AgentRun record).
  *
  * Run: npm run smoke:agent-engine
  */
@@ -42,6 +48,7 @@ async function main() {
   } = await import('../src/core/agent/agent-capabilities');
   const { agentResultFromTaskReport, taskReportFromAgentResult } =
     await import('../src/core/agent/agent-result');
+  const { taskEngine } = await import('../src/core/task');
 
   const coderAgent = customAgentManager.createAgent({
     name: 'coder',
@@ -217,6 +224,139 @@ async function main() {
     null,
     'disabled agent excluded from selection'
   );
+
+  // ------------------------------------------------------------------
+  // 7. Phase 16 Move 2 — the extended Agent contract (docs/hermes/AUDIT_7.md §4)
+  // ------------------------------------------------------------------
+  // 7a. Wrapped agents carry contract defaults (no policy left undefined).
+  const wrapped = fromCustomAgent(coderAgent);
+  assert.deepStrictEqual(
+    wrapped.contextPolicy.sources,
+    ['task', 'instructions', 'history'],
+    'default context sources on wrapped agents (task + identity + loop history)'
+  );
+  assert.strictEqual(wrapped.memoryPolicy.injectLimit, 0, 'children default to no memory injection (D5)');
+  assert.deepStrictEqual(wrapped.executionLimits, {}, 'no hard limits by default');
+  assert.strictEqual(wrapped.handoffPolicy.allowDelegation, true, 'delegation allowed by default');
+  assert.strictEqual(wrapped.instructions, undefined, 'no instructions unless the source store has one');
+
+  // 7b. register() stores the full contract from AgentInput.
+  agentRegistry.register({
+    name: 'ContractBot',
+    role: 'analyst',
+    description: 'Agent carrying the full Phase 16 contract.',
+    capabilities: ['analysis'],
+    tools: ['math_eval'],
+    instructions: 'Always verify results twice before reporting.',
+    contextPolicy: {
+      sources: ['task', 'instructions', 'repo', 'memory', 'history', 'attempts'],
+      maxContextChars: 8000
+    },
+    memoryPolicy: { injectLimit: 5, minScore: 0.5, minImportance: 3, types: ['lesson'], sources: ['learning'] },
+    executionLimits: { maxTurns: 2, maxAttempts: 1, maxOutputTokens: 2000, timeoutMs: 30000, maxContextChars: 8000 },
+    handoffPolicy: { allowDelegation: false, allowedRoles: ['researcher'], maxDepth: 1 }
+  });
+  const contractAgent = agentRegistry.get('ContractBot')!;
+  assert.ok(contractAgent, 'contract agent registered');
+  assert.strictEqual(contractAgent.instructions, 'Always verify results twice before reporting.', 'instructions stored');
+  assert.deepStrictEqual(
+    contractAgent.contextPolicy.sources,
+    ['task', 'instructions', 'repo', 'memory', 'history', 'attempts'],
+    'contextPolicy stored'
+  );
+  assert.strictEqual(contractAgent.contextPolicy.maxContextChars, 8000, 'context budget stored');
+  assert.strictEqual(contractAgent.memoryPolicy.injectLimit, 5, 'memoryPolicy stored');
+  assert.deepStrictEqual(contractAgent.memoryPolicy.sources, ['learning'], 'memoryPolicy sources stored');
+  assert.strictEqual(contractAgent.executionLimits.maxTurns, 2, 'executionLimits stored');
+  assert.deepStrictEqual(contractAgent.handoffPolicy.allowedRoles, ['researcher'], 'handoffPolicy stored');
+
+  // 7c. Move 2 wirings — executionLimits feed executeTask budgets; instructions
+  //     render into the child system prompt. Task-as-run: the run IS the child
+  //     canonical Task (no AgentRun record created).
+  let childSystemPrompt = '';
+  const promptProbe = {
+    id: 'prompt-probe',
+    name: 'Prompt Probe',
+    generate: async (_prompt: string, systemPrompt?: string) => {
+      childSystemPrompt = systemPrompt || '';
+      return {
+        content: JSON.stringify({
+          status: 'completed',
+          summary: 'Contract verified.',
+          workDone: ['Ran with the extended contract'],
+          filesChanged: [],
+          evidence: ['system prompt carried the instructions'],
+          risks: [],
+          nextSteps: [],
+          finalOutput: 'done'
+        })
+      };
+    }
+  };
+  const contractEngine = new AgentEngine();
+  contractEngine.configure({
+    getModelById: () => promptProbe as any,
+    getDefaultModel: () => promptProbe as any,
+    listMcpTools: async () => [],
+    toolEngine: { execute: async () => ({ success: false, error: 'unused' }) } as any,
+    taskEngine
+  });
+  const contractRun = await contractEngine.executeTask({
+    agentId: 'ContractBot',
+    task: 'Verify the contract.',
+    sessionId: 'move2-session'
+  });
+  assert.strictEqual(contractRun.success, true, 'contract agent executes');
+  assert.ok(
+    childSystemPrompt.includes('Always verify results twice before reporting.'),
+    'instructions rendered in the child system prompt'
+  );
+  const contractChild = taskEngine.get(contractRun.taskId!)!;
+  assert.strictEqual(contractChild.constraints?.maxTurns, 2, 'executionLimits.maxTurns feeds the child mission budget');
+  assert.strictEqual(contractChild.assignedAgent, 'reg:contractbot', 'child assigned to the contract agent');
+  assert.ok(contractRun.taskIds.length === 1, 'one child task = one run (Task-as-run)');
+
+  // ------------------------------------------------------------------
+  // 8. Phase 16 Move 3b — the designated default agent (mission-loop contract)
+  // ------------------------------------------------------------------
+  // 8a. No designation -> no default, even with AVAILABLE wrapped agents.
+  assert.strictEqual(agentEngine.resolveDefaultAgent(), undefined, 'no default agent before designation');
+  assert.strictEqual(
+    agentEngine.resolveDefaultAgent(),
+    undefined,
+    'wrapped AVAILABLE agents are never implicit defaults (designation-only)'
+  );
+
+  // 8b. Designation resolves deterministically; released designated agents are
+  //     skipped.
+  const mainAgent = agentRegistry.register({
+    name: 'MainAgent',
+    role: 'general',
+    description: 'The designated default host-driven agent.',
+    capabilities: ['general'],
+    instructions: 'Coordinate the mission and drive it to completion.',
+    modelPolicy: { modelId: 'prompt-probe' },
+    taskScope: 'mission',
+    metadata: { default: true }
+  });
+  agentRegistry.register({
+    name: 'OfflineMain',
+    role: 'general',
+    description: 'Designated but disabled.',
+    metadata: { default: true }
+  });
+  agentRegistry.get('OfflineMain')!.status = 'RELEASED';
+  const defaultResolved = agentEngine.resolveDefaultAgent();
+  assert.ok(defaultResolved, 'designated default resolves');
+  assert.strictEqual(defaultResolved!.id, mainAgent.id, 'the designated AVAILABLE agent is returned');
+  assert.strictEqual(defaultResolved!.instructions, 'Coordinate the mission and drive it to completion.', 'default carries its contract');
+
+  // 8c. The mission loop (runner) uses the same contract — the mission Task is
+  //     assigned to the default agent and its modelPolicy pin lands as the
+  //     model selection pin. Verified end-to-end in smoke:runtime; here we
+  //     assert the engine surface is complete.
+  assert.strictEqual(defaultResolved!.taskScope, 'mission', 'default agent is mission-scoped');
+  assert.strictEqual(defaultResolved!.modelPolicy.modelId, 'prompt-probe', 'default agent carries its model pin');
 
   console.log('\n{"success":true}');
 }

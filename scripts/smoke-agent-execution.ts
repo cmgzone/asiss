@@ -358,6 +358,205 @@ async function main() {
   assert.strictEqual(schedChild.metadata?.schedulerJobId, 'job-1', 'scheduler job id linked on the task');
   assert.strictEqual(schedChild.metadata?.schedulerJobType, 'agent_prompt', 'scheduler job type linked on the task');
 
+  // ------------------------------------------------------------ 12. Phase 16 Move 3 — D1 removal
+  // The runner's swarm executor has NO fallback execution path: if
+  // delegate_agent is unavailable it logs loudly and THROWS instead of running
+  // an untracked model.generate (no Task, no ToolEngine, no events, no
+  // evidence). The swarm store's runAgent catch marks the task failed with the
+  // error message, keeping swarm_data.json authoritative for swarm statuses —
+  // the exact failure contract the removal relies on.
+  const { agentSwarm } = await import('../src/core/agent-swarm');
+  const fragAgent = agentSwarm.createAgent('FragBot', 'general', 'fragment guard', 'stub-model');
+  agentSwarm.setExecutor(async () => {
+    throw new Error(
+      '[AgentRunner] delegate_agent skill is unavailable — cannot run swarm agent outside the canonical Task lifecycle.'
+    );
+  });
+  agentSwarm.assignTask(fragAgent.id, 'Prove the D1 fragment is gone.');
+  const fragResults = await agentSwarm.runAgent(fragAgent.id);
+  assert.strictEqual(fragResults.length, 1, 'one swarm result');
+  assert.strictEqual(fragResults[0].success, false, 'unavailable delegate fails the swarm task');
+  assert.ok(
+    String(fragResults[0].output).includes('delegate_agent skill is unavailable'),
+    'loud failure message reaches the swarm result (no silent bare model.generate)'
+  );
+  const fragAgentAfter = agentSwarm.getAgent(fragAgent.id)!;
+  assert.ok(
+    fragAgentAfter.status === 'idle' || fragAgentAfter.status === 'completed',
+    'swarm agent released from working after the failed run'
+  );
+
+  // ------------------------------------------------------------ 13. Phase 16 Move 4 — policies
+  // (AUDIT_7 D2/D5): the child context assembles from the agent's
+  // contextPolicy sources. 'memory' injects the unified-memory section per
+  // memoryPolicy through the runtime retrieveMemory hook (policy decides, the
+  // memory system executes — no new engine); 'attempts' feeds prior
+  // failed-attempt outcomes to later attempts. executionLimits.maxAttempts
+  // (Move 2) drives the two-attempt run.
+  const move4Model = {
+    id: 'move4-model',
+    name: 'Move4 Model',
+    calls: 0,
+    systemPrompts: [] as string[],
+    prompts: [] as string[],
+    async generate(prompt: string, systemPrompt?: string) {
+      this.calls += 1;
+      this.systemPrompts.push(systemPrompt || '');
+      this.prompts.push(prompt);
+      if (this.calls === 1) {
+        return {
+          content: JSON.stringify({
+            status: 'failed',
+            summary: 'First attempt lacked context.',
+            workDone: [], filesChanged: [], evidence: [], risks: [], nextSteps: [], finalOutput: ''
+          })
+        };
+      }
+      return {
+        content: JSON.stringify({
+          status: 'completed',
+          summary: 'Second attempt succeeded with memory + prior-outcome context.',
+          workDone: ['completed'], filesChanged: [], evidence: ['context injected'], risks: [], nextSteps: [], finalOutput: 'done'
+        })
+      };
+    }
+  };
+  const policyEngine = new AgentEngine();
+  policyEngine.configure({
+    getModelById: () => move4Model as any,
+    getDefaultModel: () => move4Model as any,
+    listMcpTools: async () => [],
+    toolEngine: { execute: async () => ({ success: false, error: 'unused' }) } as any,
+    taskEngine,
+    retrieveMemory: async (_query: string, _opts: any) => [
+      {
+        id: 'learning:rule-9',
+        type: 'procedural',
+        source: 'learning',
+        scope: 'agent',
+        importance: 3,
+        confidence: 0.87,
+        lifecycle: 'active',
+        content: 'Verify after mutating files.',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        score: 0.91,
+        scoreBreakdown: { semantic: undefined, lexical: 0.91, importance: 3, confidence: 0.87, recency: 1, access: 0 }
+      } as any
+    ]
+  });
+  agentRegistry.register({
+    name: 'PolicyBot',
+    role: 'general',
+    description: 'Agent carrying full Move 4 policies.',
+    capabilities: ['general'],
+    instructions: 'Use context deliberately.',
+    contextPolicy: { sources: ['task', 'instructions', 'history', 'memory', 'attempts'] },
+    memoryPolicy: { injectLimit: 3, minScore: 0.5, types: ['procedural'], sources: ['learning'] },
+    executionLimits: { maxTurns: 3, maxAttempts: 2 }
+  });
+  const policyRun = await policyEngine.executeTask({
+    agentId: 'PolicyBot',
+    task: 'Fix the flaky test.',
+    sessionId: 'move4-session'
+  });
+  assert.strictEqual(policyRun.success, true, 'policy agent succeeds on the second attempt');
+  assert.strictEqual(policyRun.attempts, 2, 'executionLimits.maxAttempts produced two attempts');
+  assert.ok(
+    move4Model.systemPrompts[0].includes('Memory context (unified):'),
+    'child system prompt carries the unified-memory section'
+  );
+  assert.ok(
+    move4Model.systemPrompts[0].includes('Verify after mutating files.'),
+    'memory records render in the child system prompt'
+  );
+  assert.ok(
+    move4Model.systemPrompts[0].includes('(87% confidence)'),
+    'procedural confidence renders in the memory section'
+  );
+  assert.ok(
+    move4Model.prompts[1].includes('Previous attempts:') && move4Model.prompts[1].includes('Attempt 1: First attempt lacked context.'),
+    'prior failed-attempt outcome feeds the second attempt (attempts source)'
+  );
+
+  // ------------------------------------------------------------ 14. Phase 16 Move 5 — handoffPolicy
+  // (AUDIT_7 Move 5): AgentEngine.executeTask enforces the delegating agent's
+  // handoffPolicy — allowDelegation gates delegation at all, allowedRoles
+  // restricts the target's role, maxDepth bounds the chain originating from
+  // each ancestor. The delegator is the parent Task's assignedAgent; refusals
+  // fail clearly and never create a child Task.
+  const hfModel = {
+    id: 'hf-probe',
+    name: 'HF Probe',
+    async generate() {
+      return {
+        content: JSON.stringify({
+          status: 'completed',
+          summary: 'Handoff allowed.',
+          workDone: ['completed'], filesChanged: [], evidence: [], risks: [], nextSteps: [], finalOutput: 'done'
+        })
+      };
+    }
+  };
+  const hfEngine = new AgentEngine();
+  hfEngine.configure({
+    getModelById: () => hfModel as any,
+    getDefaultModel: () => hfModel as any,
+    listMcpTools: async () => [],
+    toolEngine: { execute: async () => ({ success: false, error: 'unused' }) } as any,
+    taskEngine
+  });
+  const rootBot = agentRegistry.register({
+    name: 'RootBot', role: 'general', description: 'Root delegator with a strict handoff policy.',
+    capabilities: ['general'], tools: [], modelPolicy: { modelId: 'hf-probe' },
+    handoffPolicy: { allowDelegation: true, allowedRoles: ['analyst'], maxDepth: 1 }
+  });
+  agentRegistry.register({
+    name: 'ChildAnalyst', role: 'analyst', description: 'Allowed analyst target.',
+    capabilities: ['analysis'], tools: [], modelPolicy: { modelId: 'hf-probe' }
+  });
+  agentRegistry.register({
+    name: 'CoderTarget', role: 'coder', description: 'Role outside RootBot allowedRoles.',
+    capabilities: ['coding'], tools: [], modelPolicy: { modelId: 'hf-probe' }
+  });
+  agentRegistry.register({
+    name: 'GrandBot', role: 'analyst', description: 'Depth-2 target under RootBot maxDepth 1.',
+    capabilities: ['analysis'], tools: [], modelPolicy: { modelId: 'hf-probe' }
+  });
+  const noDelegBot = agentRegistry.register({
+    name: 'NoDelegBot', role: 'general', description: 'Delegator that forbids delegation.',
+    capabilities: ['general'], tools: [], modelPolicy: { modelId: 'hf-probe' },
+    handoffPolicy: { allowDelegation: false }
+  });
+  const rootMission = await taskEngine.create({
+    goal: 'Root mission', kind: 'mission', assignedAgent: rootBot.id
+  });
+  // 14a. allowedRoles: RootBot may only hand off to analysts.
+  const roleRefused = await hfEngine.executeTask({
+    agentId: 'CoderTarget', task: 'Code something.', parentTaskId: rootMission.id, sessionId: 'move5-session'
+  });
+  assert.strictEqual(roleRefused.success, false, 'target outside allowedRoles is refused');
+  assert.ok(String(roleRefused.error).includes('may only hand off to roles'), 'role refusal names the policy');
+  // 14b. Allowed handoff (analyst, depth 1) succeeds; depth-2 from RootBot fails.
+  const depthOk = await hfEngine.executeTask({
+    agentId: 'ChildAnalyst', task: 'Analyze something.', parentTaskId: rootMission.id, sessionId: 'move5-session'
+  });
+  assert.strictEqual(depthOk.success, true, 'analyst handoff allowed (role + depth 1)');
+  const depthRefused = await hfEngine.executeTask({
+    agentId: 'GrandBot', task: 'Go deeper.', parentTaskId: depthOk.taskId, sessionId: 'move5-session'
+  });
+  assert.strictEqual(depthRefused.success, false, 'depth beyond RootBot maxDepth 1 is refused');
+  assert.ok(String(depthRefused.error).includes('maxDepth'), 'depth refusal names maxDepth');
+  // 14c. allowDelegation=false gates delegation entirely.
+  const noDelegParent = await taskEngine.create({
+    goal: 'No-deleg mission', kind: 'mission', assignedAgent: noDelegBot.id
+  });
+  const delegRefused = await hfEngine.executeTask({
+    agentId: 'ChildAnalyst', task: 'Anything.', parentTaskId: noDelegParent.id, sessionId: 'move5-session'
+  });
+  assert.strictEqual(delegRefused.success, false, 'delegation from an agent that disallows it is refused');
+  assert.ok(String(delegRefused.error).includes('does not allow delegation'), 'refusal names allowDelegation');
+
   console.log('\n{"success":true,"turns":' + (child.timing.turns || 0) + '}');
 }
 

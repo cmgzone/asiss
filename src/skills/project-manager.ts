@@ -94,8 +94,8 @@ AGENT TEAM ACTIONS:
 - agent_list
 - agent_delete (agentId)
 - agent_assign_task (agentId, taskDescription)
-- agent_run (agentId) - execute agent's tasks and return structured AgentRunManager reports
-- agent_run_all - run all agents in parallel and return structured AgentRunManager reports
+- agent_run (agentId) - execute agent's tasks and return reports (canonical delegated child Tasks via TaskEngine)
+- agent_run_all - run all agents in parallel and return reports (canonical delegated child Tasks via TaskEngine)
 - agent_replicate (agentId, count) - clone agent for parallel work
 - agent_status (agentId?)
 - agent_collaborate (agentNames: comma-separated, goal) - multi-agent collaboration

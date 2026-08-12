@@ -52,6 +52,8 @@ async function main() {
   const streamChunks: string[] = [];
   const streamEvents: any[] = [];
   const prompts: string[] = [];
+  const systemPrompts: string[] = [];
+  const advertisedTools: any[][] = [];
   let turns = 0;
 
   const gateway = {
@@ -66,8 +68,10 @@ async function main() {
   const fakeModel = {
     id: 'runtime-smoke-model',
     name: 'Runtime Smoke Model',
-    generate: async (prompt: string) => {
+    generate: async (prompt: string, systemPrompt?: string, tools?: any[]) => {
       prompts.push(prompt);
+      systemPrompts.push(systemPrompt || '');
+      advertisedTools.push(tools || []);
       turns += 1;
       if (turns === 1) {
         return { content: "I'll inspect and fix that next." };
@@ -112,6 +116,28 @@ async function main() {
   const runner = new AgentRunner(gateway as any);
   ModelRegistry.register(fakeModel as any);
   assert(ModelRegistry.setCurrentModel(fakeModel.id));
+
+  // Phase 16 Move 3b: designate a default AgentProfile (explicitly, via
+  // metadata.default) so the host-driven mission resolves it through the same
+  // Agent contract AgentEngine children use — assignedAgent on the mission
+  // Task, modelPolicy.modelId as the model pin (pinned to the fake model so
+  // the existing selection assertions stay intact), persona + instructions in
+  // the system prompt. Without a designation the mission is byte-identical.
+  const { agentEngine, agentRegistry } = await import('../src/core/agent');
+  const defaultMain = agentRegistry.register({
+    name: 'Hermes Main',
+    role: 'general',
+    description: 'Designated default host-driven agent.',
+    capabilities: ['general'],
+    instructions: 'Follow the mission to completion using tools and verification.',
+    modelPolicy: { modelId: fakeModel.id },
+    // Phase 16 Move 4 (D4): the ToolPolicy shapes the mission surface — deny
+    // one tool the mission never uses; the mission-critical tools stay.
+    permissions: { deniedTools: ['web_search'] },
+    taskScope: 'mission',
+    metadata: { default: true }
+  });
+  assert.strictEqual(agentEngine.resolveDefaultAgent()!.id, defaultMain.id, 'designated default resolves');
 
   // Canonical Task (Phase 3): task/tool lifecycle events must be observable
   // through hookManager via the task-hooks bridge (auto-installed on import).
@@ -173,6 +199,26 @@ async function main() {
     'the passing verification shell command is recorded as completed'
   );
   assert.ok(mission.progress === 100, 'completed task has 100% progress');
+  // Phase 16 Move 3b: the mission resolved the designated default AgentProfile
+  // through the same contract as AgentEngine children — the mission Task is
+  // assigned to it, its instructions render in the system prompt, and its
+  // modelPolicy pin is honored (still the fake model, so selection is
+  // unchanged).
+  assert.strictEqual(mission.assignedAgent, defaultMain.id, 'mission task assigned to the designated default agent');
+  assert.ok(
+    systemPrompts.some((sp) => sp.includes('Follow the mission to completion using tools and verification.')),
+    'default agent instructions render in the mission system prompt'
+  );
+  // Phase 16 Move 4 (D4): the denied tool left the advertised mission surface
+  // while the tools the mission actually used stayed.
+  assert.ok(
+    advertisedTools.length > 0 && advertisedTools.every((list) => !list.some((t) => t.name === 'web_search')),
+    'denied tool absent from the advertised mission surface (ToolPolicy)'
+  );
+  assert.ok(
+    advertisedTools.some((list) => list.some((t) => t.name === 'apply_patch') && list.some((t) => t.name === 'shell')),
+    'mission-critical tools remain advertised'
+  );
   // Move 2 (one execution authority): the recovery the mission performed ran
   // through TaskEngine.diagnose, so the canonical Task carries the recovery
   // evidence — a verification record for the goal-matched test run and a

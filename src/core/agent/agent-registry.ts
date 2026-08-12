@@ -17,7 +17,21 @@ import {
   normalizeCapabilities,
   capabilityHintsFromText
 } from './agent-capabilities';
-import type { Agent, AgentInput, AgentRole, AgentSourceKind } from './agent-types';
+import type {
+  Agent,
+  AgentContextSource,
+  AgentInput,
+  AgentRole,
+  AgentSourceKind
+} from './agent-types';
+
+/** Phase 16 Move 2 — policy defaults so every wrapped/registered agent carries a complete contract. */
+// task + instructions + history = the child mission's structural context today
+// (identity, goal, conversation); memory/attempts/repo are policy-gated on top.
+const DEFAULT_CONTEXT_POLICY = { sources: ['task', 'instructions', 'history'] as AgentContextSource[] };
+const DEFAULT_MEMORY_POLICY = { injectLimit: 0 };
+const DEFAULT_EXECUTION_LIMITS = {};
+const DEFAULT_HANDOFF_POLICY = { allowDelegation: true, maxDepth: 3 };
 
 /** Map a store kind to its namespace prefix in canonical ids. */
 const KIND_PREFIX: Record<AgentSourceKind, string> = {
@@ -75,6 +89,10 @@ export function fromCustomAgent(agent: CustomAgentConfig): Agent {
     taskScope: 'any',
     status: agent.enabled ? 'AVAILABLE' : 'RELEASED',
     persona: agent.persona,
+    contextPolicy: { ...DEFAULT_CONTEXT_POLICY },
+    memoryPolicy: { ...DEFAULT_MEMORY_POLICY },
+    executionLimits: { ...DEFAULT_EXECUTION_LIMITS },
+    handoffPolicy: { ...DEFAULT_HANDOFF_POLICY },
     profileId: agent.profileId,
     metadata: {
       displayName: agent.displayName,
@@ -123,6 +141,10 @@ export function fromProfile(profile: AgentProfile): Agent {
     persona: profile.description
       ? `# Agent Profile: ${profile.name}\n${profile.description}`
       : undefined,
+    contextPolicy: { ...DEFAULT_CONTEXT_POLICY },
+    memoryPolicy: { ...DEFAULT_MEMORY_POLICY },
+    executionLimits: { ...DEFAULT_EXECUTION_LIMITS },
+    handoffPolicy: { ...DEFAULT_HANDOFF_POLICY },
     metadata: {
       performance: profile.performance,
       learnedPreferences: prefs
@@ -155,6 +177,10 @@ export function fromSwarmAgent(agent: SwarmAgent): Agent {
     taskScope: 'any',
     status: agent.status === 'completed' ? 'COMPLETED' : agent.status === 'working' ? 'WORKING' : agent.status === 'error' ? 'RELEASED' : 'AVAILABLE',
     persona: `# Swarm Agent: ${agent.name}\nRole: ${agent.role}\nSpecialization: ${agent.specialization}`,
+    contextPolicy: { ...DEFAULT_CONTEXT_POLICY },
+    memoryPolicy: { ...DEFAULT_MEMORY_POLICY },
+    executionLimits: { ...DEFAULT_EXECUTION_LIMITS },
+    handoffPolicy: { ...DEFAULT_HANDOFF_POLICY },
     profileId: agent.profileId,
     metadata: {
       specialization: agent.specialization,
@@ -190,6 +216,10 @@ export function fromA2ACard(card: A2AAgentCard): Agent {
     memoryScope: 'none',
     taskScope: 'delegation',
     status: 'AVAILABLE',
+    contextPolicy: { ...DEFAULT_CONTEXT_POLICY },
+    memoryPolicy: { ...DEFAULT_MEMORY_POLICY },
+    executionLimits: { ...DEFAULT_EXECUTION_LIMITS },
+    handoffPolicy: { allowDelegation: false, maxDepth: 1 },
     metadata: { url: card.url, version: card.version },
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -238,6 +268,11 @@ export class AgentRegistry {
       taskScope: input.taskScope || 'any',
       status: 'AVAILABLE',
       persona: input.persona,
+      instructions: input.instructions,
+      contextPolicy: input.contextPolicy || { ...DEFAULT_CONTEXT_POLICY },
+      memoryPolicy: input.memoryPolicy || { ...DEFAULT_MEMORY_POLICY },
+      executionLimits: input.executionLimits || { ...DEFAULT_EXECUTION_LIMITS },
+      handoffPolicy: input.handoffPolicy || { ...DEFAULT_HANDOFF_POLICY },
       profileId: input.profileId,
       metadata: input.metadata || {},
       createdAt: new Date().toISOString(),

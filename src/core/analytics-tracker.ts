@@ -8,7 +8,9 @@ import path from 'path';
 
 export interface AnalyticsEvent {
     id: string;
-    type: 'task_complete' | 'task_failed' | 'goal_complete' | 'goal_failed' | 'agent_run' | 'tool_call' | 'message';
+    // Phase 16 Move 6 (AUDIT_7): 'agent_run' removed — it was never emitted or
+    // consumed; agent-run bookkeeping belongs to the canonical Task system.
+    type: 'task_complete' | 'task_failed' | 'goal_complete' | 'goal_failed' | 'tool_call' | 'message';
     timestamp: number;
     sessionId?: string;
     agentId?: string;
@@ -137,16 +139,6 @@ export class AnalyticsTracker {
 
     public recordGoalFailed(sessionId: string, agentName?: string): void {
         this.record({ type: 'goal_failed', sessionId, agentName });
-    }
-
-    public recordAgentRun(agentId: string, agentName: string, success: boolean, durationMs?: number): void {
-        this.record({
-            type: success ? 'task_complete' : 'task_failed',
-            agentId,
-            agentName,
-            durationMs,
-            metadata: { source: 'agent' }
-        });
     }
 
     public recordToolCall(sessionId: string, toolName: string): void {

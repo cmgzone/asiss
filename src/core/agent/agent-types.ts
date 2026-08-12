@@ -84,6 +84,87 @@ export type AgentTaskScope =
   | 'scheduled'
   | 'subtask';
 
+// ----------------------------------------------------------------------------
+// Phase 16 Move 2 — the extended Agent contract (docs/hermes/AUDIT_7.md §4).
+//
+// The contract separates three concepts that must never collapse into one
+// record:
+//
+//   Task          = WHAT work needs to happen          (TaskEngine owns it)
+//   AgentProfile  = HOW this kind of agent behaves     (Agent + policies)
+//   AgentRun      = THIS execution of that agent       (the canonical Task +
+//                                                       assignedAgent + the
+//                                                       registry status projection)
+//
+// Move 2 deliberately keeps **Task-as-run**: no distinct AgentRun record, so
+// Audit 5's removed run bookkeeping cannot re-materialize. Each policy below
+// is declared on the contract now; the wiring that consumes it lands in
+// Moves 3-5 (context builder, model/tool/memory policies, handoffs).
+// ----------------------------------------------------------------------------
+
+/** Context sources an agent may pull into its mission context. */
+export type AgentContextSource =
+  | 'task'          // goal / expected output / review criteria
+  | 'instructions'  // the agent's own instructions (below)
+  | 'repo'          // repository/workspace warmth context
+  | 'memory'        // Phase 14 unified-memory retrieval
+  | 'history'       // session / prior-turn history
+  | 'attempts';     // previous attempt outcomes
+
+/** Which context sources feed this agent's missions, and the assembly budget. */
+export interface AgentContextPolicy {
+  /** Enabled sources, in assembly order. Default: ['task', 'instructions']. */
+  sources?: AgentContextSource[];
+  /** Cap on assembled context characters (overrides executionLimits when set). */
+  maxContextChars?: number;
+}
+
+/**
+ * Unified-memory retrieval + injection policy (Phase 14 layer). Children get
+ * NO memory injection today (Audit 7 finding D5); Move 4 wires the catalog
+ * retrieval through this policy.
+ */
+export interface AgentMemoryPolicy {
+  /** Records injected into the mission context (0 = none; default 0 for children). */
+  injectLimit?: number;
+  /** Minimum retrieval score for injected records. */
+  minScore?: number;
+  /** Minimum importance for injected records. */
+  minImportance?: number;
+  /** Restrict to these memory types (lesson | episode | ...). */
+  types?: string[];
+  /** Restrict to these sources (conversation | learning | task). */
+  sources?: string[];
+}
+
+/**
+ * Hard execution budgets — complements permissions.maxToolCalls, which stays
+ * the tool-call budget. Feed AgentEngine.executeTask defaults in Move 2 so
+ * the policy is not dead contract.
+ */
+export interface AgentExecutionLimits {
+  /** Max model turns for a mission assigned to this agent (default 6). */
+  maxTurns?: number;
+  /** Max attempts (retries + 1) for delegated work (default 1 retry → 2 attempts). */
+  maxAttempts?: number;
+  /** Approx max output tokens per mission. */
+  maxOutputTokens?: number;
+  /** Wall-clock mission timeout in ms. */
+  timeoutMs?: number;
+  /** Max prompt/context characters the agent may receive (default 24_000). */
+  maxContextChars?: number;
+}
+
+/** Handoff/delegation rules — declared here, enforced in Phase 16 Move 5. */
+export interface AgentHandoffPolicy {
+  /** May this agent delegate to other agents? (default true). */
+  allowDelegation?: boolean;
+  /** Roles this agent may hand off to (empty = any role). */
+  allowedRoles?: AgentRole[];
+  /** Max handoff-chain depth originating here (default 3). */
+  maxDepth?: number;
+}
+
 export interface Agent {
   /** Canonical id — namespace-prefixed (`custom:…`, `profile:…`, `swarm:…`) to avoid cross-store collisions. */
   id: string;
@@ -105,6 +186,20 @@ export interface Agent {
   status: AgentStatus;
   /** Optional system-prompt/persona override. */
   persona?: string;
+  /**
+   * Explicit operating instructions (Phase 16 Move 2) — concise, imperative
+   * rules rendered into the system prompt AFTER persona, so they win any
+   * conflict. Distinct from persona (identity/tone) and from learned skills.
+   */
+  instructions?: string;
+  /** Which context sources feed this agent's missions + assembly budget. */
+  contextPolicy: AgentContextPolicy;
+  /** Unified-memory retrieval + injection policy. */
+  memoryPolicy: AgentMemoryPolicy;
+  /** Hard execution budgets (turns/attempts/tokens/time/context). */
+  executionLimits: AgentExecutionLimits;
+  /** Delegation/handoff rules (enforced in Move 5). */
+  handoffPolicy: AgentHandoffPolicy;
   /** Stable store reference (profile/other managers use id-or-name). */
   profileId?: string;
   metadata: Record<string, unknown>;
@@ -127,6 +222,11 @@ export interface AgentInput {
   memoryScope?: AgentMemoryScope;
   taskScope?: AgentTaskScope;
   persona?: string;
+  instructions?: string;
+  contextPolicy?: AgentContextPolicy;
+  memoryPolicy?: AgentMemoryPolicy;
+  executionLimits?: AgentExecutionLimits;
+  handoffPolicy?: AgentHandoffPolicy;
   profileId?: string;
   metadata?: Record<string, unknown>;
 }

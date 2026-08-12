@@ -28,7 +28,7 @@ import { AgentsMdSkill } from '../skills/agents-md';
 import { thinkingManager } from '../core/thinking';
 import { scratchpad } from '../core/scratchpad';
 import { agentSwarm } from '../core/agent-swarm';
-import { agentEngine, agentRegistry, delegationTasksForSession, renderDelegationReports, type SelectResult, type TaskProfile } from '../core/agent';
+import { agentEngine, agentRegistry, delegationTasksForSession, renderDelegationReports, type Agent, type AgentMemoryPolicy, type SelectResult, type TaskProfile } from '../core/agent';
 import { TaskMemorySkill } from '../skills/task-memory';
 import { backgroundWorker, type BackgroundGoal } from '../core/background-worker';
 import { dndManager } from '../core/dnd';
@@ -221,7 +221,12 @@ export class AgentRunner {
       getDefaultModel: () => this.getModel(),
       listMcpTools: () => this.mcpManager.listTools(),
       toolEngine: this.toolEngine,
-      taskEngine
+      taskEngine,
+      // Phase 16 Move 4 (D5): child missions retrieve unified memory through
+      // the consolidation layer (dedupe/merge + lifecycle applied, archived/
+      // expired excluded) per the child agent's memoryPolicy. AgentEngine
+      // never sees how memory is stored.
+      retrieveMemory: (query, opts) => this.memoryConsolidation.retrieve(query, opts)
     });
 
     // Phase 14 Move 2: episodic capture subscribes to terminal TaskEvents and
@@ -372,14 +377,17 @@ export class AgentRunner {
 
     // Wire up agent swarm executor
     agentSwarm.setExecutor(async (agentId: string, prompt: string) => {
+      // Phase 16 Move 3 (AUDIT_7 D1): NO fallback execution path for swarm
+      // work. If delegate_agent is unavailable, fail the swarm task loudly
+      // instead of running an untracked model.generate (no Task, no
+      // ToolEngine, no events, no evidence). The swarm store's runAgent
+      // catch marks the task failed with this message, keeping
+      // swarm_data.json authoritative for swarm statuses.
       const delegate = SkillRegistry.get('delegate_agent');
       if (!delegate) {
-        const agent = agentSwarm.getAgent(agentId);
-        const profile = agent?.profileId ? agentProfileManager.get(agent.profileId) : undefined;
-        const modelId = agent?.modelId || profile?.modelId;
-        const model = this.getModelById(modelId);
-        const response = await model.generate(prompt, this.baseSystemPrompt, []);
-        return response.content || '';
+        const error = `[AgentRunner] delegate_agent skill is unavailable — cannot run swarm agent ${agentId} outside the canonical Task lifecycle.`;
+        console.error(error);
+        throw new Error(error);
       }
 
       const result = await delegate.execute({
@@ -1112,7 +1120,7 @@ export class AgentRunner {
     return `${y}-${m}-${day}`;
   }
 
-  private buildWorkspacePrompt(channel: string, sessionId?: string, query = '') {
+  private buildWorkspacePrompt(channel: string, sessionId?: string, query = '', memoryPolicy?: AgentMemoryPolicy) {
     const root = process.cwd();
     const agents = this.readTextFileIfExists(path.join(root, 'AGENTS.md')).trim();
     const user = this.readTextFileIfExists(path.join(root, 'USER.md')).trim();
@@ -1190,7 +1198,7 @@ export class AgentRunner {
     // proven rules) read through the consolidation layer (deduped, merged,
     // archived/expired excluded). The per-store ad-hoc blocks above stay until
     // each is proven covered — see docs/hermes/MEMORY_AUDIT.md Move 2.
-    const unifiedMemory = this.buildUnifiedMemoryContext(sessionId);
+    const unifiedMemory = this.buildUnifiedMemoryContext(sessionId, memoryPolicy);
     if (unifiedMemory) {
       result += `\n${unifiedMemory}\n`;
     }
@@ -1207,10 +1215,15 @@ export class AgentRunner {
    * expired excluded). Budgeted to the smallest useful context; advisory —
    * never throws into the prompt.
    */
-  private buildUnifiedMemoryContext(sessionId?: string): string {
+  private buildUnifiedMemoryContext(sessionId?: string, policy?: AgentMemoryPolicy): string {
     try {
       const records = this.memoryConsolidation.consolidate(sessionId)
-        .filter(r => r.lifecycle !== 'archived' && r.lifecycle !== 'expired');
+        .filter(r => r.lifecycle !== 'archived' && r.lifecycle !== 'expired')
+        // Phase 16 Move 4: the designated default agent's memoryPolicy filters
+        // the mission's unified-memory section (types / sources / minImportance).
+        .filter(r => !policy?.types?.length || policy.types.includes(r.type as any))
+        .filter(r => !policy?.sources?.length || policy.sources.includes(r.source as any))
+        .filter(r => (policy?.minImportance ?? 0) <= r.importance);
       const working = records.filter(r => r.type === 'working').slice(0, 1);
       const episodes = records.filter(r => r.type === 'episodic').slice(0, 3);
       const rules = records.filter(r => r.type === 'procedural').slice(0, 3);
@@ -1914,15 +1927,21 @@ export class AgentRunner {
     workspacePath?: string;
     config: any;
     background: boolean;
+    /** Phase 16 Move 3b — the designated default AgentProfile, when resolved. */
+    defaultAgent?: Agent;
   }): Promise<string | null> {
     try {
       const agentCfg = input.config?.agent || {};
       const maxTurns = Number.isFinite(Number(agentCfg.maxTurns)) ? Math.max(1, Math.floor(Number(agentCfg.maxTurns))) : undefined;
-      const maxToolCalls = Number.isFinite(Number(agentCfg.maxToolCalls)) ? Math.max(4, Math.floor(Number(agentCfg.maxToolCalls))) : undefined;
+      // Phase 16 Move 4 (D4): the default agent's permission tool-call budget
+      // applies when the host config does not set one explicitly.
+      const configMaxToolCalls = Number.isFinite(Number(agentCfg.maxToolCalls)) ? Math.max(4, Math.floor(Number(agentCfg.maxToolCalls))) : undefined;
+      const maxToolCalls = configMaxToolCalls ?? input.defaultAgent?.permissions?.maxToolCalls;
       const task = await taskEngine.create({
         goal: String(input.content).slice(0, 2_000),
         kind: 'mission',
         priority: input.background ? 'low' : 'normal',
+        assignedAgent: input.defaultAgent?.id,
         sessionId: input.sessionId,
         context: {
           sessionId: input.sessionId,
@@ -2074,6 +2093,12 @@ export class AgentRunner {
 
     // Canonical Task (Phase 2): every mission belongs to a Task. The engine
     // owns the lifecycle + records while AgentRunner keeps executing.
+    // Phase 16 Move 3b: resolve the designated default AgentProfile once per
+    // mission so host-driven missions share the Agent contract surface with
+    // AgentEngine children — assignedAgent on the Task, modelPolicy pin,
+    // persona + instructions in the prompt. No designated default -> the
+    // mission is byte-identical to before (zero behavior change).
+    const defaultAgent = agentEngine.resolveDefaultAgent();
     const missionTaskId = await this.beginMissionTask({
       sessionId,
       channel: msg.channel,
@@ -2081,7 +2106,8 @@ export class AgentRunner {
       projectId: typeof msg.metadata?.projectId === 'string' ? msg.metadata.projectId.trim() : undefined,
       workspacePath: this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath),
       config,
-      background: isBackgroundMessage
+      background: isBackgroundMessage,
+      defaultAgent
     });
     // Phase 12 Move 4c: never fall back to a runner-owned mission loop. If a
     // canonical Task cannot be created, surface the infrastructure failure
@@ -2106,6 +2132,26 @@ export class AgentRunner {
       console.error('[AgentRunner] Failed to list MCP tools:', e);
     }
     const allTools = this.buildAdvertisedTools(sessionId, mcpTools, config);
+
+    // Phase 16 Move 4 (D4): the designated default agent's ToolPolicy shapes
+    // the mission's advertised tool surface — deniedTools are always removed;
+    // an explicit allowedTools list (or the agent's declared tools) intersects
+    // the surface. No declared restriction -> surface unchanged (default), so
+    // production behavior is untouched without a designated default.
+    let missionToolSurface = allTools;
+    if (defaultAgent) {
+      const perms = defaultAgent.permissions || {};
+      const deniedTools = new Set((perms.deniedTools || []).map((t: string) => t.toLowerCase()));
+      const allowedTools = new Set((perms.allowedTools || []).map((t: string) => t.toLowerCase()));
+      const advertisedTools = new Set((defaultAgent.tools || []).map((t: string) => t.toLowerCase()));
+      const restrictSurface = allowedTools.size > 0 || advertisedTools.size > 0;
+      missionToolSurface = allTools.filter((tool: any) => {
+        const name = String(tool?.name || '').toLowerCase();
+        if (deniedTools.has(name)) return false;
+        if (!restrictSurface) return true;
+        return allowedTools.size > 0 ? allowedTools.has(name) : advertisedTools.has(name);
+      });
+    }
 
     // Check for legacy skill triggers
     let context = "";
@@ -2245,8 +2291,19 @@ export class AgentRunner {
 
         // Dynamic Identity Injection
         const agentName = config.name || "Gitu";
-        const baseSystemPrompt = this.baseSystemPrompt.replace("{{AGENT_NAME}}", agentName);
-        const workspacePrompt = this.buildWorkspacePrompt(msg.channel, sessionId, msg.content);
+        let baseSystemPrompt = this.baseSystemPrompt.replace("{{AGENT_NAME}}", agentName);
+        // Phase 16 Move 3b: a designated default AgentProfile renders its
+        // persona + instructions into the mission system prompt — the same
+        // contract AgentEngine children use (persona first, instructions
+        // last so they win conflicts). Inert without a designated default.
+        if (defaultAgent) {
+          const agentBlock = [
+            defaultAgent.persona || `You are ${defaultAgent.name}, a ${defaultAgent.role}.`,
+            ...(defaultAgent.instructions ? [defaultAgent.instructions] : [])
+          ].filter(Boolean).join('\n\n');
+          if (agentBlock) baseSystemPrompt = `${baseSystemPrompt}\n\n${agentBlock}`;
+        }
+        const workspacePrompt = this.buildWorkspacePrompt(msg.channel, sessionId, msg.content, defaultAgent?.memoryPolicy);
         const timePrompt = this.buildTimePrompt();
 
         // User Context Injection
@@ -2376,12 +2433,17 @@ export class AgentRunner {
           : [];
         const modelTools = forceFinalAnswer
           ? []
-          : allTools.filter(tool => !missionDisabledTools.has(String(tool?.name || '')));
+          : missionToolSurface.filter(tool => !missionDisabledTools.has(String(tool?.name || '')));
 
         // Phase 6 ModelEngine: score providers against the canonical Task
         // (capability, observed reliability/tool success, context fit, latency
         // and cost). Explicit ModelRouter rules remain hard user overrides.
+        // Phase 16 Move 3b: the designated default agent's modelPolicy pin is
+        // layered UNDER the router override (router wins; the agent pin is the
+        // width for host-driven missions — complementary, per Audit 7 D3).
         const missionTask = missionTaskId ? taskEngine.get(missionTaskId) : undefined;
+        const routerPin = modelRouter.explicitModelIdFor(msg.content);
+        const agentPin = defaultAgent?.modelPolicy?.modelId;
         const selection = modelRouter.hasProviders()
           ? modelEngine.select({
               goal: msg.content,
@@ -2390,7 +2452,7 @@ export class AgentRunner {
               requiresTools: modelTools.length > 0,
               attachmentCount: attachments.length,
               desiredLevel: modelRouter.desiredLevelFor(msg.content) || undefined
-            }, ModelRegistry.getAll(), { pinnedProviderId: modelRouter.explicitModelIdFor(msg.content) || undefined })
+            }, ModelRegistry.getAll(), { pinnedProviderId: routerPin || agentPin || undefined })
           : null;
         const currentModel = selection ? this.getModelById(selection.provider.id) : this.getModel();
         if (missionTaskId && selection && missionTask?.model !== selection.provider.id) {
