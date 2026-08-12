@@ -270,8 +270,17 @@ export interface TaskMissionIterateContext {
 export interface TaskMissionIteration {
   /** Model text produced this iteration. */
   content: string;
-  /** Tools executed this iteration (recorded on the Task). */
+  /**
+   * Tools executed this iteration. Presence marks the iteration as a tool
+   * batch (not a completion point) AND records the executions on the Task.
+   *
+   * Hosts that already recorded their executions (e.g. a tool engine that
+   * wrote ToolExecution records itself) set `usedTools` instead and omit
+   * `tools` so the recorded executions are not re-recorded.
+   */
   tools?: TaskTurnToolExecution[];
+  /** True when this iteration ran tool work that the host already recorded. */
+  usedTools?: boolean;
   /** Model used this iteration (recorded via assignModel when different). */
   model?: string;
   /** 0-100 progress estimate after this iteration. */
@@ -680,7 +689,8 @@ export class TaskEngine {
         verificationPending: this.verificationPending(taskId)
       };
       const iteration = await options.iterate(ctx);
-      const usedTools = Array.isArray(iteration.tools) && iteration.tools.length > 0;
+      const usedTools = iteration.usedTools === true
+        || (Array.isArray(iteration.tools) && iteration.tools.length > 0);
       const evidence: TaskCompletionEvidence = {
         toolRequired: iteration.toolRequired ?? true,
         totalToolCalls: snapshot.toolExecutions.length,
@@ -706,7 +716,8 @@ export class TaskEngine {
         turn,
         verdict,
         evidence,
-        tools: iteration.tools,
+        // Only re-record when the host handed over executions to be recorded.
+        tools: iteration.usedTools === true ? undefined : iteration.tools,
         model: iteration.model,
         ...(typeof iteration.progress === 'number' ? { progress: iteration.progress } : {})
       }, options);

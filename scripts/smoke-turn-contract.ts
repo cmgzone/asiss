@@ -405,6 +405,24 @@ async function main() {
     assert.strictEqual(limResult.stoppedByStepLimit, true, 'stoppedByStepLimit surfaced');
     assert.strictEqual(limResult.task.status, 'FAILED', 'terminal state owned by the engine');
 
+    // host-recorded tool work (usedTools): the driver must NOT re-record the
+    // executions the host already wrote via its own tool engine.
+    const engine3 = setup().engine;
+    const selfRecorded = await mission(engine3, 'record my own tools');
+    const ownedExec = await engine3.recordToolExecution(selfRecorded.id, { name: 'apply_patch', status: 'COMPLETED', output: 'ok' });
+    await engine3.recordToolKind(selfRecorded.id, ownedExec.id, 'mutation');
+    const ownedResult = await engine3.runMission(selfRecorded.id, {
+      iterate: async ({ turn }) => {
+        if (turn === 1) return { content: 'patching', usedTools: true };
+        return { content: 'done and verified for real' };
+      },
+      completionVerdict: async ({ evidence }) => ({ type: 'complete', summary: evidence.finalDraft }),
+      budget: { maxTurns: 3 }
+    });
+    assert.strictEqual(ownedResult.action, 'complete', 'usedTools mission completed');
+    assert.strictEqual(ownedResult.task.toolExecutions.length, 1, 'host-recorded execution NOT duplicated');
+    assert.strictEqual(engine3.verificationPending(selfRecorded.id), true, 'mutation kind preserved without re-record (unverified)');
+
     console.log('15. runMission drives the loop                     ok');
   }
 

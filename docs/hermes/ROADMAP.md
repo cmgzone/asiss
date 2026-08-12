@@ -388,7 +388,16 @@ batch then a final answer to COMPLETED, and step-limit answers blocked) plus
 `smoke:runtime` (6-turn e2e) and `smoke:baseline` still green. AgentRunner still
 owns the loop body in production; Move 4b migrates it onto the driver.
 
-**Phase 12, Move 4b (planned) — migrate AgentRunner's loop body.** Replace the
+**Phase 12, Move 4b — host-recorded tool handoff (done).** `runMission` accepts
+`TaskMissionIteration.usedTools` so a host that already recorded its tool
+executions (AgentRunner's tool engine writes ToolExecution records directly)
+can mark an iteration as a tool batch without the driver re-recording `tools` —
+removing the double-record hazard in the migration path. Verified by the
+runMission smoke (host-recorded execution is not duplicated; the mutation kind
+survives for verification-pending). `smoke:runtime` (6-turn e2e),
+`smoke:turn-contract` (15), and `smoke:baseline` all green.
+
+**Phase 12, Move 4c (planned) — migrate AgentRunner's loop body.** Replace the
 mission loop's model+tool batch body with the `runMission` iterate hook so
-AgentRunner stops owning the loop, keeping the 6-turn e2e green. Then Move 4c
+AgentRunner stops owning the loop, keeping the 6-turn e2e green. Then Move 4d
 removes the runner's now-redundant loop scaffolding.
