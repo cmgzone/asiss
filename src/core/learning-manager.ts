@@ -136,6 +136,12 @@ interface ReviewTask {
   userText: string;
   assistantText: string;
   createdAt: number;
+  /** Move 5: when set, this review came from a terminal canonical Task
+   *  outcome (TaskLessonBridge) rather than an interactive exchange. */
+  origin?: 'task';
+  taskId?: string;
+  taskKind?: string;
+  taskStatus?: string;
 }
 
 interface AutoTopic {
@@ -202,6 +208,13 @@ export class LearningManager {
     this.lastActivityAt.set(sessionId, Date.now());
   }
 
+  /** Debug-level log for the learning pipeline — opt-in via GITU_DEBUG_LEARNING=1. */
+  private debug(message: string): void {
+    if (process.env.GITU_DEBUG_LEARNING === '1') {
+      console.log(`[LearningManager][debug] ${message}`);
+    }
+  }
+
   recordInteraction(sessionId: string, userText: string, assistantText: string) {
     this.refreshConfig();
     if (!this.config.enabled) return;
@@ -210,10 +223,22 @@ export class LearningManager {
     const safeUser = this.redactSecrets(userText || '');
     const safeAssistant = this.redactSecrets(assistantText || '');
     if (!safeUser.trim() || !safeAssistant.trim()) return;
-    const meaningfulTask = safeUser.trim().length >= 20
-      && safeAssistant.trim().length >= 80
-      && /\b(fix|create|build|implement|debug|research|analy[sz]e|review|refactor|test|deploy|configure|automate|integrate|design|write|update|add|remove|enable|disable|migrate|optimi[sz]e)\b/i.test(safeUser);
-    if (!meaningfulTask) return;
+    const userLen = safeUser.trim().length;
+    const assistantLen = safeAssistant.trim().length;
+    const hasVerb = /\b(fix|create|build|implement|debug|research|analy[sz]e|review|refactor|test|deploy|configure|automate|integrate|design|write|update|add|remove|enable|disable|migrate|optimi[sz]e)\b/i.test(safeUser);
+    const meaningfulTask = userLen >= 20 && assistantLen >= 80 && hasVerb;
+    if (!meaningfulTask) {
+      // Make the gate observable: a skip logs the exact reason at debug level
+      // (GITU_DEBUG_LEARNING=1) instead of failing silently — the
+      // smoke:learning regression was exactly this class (a tightened gate
+      // with a stale fixture silently starved the pipeline).
+      const reasons: string[] = [];
+      if (userLen < 20) reasons.push(`user text ${userLen} chars < 20`);
+      if (assistantLen < 80) reasons.push(`assistant text ${assistantLen} chars < 80`);
+      if (!hasVerb) reasons.push('user text lacks an action verb');
+      this.debug(`skipped self-review: not a meaningful task (${reasons.join('; ')})`);
+      return;
+    }
 
     if (this.config.selfReview.enabled) {
       this.pendingReviews.push({
@@ -227,6 +252,42 @@ export class LearningManager {
       }
       this.savePendingReviews();
     }
+  }
+
+  /**
+   * Phase 14 Move 5: queue a self-review for a terminal canonical Task
+   * outcome, so engine-driven work (delegation/swarm/background/scheduled/
+   * mission) feeds the same approval pipeline as interactive lessons. The
+   * extracted lesson then flows through the existing queue -> approval ->
+   * applied path and lands as a retrievable unified-memory record. Respects
+   * the same selfReview config gate as recordInteraction; returns whether
+   * the review was queued.
+   */
+  queueTaskReview(task: {
+    taskId: string;
+    sessionId?: string;
+    kind?: string;
+    status?: string;
+    goal: string;
+    summary: string;
+  }): boolean {
+    this.refreshConfig();
+    if (!this.config.enabled || !this.config.selfReview.enabled) return false;
+    this.pendingReviews.push({
+      sessionId: task.sessionId || 'default',
+      userText: task.goal,
+      assistantText: task.summary,
+      createdAt: Date.now(),
+      origin: 'task',
+      taskId: task.taskId,
+      taskKind: task.kind,
+      taskStatus: task.status
+    });
+    if (this.pendingReviews.length > 20) {
+      this.pendingReviews = this.pendingReviews.slice(-20);
+    }
+    this.savePendingReviews();
+    return true;
   }
 
   async tick() {
@@ -875,16 +936,23 @@ export class LearningManager {
         'Return JSON only.'
       ].join(' ');
 
+      // Move 5: task-outcome reviews prompt over the canonical Task instead
+      // of an interactive user/assistant exchange.
+      const isTaskReview = task.origin === 'task';
+      const contextBlock = isTaskReview
+        ? `Task goal: ${task.userText}\nTask status: ${task.taskStatus || '?'}\n\nOutcome:\n${task.assistantText}`
+        : `User: ${task.userText}\n\nAssistant: ${task.assistantText}`;
+
       const prompt = [
-        'Review the assistant response and extract improvements.',
+        isTaskReview
+          ? 'Review this completed task outcome and extract improvements.'
+          : 'Review the assistant response and extract improvements.',
         `Learning mode: ${profile.mode}.`,
         `Return at most ${profile.reviewMaxImprovements} improvements.`,
         'Return JSON: {"issueSummary":"","improvements":["..."],"lesson":""}',
         'If nothing to improve, return {"issueSummary":"none","improvements":[],"lesson":""}.',
         '',
-        `User: ${task.userText}`,
-        '',
-        `Assistant: ${task.assistantText}`
+        contextBlock
       ].join('\n');
 
       const model = this.getModel();
@@ -914,7 +982,9 @@ export class LearningManager {
         id: uuidv4(),
         type: 'self_review',
         sessionId: task.sessionId,
-        title: 'Self-review feedback',
+        title: isTaskReview
+          ? `Task self-review: ${task.taskKind || 'task'} ${task.taskStatus || ''}`.trim()
+          : 'Self-review feedback',
         summary,
         improvements: improvementsText,
         createdAt: Date.now()

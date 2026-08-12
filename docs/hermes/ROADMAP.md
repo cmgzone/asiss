@@ -26,15 +26,15 @@
 | 9 | Warm index + telemetry | On-demand/event-driven index freshness, warmth audit events | [x] |
 | 10 | Goal-aware retries | Failures suggest goal-matched files instead of retrying blind | [x] |
 | 11 | Verify-then-retry | Goal-matched tests run before the retry; evidence fed back | [x] |
-| 12 | Execution authority | Mission loop adopts taskEngine.run() (see docs/hermes/AUDIT_2.md) | [ ] |
-| 13 | Unified memory | Episodic/Semantic/Procedural/Project/Working memory | [ ] |
-| 14 | LearningEngine | Observation -> evaluation -> validation -> promotion | [ ] |
-| 15 | Background worker migration | Background goals/projects become Tasks | [ ] |
-| 16 | AgentEngine | Unified Agent abstraction (Architect/Researcher/Coder/...) | [ ] |
-| 17 | Self-repair loop | UNDERSTAND -> ... -> LEARN autonomous coding loop | [ ] |
-| 18 | TelemetryEngine | Why-is-Hermes-slow observability | [ ] |
-| 19 | Automated evals | `evals/` suite + regression gates | [ ] |
-| 20 | Advanced autonomy | Persistent projects, learned routing, A2A federation | [ ] |
+| 12 | Execution authority | Mission loop adopts taskEngine.run() (see docs/hermes/AUDIT_2.md) | [x] |
+| 13 | Canonical scheduler -> Tasks | Delegation/swarm/background/scheduled all execute as canonical Tasks (Phase 13, done) | [x] |
+| 14 | Unified memory | Model + catalog, episodic capture, consolidation/lifecycle, MemorySkill retrieve, learning loop — restart-recall proven (docs/hermes/MEMORY_AUDIT.md) | [x] |
+| 15 | All autonomous work -> Tasks | Heartbeats, recurring work, autonomous goals, retry/resume on the canonical Task lifecycle | [ ] |
+| 16 | Unified AgentEngine | One engine; agents are configurations (profiles, roles, model/tool/memory policies, handoffs) | [ ] |
+| 17 | Self-repair coding loop | code -> test -> diagnose -> repair -> verify with failure memory | [ ] |
+| 18 | Repository intelligence | Index/symbol/dependency graphs, change-impact analysis, minimal context | [ ] |
+| 19 | Verification & quality gates | Deterministic gates: lint/typecheck/tests/build/security/diff + acceptance criteria + evidence | [ ] |
+| 20 | Autonomous operating system | Integration: Goal -> Plan -> Task -> Agent -> Execute -> Verify -> Repair -> Complete -> Learn | [ ] |
 
 ## Current milestone
 
@@ -605,8 +605,132 @@ smoke:delegation (report taskId === canonical child id, reviewPrompt from the
 child Task, toolCalls from toolExecutions, no agent_runs.json written), and
 the full battery (agent-engine, agent-execution, agent-task-profile,
 scheduler, runtime, baseline, terminal-paths) unchanged. No reference to
-`agentRunManager` / `agent-run-manager` remains in src/ or scripts/. With the
-shim gone, every work origin executes as a canonical Task and there is no
+`agentRunManager` / `agent-run-manager` remains in src/ or scripts/. Withthe shim gone, every work origin executes as a canonical Task and there is no
 legacy execution bookkeeping surrounding it — one execution authority, one
 report shape.
+
+---
+
+**Phase 14 — Unified Memory (in progress, docs/hermes/MEMORY_AUDIT.md).**
+
+> One coherent memory subsystem. The rule from Phases 12–13 applies: **no
+> second memory authority.** Existing stores (MemoryManager conversation,
+> LearningManager procedural rules, TaskEngine task records) stay
+> authoritative; the unified layer projects a canonical `MemoryRecord` shape
+> and one retrieval interface with scoring.
+
+**Phase 14, Move 1 — MemoryRecord model + unified retrieval catalog (done).**
+`src/core/memory-unified/` lands the canonical Phase 14.1 field set
+(`memory-record.ts`: id `<source>:<nativeId>`, type working/episodic/semantic/
+procedural/project/task, source, scope, importance 0-5, confidence 0..1,
+lifecycle, createdAt/updatedAt, accessCount/lastAccessedAt, relations,
+metadata) and `UnifiedMemoryCatalog` (`memory-catalog.ts`): register
+providers, `records()` projection, `retrieve()` with weighted scoring
+(relevance via token overlap or the source store's semanticScore, recency
+exponential decay with a half-life, importance, confidence, access —
+`wR .5 wA .2 wI .15 wC .1 wU .05`, overridable), budget-limited (default 5 =
+"smallest useful context"), deduped by canonical id, each hit carrying a
+`scoreBreakdown`. Wrap-first adapters read through MemoryManager (episodic),
+LearningManager applied actions (procedural, confidence carried), and
+TaskEngine/TaskMemory (working current task + episodic terminal outcomes).
+MemoryManager now surfaces `id`/`session_id` on get/search rows so
+cross-session results keep a stable identity (the catalog dedupes on it). The
+catalog persists nothing — access stats are in-memory; durability lands with
+Move 3. Verified by `npm run smoke:memory-unified` (model shape, coverage
+across all three stores, ranking: the proven rule outranks the raw message,
+budget cap, dedupe, access tracking) + `tsc --noEmit`; prior smokes unchanged
+(baseline/runtime/agent-execution/delegation/scheduler green; the pre-existing
+`smoke:learning` failure is unrelated to this move — it fails identically at
+HEAD without these changes).
+
+**Phase 14, Move 2 — episodic capture + one context section (done).**
+`EpisodicCapture` subscribes to the TaskEventBus terminal events
+(TaskCompleted / TaskFailed / TaskCancelled) and projects each terminal task's
+outcome into a bounded (50) in-memory episode feed, deduped by task id;
+failures rank importance 4 (the most valuable experience), and the summary
+falls back to the recorded failure when the task has no outcome.result. The
+feed is seeded from the durable TaskEngine on construction, so a restarted
+process recalls recent episodes without the old process alive. The runner now
+builds the catalog over conversation + learning + task (+ capture) and renders
+one budgeted `Memory context (unified)` section in the mission prompt (working
+task, recent episodes, proven rules — 1/3/3, advisory-only). Verified by
+`smoke:memory-unified` (capture for completed + failed tasks, restart-safe
+seeding, catalog exposure; smoke now isolates its Task store via
+`GITU_DATA_ROOT` instead of writing into the real shared store) +
+`smoke:runtime` (mission prompt with the new section) and the full regression
+battery. The pre-existing per-store context blocks stay until each is proven
+covered (the review prompt already moved to canonical Tasks in Audit 5).
+
+**Phase 14, Move 3 — consolidation + lifecycle (done).**
+`MemoryConsolidation` (`memory-unified/memory-consolidation.ts`) is the
+consolidation/lifecycle layer over the catalog. It owns ONLY the state no
+source store has — dedupe/merge results, record lifecycle, feedback-driven
+promotion, durable access stats — persisted as a per-record overlay
+(`memory/memory_lifecycle.json` under the data root, atomic tmp+rename);
+content stays in the source stores, so there is still exactly one content
+authority per source and one lifecycle authority here. Dedupe by canonical
+id; near-duplicates (same source+type+normalized content, knowledge sources
+only — conversation is excluded) keep the stronger record and archive the
+weaker with `supersededBy`, the survivor carrying `mergedFrom`; fresh
+low-importance records start `candidate`; `recordAccess` (≥3) or success
+feedback (importance +1, confidence +0.1 — the LearningManager feedback loop
+generalized to records) promotes candidate -> active; stale records expire
+after the TTL (180 days, clock injectable); `retrieve()` excludes
+archived/expired. The runner's mission-prompt memory section now reads
+THROUGH the consolidation layer, so dedupe/merge + lifecycle apply to what
+the model sees. Verified by `smoke:memory-unified` (dedupe-by-id, merge with
+archived superseder, promotion by access and by feedback, TTL expiry,
+overlay persistence across save/load, retrieval excluding archived/expired)
++ `tsc --noEmit` and the full regression battery (runtime/baseline/
+delegation/agent-execution/scheduler green).
+
+**Phase 14, Move 4 — MemorySkill canonical retrieve (done).**
+`MemorySkill` gains the `retrieve` action — one retrieval entry point over
+the unified layer (consolidation when wired, else the catalog) —
+understanding query, sessionId, source, types, limit, minScore,
+minImportance, minConfidence, and taskId filters, and returning unified
+records with a `scoreBreakdown`. The breakdown now surfaces both relevance
+sources (`semantic` embedding similarity when the store computed one, else
+`lexical` token overlap) plus recency/importance/confidence/access, so
+retrieval behavior is inspectable. `search` and `semantic_search` are thin
+delegates over the same path (legacy row shape preserved, `unified: true`
+marker, mode keyword or semantic|lexical with a reason), falling back to the
+legacy MemoryManager paths when no unified layer is wired; `get_recent` stays
+a raw session-history read. The runner passes its catalog + consolidation
+into the skill, and its own prompt-memory section already reads through the
+same canonical layer — one retrieval path everywhere. Verified by
+`smoke:memory-unified` (retrieve with filters + breakdown keys, delegated
+search rows in legacy shape, lexical semantic mode, bare-skill fallback) +
+`tsc --noEmit` and the full regression battery.
+
+**Phase 14, Move 5 — learning loop (done).** `TaskLessonBridge`
+(`memory-unified/lesson-capture.ts`) subscribes to the TaskEventBus terminal
+events and queues a self-review per task outcome via the new
+`LearningManager.queueTaskReview()` — engine-driven work (delegation, swarm,
+background, scheduled, mission) enters the same approval pipeline as
+interactive lessons; `processNextReview` prompts over the canonical Task
+(goal/status/outcome) and the extracted lesson flows queue → approval →
+applied → retrievable unified-memory record (`taskOutcomeSummary` shared
+with the episodic capture so both views read the same evidence). The runner
+wires the bridge next to the episodic capture. **Phase 14 acceptance
+verified end to end:** the smoke completes a task, runs the full loop, then
+simulates a restart with FRESH instances over the same data root (new
+TaskEngine/LearningManager/MemoryManager/catalog/consolidation) and
+retrieves both the terminal episode and the approved lesson — knowledge
+recalled without the old process alive. Verified by `smoke:memory-unified`
+(review queued, lesson extracted, approved + applied, live catalog exposure,
+restart episode/lesson/retrieval) + `tsc --noEmit` and the full regression
+battery.
+
+**Phase 14 moves complete** (model + catalog, episodic capture, consolidation
++ lifecycle, MemorySkill retrieve, learning loop). The memory subsystem now
+has one canonical record shape, one retrieval interface, one consolidation/
+lifecycle layer, and the learning loop — with the restart-recall acceptance
+criterion proven. Remaining 14.x polish (retrieval quality tuning,
+project-scoped memories, deeper consolidation heuristics) is tracked as
+post-Phase-14 improvements; the next phase on the roadmap is **Phase 15 —
+all autonomous work flows through canonical Tasks** (heartbeats, recurring
+work, autonomous goals, retry/resume on the canonical Task lifecycle,
+removing duplicate autonomous-work managers).
+
 

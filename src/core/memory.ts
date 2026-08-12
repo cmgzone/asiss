@@ -203,7 +203,7 @@ export class MemoryManager {
   public get(sessionId: string, limit: number = 50): Memory[] {
     if (this.mode === 'sqlite' && this.db) {
       const rows = this.db.prepare(`
-        SELECT role, content, metadata, timestamp
+        SELECT id, session_id, role, content, metadata, timestamp
         FROM messages
         WHERE session_id = ?
         ORDER BY timestamp ASC
@@ -238,6 +238,11 @@ export class MemoryManager {
       } catch {
         metadata = undefined;
       }
+    }
+    // Surface the owning session on search/get results so consumers can build
+    // stable cross-session ids (the unified memory catalog dedupes on them).
+    if (row.session_id) {
+      metadata = { ...(metadata || {}), sessionId: row.session_id };
     }
     return {
       id: row.id,
@@ -297,7 +302,7 @@ export class MemoryManager {
         // Escape LIKE wildcards so user queries like "100%" or "a_b" are matched literally.
         const escaped = query.replace(/[\\%_]/g, '\\$&');
         const rows = this.db.prepare(`
-              SELECT role, content, metadata, timestamp
+              SELECT id, session_id, role, content, metadata, timestamp
               FROM messages
               WHERE content LIKE ? ESCAPE '\\'
               ORDER BY timestamp DESC
@@ -313,10 +318,12 @@ export class MemoryManager {
     try {
       const needle = query.toLowerCase();
       const matches: Memory[] = [];
-      for (const sessionMessages of Object.values(this.jsonData)) {
+      for (const [sessionKey, sessionMessages] of Object.entries(this.jsonData)) {
         for (const memory of sessionMessages) {
           if (String(memory.content || '').toLowerCase().includes(needle)) {
-            matches.push(memory);
+            // Carry the owning session so cross-session results keep a stable
+            // identity for consumers (unified memory catalog dedupe).
+            matches.push({ ...memory, metadata: { ...(memory.metadata || {}), sessionId: sessionKey } });
           }
         }
       }

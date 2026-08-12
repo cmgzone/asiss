@@ -2,6 +2,10 @@ import { Message, StreamEventPayload } from '../core/types';
 import { ModelAttachment, ModelProvider, ModelRegistry } from '../core/models';
 import { SkillRegistry } from '../core/skills';
 import { Memory, MemoryManager } from '../core/memory';
+import { createUnifiedMemory, type UnifiedMemoryCatalog } from '../core/memory-unified/memory-catalog';
+import { MemoryConsolidation } from '../core/memory-unified/memory-consolidation';
+import { TaskLessonBridge } from '../core/memory-unified/lesson-capture';
+import { EpisodicCapture } from '../core/memory-unified/episodic-capture';
 import { McpManager } from '../core/mcp';
 import { LearningManager } from '../core/learning-manager';
 import { MockProvider } from './mock-provider';
@@ -119,6 +123,12 @@ export class AgentRunner {
   private baseSystemPrompt: string;
   private memory: MemoryManager;
   private learning: LearningManager;
+  // Phase 14 Move 2: one unified memory view (conversation + learning + task)
+  // with event-driven episodic capture; rendered as one context section.
+  private unifiedMemory: UnifiedMemoryCatalog;
+  private memoryConsolidation: MemoryConsolidation;
+  private episodicCapture: EpisodicCapture;
+  private taskLessonBridge: TaskLessonBridge;
   private marketplace: SkillMarketplaceManager;
   private mcpManager: McpManager;
   private scheduler: SchedulerManager;
@@ -212,6 +222,28 @@ export class AgentRunner {
       taskEngine
     });
 
+    // Phase 14 Move 2: episodic capture subscribes to terminal TaskEvents and
+    // the unified catalog projects conversation/learning/task records over the
+    // existing authorities (wrap-first — no second memory store). The context
+    // builder renders it as one budgeted memory section.
+    this.episodicCapture = new EpisodicCapture(taskEngine, { bus: taskEventBus });
+    this.unifiedMemory = createUnifiedMemory({
+      memory: this.memory,
+      learning: this.learning,
+      taskEngine,
+      taskMemory,
+      capture: this.episodicCapture
+    });
+    // Phase 14 Move 3: the consolidation/lifecycle layer over the catalog —
+    // dedupe/merge near-duplicates, candidate->active promotion from access
+    // and success feedback, archive/expiry, durable access stats. The context
+    // builder reads THROUGH it (archived/expired excluded).
+    this.memoryConsolidation = new MemoryConsolidation(this.unifiedMemory);
+    // Phase 14 Move 5: terminal Task outcomes feed the learning pipeline —
+    // each completed/failed canonical task queues a self-review whose lesson
+    // flows through the existing approval queue into retrievable memory.
+    this.taskLessonBridge = new TaskLessonBridge(taskEngine, this.learning, { bus: taskEventBus });
+
     this.scheduler = new SchedulerManager(async (job) => {
       // Step 9.3 — scheduled jobs run as canonical kind-'scheduled' Tasks
       // through AgentEngine.executeTask (AgentEngine owns WHO, TaskEngine owns
@@ -284,7 +316,14 @@ export class AgentRunner {
     SkillRegistry.register(new CustomAgentsSkill());
     SkillRegistry.register(new ModelsSkill());
     SkillRegistry.register(new SerperSkill());
-    SkillRegistry.register(new MemorySkill(this.memory));
+    // Phase 14 Move 4: MemorySkill exposes the canonical unified retrieve
+    // action over the catalog + consolidation; search/semantic_search now
+    // delegate to the same path (legacy MemoryManager fallback when the
+    // unified layer is absent).
+    SkillRegistry.register(new MemorySkill(this.memory, {
+      catalog: this.unifiedMemory,
+      consolidation: this.memoryConsolidation
+    }));
     SkillRegistry.register(new CodeSearchSkill());
     SkillRegistry.register(new SymbolSkill({ contextEngine: this.contextEngine }));
     SkillRegistry.register(new WarmthSkill({ contextEngine: this.contextEngine }));
@@ -1080,8 +1119,47 @@ export class AgentRunner {
       result += `\n${taskSummary}`;
     }
 
+    // Phase 14 Move 2/3: one unified memory section (working + recent episodes +
+    // proven rules) read through the consolidation layer (deduped, merged,
+    // archived/expired excluded). The per-store ad-hoc blocks above stay until
+    // each is proven covered — see docs/hermes/MEMORY_AUDIT.md Move 2.
+    const unifiedMemory = this.buildUnifiedMemoryContext(sessionId);
+    if (unifiedMemory) {
+      result += `\n${unifiedMemory}\n`;
+    }
+
     if (!result.trim()) return '';
     return result;
+  }
+
+  /**
+   * Phase 14 Move 2/3 — the unified memory section for the mission prompt:
+   * working memory (current task), recent episodic outcomes (event-driven
+   * capture), and proven procedural rules (confidence-scored), read through
+   * the consolidation layer (dedupe/merge + lifecycle applied, archived and
+   * expired excluded). Budgeted to the smallest useful context; advisory —
+   * never throws into the prompt.
+   */
+  private buildUnifiedMemoryContext(sessionId?: string): string {
+    try {
+      const records = this.memoryConsolidation.consolidate(sessionId)
+        .filter(r => r.lifecycle !== 'archived' && r.lifecycle !== 'expired');
+      const working = records.filter(r => r.type === 'working').slice(0, 1);
+      const episodes = records.filter(r => r.type === 'episodic').slice(0, 3);
+      const rules = records.filter(r => r.type === 'procedural').slice(0, 3);
+      if (!working.length && !episodes.length && !rules.length) return '';
+      const lines = ['Memory context (unified):'];
+      for (const w of working) lines.push(`- Working: ${this.compactLine(w.content)}`);
+      for (const e of episodes) lines.push(`- Episode: ${this.compactLine(e.content)}`);
+      for (const r of rules) lines.push(`- Rule (${Math.round(r.confidence * 100)}% confidence): ${this.compactLine(r.content)}`);
+      return lines.join('\n');
+    } catch {
+      return '';
+    }
+  }
+
+  private compactLine(text: string): string {
+    return String(text || '').replace(/\s+/g, ' ').trim();
   }
 
   private loadConfig(): any {

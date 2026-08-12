@@ -76,12 +76,34 @@ async function main() {
   };
 
   const manager = new LearningManager(() => fakeModel as any, new MemoryManager(), undefined);
+  // recordInteraction only queues a review for a "meaningful task": user text
+  // >= 20 chars with an action verb AND assistant text >= 80 chars (the gate
+  // was tightened in 6bb7672). The fixture must be a substantive exchange or
+  // the review is never queued.
   manager.recordInteraction(
     'session-learning',
     'Please update the file and make sure it works.',
-    'The file was updated.'
+    'The file was updated. I changed the build configuration, ran the typecheck, and verified the workspace still builds cleanly before reporting completion.'
   );
   assert(fs.existsSync(path.join(tempDir, 'learning', 'pending_reviews.json')), 'review queue is persisted before processing');
+
+  // The gate is observable: a near-miss exchange (the pre-fix fixture) logs
+  // the exact reason at debug level instead of failing silently — a
+  // regression guard so a future gate change cannot starve the pipeline
+  // without any signal.
+  const originalLog = console.log;
+  const captured: string[] = [];
+  console.log = ((...args: unknown[]) => { captured.push(args.map(String).join(' ')); }) as typeof console.log;
+  process.env.GITU_DEBUG_LEARNING = '1';
+  manager.recordInteraction('session-learning', 'Please update the file and make sure it works.', 'The file was updated.');
+  process.env.GITU_DEBUG_LEARNING = '0';
+  console.log = originalLog;
+  assert(captured.some(line =>
+    line.includes('[LearningManager][debug]') &&
+    line.includes('skipped self-review') &&
+    line.includes('assistant text') &&
+    line.includes('< 80')
+  ), 'gate skip logs the exact reason at debug level');
 
   await manager.tick();
   const goals = backgroundWorker.getPendingGoals('session-learning');
