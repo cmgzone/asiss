@@ -219,6 +219,25 @@ export class AgentEngine {
         error: `Agent not found: ${options.agentId}`
       };
     }
+    if (agent.status === 'RELEASED') {
+      return {
+        success: false,
+        attempts: 0,
+        taskIds: [],
+        result: {
+          agentId: agent.id,
+          agentName: agent.name,
+          status: 'failed',
+          summary: `Agent is disabled: ${agent.name}`,
+          findings: [],
+          evidence: [],
+          artifacts: [],
+          recommendations: [],
+          unresolvedQuestions: []
+        },
+        error: `Agent is disabled: ${agent.name}`
+      };
+    }
 
     const maxTurns = Math.min(20, Math.max(1, options.maxTurns || 6));
     const maxAttempts = Math.min(3, Math.max(1, (options.retries ?? 1) + 1));

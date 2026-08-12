@@ -241,7 +241,9 @@ export class AgentRunner {
       getModelById: (id?: string) => this.getModelById(id),
       getDefaultModel: () => this.getModel(),
       listMcpTools: () => this.mcpManager.listTools(),
-      callMcpTool: (name: string, args: any) => this.mcpManager.callTool(name, args)
+      callMcpTool: (name: string, args: any) => this.mcpManager.callTool(name, args),
+      toolEngine: this.toolEngine,
+      taskEngine
     }));
     SkillRegistry.register(new ExecuteWorkflowSkill({
       listMcpTools: () => this.mcpManager.listTools(),

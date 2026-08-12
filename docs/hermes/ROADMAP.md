@@ -461,6 +461,21 @@ execution-authority audit.
         involved) + `tsc --noEmit` clean. `runChildLoop` stays in place
         until DelegateAgentSkill rewires onto this path (sub-step 3 /
         Step 5).
+      - [x] Sub-step 3 — `DelegateAgentSkill` rewired onto
+        `agentEngine.executeTask`; the bespoke second execution authority
+        (`runChildLoop`, `executeAllowedTool`, child prompt builders,
+        child tool dispatch) is DELETED — every responsibility has an
+        engine owner per the migration map. The skill keeps only request
+        parsing, agent resolution (incl. ephemeral registry-born agents),
+        an `agentRunManager` bookkeeping shim (child Task
+        toolExecutions -> run toolCalls/messages; report normalized from
+        the canonical AgentResult), and result formatting. Tool calls now
+        route through the runner's ToolEngine with `agentPermissions`
+        enforced; children link to the parent mission Task via the
+        injected `__taskId`. Legacy `npm run smoke:delegation` migrated
+        and green (single + parallel, overlap preserved, reviewPrompt
+        keeps finalOutput). Parenthesis note: Step 5's "kill
+        runChildLoop" is now the deletion itself — completed here.
 - [ ] Step 4 — Agent selection: capability matching against TaskProfile,
       performance-ranked later
 - [ ] Step 5 — Kill `runChildLoop`; route delegation through canonical

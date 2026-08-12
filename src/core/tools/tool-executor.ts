@@ -76,7 +76,8 @@ export async function executeNativeSkill(
     ...(request.arguments || {}),
     __sessionId: ctx.sessionId,
     __projectId: projectId || undefined,
-    __workspacePath: workspacePath
+    __workspacePath: workspacePath,
+    __taskId: ctx.taskId
   };
   if (workspacePath && name === 'apply_patch') args.basePath = workspacePath;
   if (name === 'shell') args.__stream = ctx.stream;

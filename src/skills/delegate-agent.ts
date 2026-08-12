@@ -1,3 +1,23 @@
+/**
+ * DelegateAgentSkill — Phase 13 Step 3 (migrated).
+ *
+ * The legacy second execution authority (runChildLoop) is GONE. This skill is
+ * now a thin shim over the canonical path:
+ *
+ *   TaskEngine (parent mission) -> AgentEngine.executeTask -> child Task
+ *   (kind 'delegation') driven by TaskEngine.runMission -> ToolEngine +
+ *   PolicyEngine (agent permissions live) -> canonical AgentResult.
+ *
+ * The skill keeps only:
+ *   - request parsing + agent resolution (custom/profile/swarm/ephemeral),
+ *   - a compatibility shim that books the run in AgentRunManager (task_memory
+ *     rendering, reviewPrompt, agent_runs.json consumers),
+ *   - result formatting for the main agent.
+ *
+ * Every loop/tool-dispatch/prompt-building/retry responsibility moved to the
+ * engines per docs/hermes/CHILD_LOOP_MIGRATION_MAP.md. No deletion happened
+ * until the new owner was verified by `npm run smoke:agent-execution`.
+ */
 import { agentRunManager, AgentTaskReport, AgentToolCallRecord } from '../core/agent-run-manager';
 import { agentProfileManager, AgentProfile } from '../core/agent-profiles';
 import { agentSwarm, SwarmAgent } from '../core/agent-swarm';
@@ -5,27 +25,42 @@ import { CustomAgentConfig, customAgentManager } from '../core/custom-agents';
 import { ModelProvider, Tool } from '../core/models';
 import { Skill, SkillRegistry } from '../core/skills';
 import { checkpointManager } from '../core/checkpoint-manager';
+import { AgentEngine } from '../core/agent/agent-engine';
+import { agentRegistry } from '../core/agent/agent-registry';
+import { ToolEngine } from '../core/tools';
+import { TaskEngine, taskEngine as defaultTaskEngine } from '../core/task';
 
 interface DelegateAgentDeps {
   getModelById: (id?: string) => ModelProvider;
   getDefaultModel: () => ModelProvider;
   listMcpTools: () => Promise<Tool[]>;
   callMcpTool: (name: string, args: any) => Promise<any>;
+  /** Canonical ToolEngine (the runner passes its own). Built privately otherwise. */
+  toolEngine?: ToolEngine;
+  /** Canonical TaskEngine (defaults to the shared singleton). */
+  taskEngine?: TaskEngine;
 }
 
 type ResolvedAgent = {
   id: string;
   name: string;
   kind: 'custom_agent' | 'agent_profile' | 'swarm_agent';
+  /** Canonical (namespaced) agent id used by AgentEngine.executeTask. */
+  canonicalId: string;
   persona: string;
-  modelId?: string;
   profile?: AgentProfile;
   allowedSkillNames: string[];
 };
 
+const EPHEMERAL_TOOLS = [
+  'system_info', 'current_time', 'web_search', 'web_fetch', 'brave_search', 'serper_search',
+  'shell', 'apply_patch', 'playwright', 'notes', 'memory', 'task_memory', 'checkpoints',
+  'code_search', 'git', 'code_review'
+];
+
 export class DelegateAgentSkill implements Skill {
   name = 'delegate_agent';
-  description = 'Delegate one subtask, or a tasks batch of independent subtasks that runs concurrently, to CustomAgents, AgentProfiles, or swarm agents. Each child uses a tool-capable loop and returns a saved structured report.';
+  description = 'Delegate one subtask, or a tasks batch of independent subtasks that runs concurrently, to CustomAgents, AgentProfiles, or swarm agents. Each child runs on a canonical Task (TaskEngine) with ToolEngine + policy enforcement and returns a saved structured report.';
   inputSchema = {
     type: 'object',
     properties: {
@@ -34,7 +69,7 @@ export class DelegateAgentSkill implements Skill {
       task: { type: 'string', description: 'The delegated task to execute.' },
       expectedOutput: { type: 'string', description: 'What the child agent should produce.' },
       allowedTools: { type: 'array', items: { type: 'string' }, description: 'Optional tool allowlist for this delegation.' },
-      maxTurns: { type: 'number', description: 'Maximum child loop turns. Default 6, max 20.' },
+      maxTurns: { type: 'number', description: 'Maximum child mission turns. Default 6, max 20.' },
       reviewCriteria: { type: 'array', items: { type: 'string' }, description: 'Criteria the main agent should use while reviewing the report.' },
       retries: { type: 'number', description: 'Retries for failed child work. Default 1, max 3.' }
       ,tasks: {
@@ -59,7 +94,35 @@ export class DelegateAgentSkill implements Skill {
     required: []
   };
 
-  constructor(private readonly deps: DelegateAgentDeps) {}
+  private readonly deps: DelegateAgentDeps;
+  private readonly engine: AgentEngine;
+  private readonly toolEngine: ToolEngine;
+  private readonly taskEngine: TaskEngine;
+
+  constructor(deps: DelegateAgentDeps) {
+    this.deps = deps;
+    this.taskEngine = deps.taskEngine || defaultTaskEngine;
+    this.toolEngine = deps.toolEngine || new ToolEngine({
+      skills: SkillRegistry,
+      mcp: {
+        callTool: (name: string, args: any) => deps.callMcpTool(name, args),
+        getKnownToolNames: () => []
+      },
+      dynamicTools: {
+        resolve: async () => ({ success: false, error: 'Dynamic tools are not available for delegated children.' }),
+        normalizeName: () => null
+      },
+      checkpoints: checkpointManager
+    });
+    this.engine = new AgentEngine(agentRegistry);
+    this.engine.configure({
+      getModelById: deps.getModelById,
+      getDefaultModel: deps.getDefaultModel,
+      listMcpTools: deps.listMcpTools,
+      toolEngine: this.toolEngine,
+      taskEngine: this.taskEngine
+    });
+  }
 
   async execute(params: any): Promise<any> {
     const batch = Array.isArray(params?.tasks) ? params.tasks.slice(0, 8) : [];
@@ -88,6 +151,10 @@ export class DelegateAgentSkill implements Skill {
     const agentKey = this.normalizeString(params?.agentId || params?.name);
     if (!agentKey) return { error: 'agentId or name is required' };
 
+    // Fresh wrap of the source stores so agent edits and disabled states
+    // propagate into the canonical registry before execution.
+    agentRegistry.refresh();
+
     const resolved = this.resolveAgent(agentKey);
     if (!resolved) {
       return {
@@ -105,9 +172,7 @@ export class DelegateAgentSkill implements Skill {
     const sessionId = this.normalizeString(params?.__sessionId) || undefined;
     const workspacePath = this.normalizeString(params?.__workspacePath) || undefined;
     const projectId = this.normalizeString(params?.__projectId) || undefined;
-
-    const availableTools = await this.getAllowedToolSchemas(resolved, requestAllowedTools);
-    const allowedToolNames = availableTools.map(tool => tool.name);
+    const parentTaskId = this.normalizeString(params?.__taskId) || undefined;
 
     const run = agentRunManager.createRun({
       sessionId,
@@ -116,404 +181,96 @@ export class DelegateAgentSkill implements Skill {
       agentKind: resolved.kind,
       task,
       expectedOutput,
-      allowedTools: allowedToolNames,
+      allowedTools: requestAllowedTools.length ? requestAllowedTools : resolved.allowedSkillNames,
       reviewCriteria,
       maxTurns
     });
 
-    const model = this.selectModel(resolved);
-    let lastError = '';
-    let lastFailedReport: AgentTaskReport | undefined;
-    const maxAttempts = retries + 1;
+    agentRunManager.startAttempt(run.taskId);
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      agentRunManager.startAttempt(run.taskId);
-      try {
-        const report = await this.runChildLoop({
-          taskId: run.taskId,
-          resolved,
-          model,
-          task,
-          expectedOutput,
-          reviewCriteria,
-          tools: availableTools,
-          maxTurns,
-          attempt,
-          maxAttempts,
-          sessionId,
-          workspacePath,
-          projectId
-        });
+    const exec = await this.engine.executeTask({
+      agentId: resolved.canonicalId,
+      task,
+      expectedOutput,
+      reviewCriteria,
+      allowedTools: requestAllowedTools.length ? requestAllowedTools : undefined,
+      maxTurns,
+      retries,
+      parentTaskId,
+      sessionId,
+      workspacePath,
+      projectId
+    });
 
-        if (report.status === 'failed' && attempt < maxAttempts) {
-          lastFailedReport = report;
-          lastError = report.errorSummary || report.summary || 'Child agent reported failure.';
-          agentRunManager.appendMessage(run.taskId, {
-            role: 'system',
-            content: `Attempt ${attempt} failed and will be retried: ${lastError}`
-          });
-          continue;
-        }
-
-        agentRunManager.completeRun(run.taskId, report);
-        this.recordProfilePerformance(resolved, report.status === 'completed', run.startedAt);
-        return this.formatSkillResult(report, sessionId);
-      } catch (err: any) {
-        lastError = err?.message || String(err);
-        if (attempt < maxAttempts) {
-          agentRunManager.appendMessage(run.taskId, {
-            role: 'system',
-            content: `Attempt ${attempt} crashed and will be retried: ${lastError}`
-          });
-          continue;
-        }
-      }
+    for (const childTaskId of exec.taskIds) {
+      this.bookChildEvidence(run.taskId, childTaskId);
     }
 
-    if (lastFailedReport) {
-      agentRunManager.completeRun(run.taskId, lastFailedReport);
-      this.recordProfilePerformance(resolved, false, run.startedAt);
-      return this.formatSkillResult(lastFailedReport, sessionId);
-    }
-
-    const failed = agentRunManager.failRun(run.taskId, lastError || 'Delegated agent did not complete.');
-    this.recordProfilePerformance(resolved, false, run.startedAt);
-    return this.formatSkillResult(failed?.report as AgentTaskReport, sessionId);
+    const report = this.buildReport(run, resolved, exec);
+    const completed = agentRunManager.completeRun(run.taskId, report);
+    // completeRun normalizes the report with the run's recorded tool calls and
+    // metadata — return THAT report so consumers see the full evidence.
+    this.recordProfilePerformance(resolved, exec.success, run.startedAt);
+    return this.formatSkillResult(completed?.report || report, sessionId);
   }
 
-  private async runChildLoop(params: {
-    taskId: string;
-    resolved: ResolvedAgent;
-    model: ModelProvider;
-    task: string;
-    expectedOutput?: string;
-    reviewCriteria: string[];
-    tools: Tool[];
-    maxTurns: number;
-    attempt: number;
-    maxAttempts: number;
-    sessionId?: string;
-    workspacePath?: string;
-    projectId?: string;
-  }): Promise<AgentTaskReport> {
-    const systemPrompt = this.buildChildSystemPrompt(params.resolved, params.tools);
-    const userPrompt = this.buildInitialTaskPrompt(params.task, params.expectedOutput, params.reviewCriteria, params.attempt, params.maxAttempts);
+  // ---------------------------------------------------- canonical-path shim
 
-    agentRunManager.appendMessage(params.taskId, { role: 'system', content: systemPrompt });
-    agentRunManager.appendMessage(params.taskId, { role: 'user', content: userPrompt });
-
-    for (let turn = 1; turn <= params.maxTurns; turn += 1) {
-      const prompt = this.buildConversationPrompt(params.taskId);
-      const response = await params.model.generate(prompt, systemPrompt, params.tools);
-
-      if (response.content) {
-        agentRunManager.appendMessage(params.taskId, { role: 'assistant', content: response.content });
-      }
-
-      const toolCalls = response.toolCalls || [];
-      if (toolCalls.length > 0) {
-        const parallelSafeTools = new Set(['web_search', 'web_fetch', 'brave_search', 'serper_search', 'code_search', 'current_time', 'system_info']);
-        const canRunInParallel = toolCalls.length > 1 && toolCalls.every(call => parallelSafeTools.has(call.name));
-        const results: Array<{ call: any; result: AgentToolCallRecord }> = [];
-        const execute = async (call: any) => ({
-          call,
-          result: await this.executeAllowedTool(
-            params.taskId,
-            call.name,
-            call.arguments || {},
-            params.tools,
-            params.sessionId,
-            params.workspacePath,
-            params.projectId
-          )
-        });
-        if (canRunInParallel) results.push(...await Promise.all(toolCalls.map(execute)));
-        else for (const call of toolCalls) results.push(await execute(call));
-        for (const { call, result } of results) {
-          const toolContent = result.success
-            ? `Tool '${call.name}' result:\n${result.output || ''}`
-            : `Tool '${call.name}' error:\n${result.error || 'Unknown error'}`;
-          agentRunManager.appendMessage(params.taskId, {
-            role: 'tool',
-            toolName: call.name,
-            content: toolContent
-          });
-        }
-        continue;
-      }
-
-      if (response.content) {
-        const run = agentRunManager.getRun(params.taskId);
-        const report = agentRunManager.parseReportFromText(response.content, {
-          taskId: params.taskId,
-          agentId: params.resolved.id,
-          toolCalls: run?.toolCalls || [],
-          expectedOutput: params.expectedOutput,
-          reviewCriteria: params.reviewCriteria,
-          startedAt: run?.startedAt,
-          attempts: run?.attempts
-        });
-        report.taskId = params.taskId;
-        report.agentId = params.resolved.id;
-        report.toolCalls = run?.toolCalls || [];
-        report.expectedOutput = params.expectedOutput;
-        report.reviewCriteria = params.reviewCriteria;
-        report.attempts = run?.attempts;
-        report.startedAt = run?.startedAt;
-        return report;
-      }
-    }
-
-    throw new Error(`Child agent exceeded maxTurns (${params.maxTurns}) without a final report.`);
-  }
-
-  private async executeAllowedTool(
-    taskId: string,
-    name: string,
-    args: any,
-    tools: Tool[],
-    sessionId?: string,
-    workspacePath?: string,
-    projectId?: string
-  ): Promise<AgentToolCallRecord> {
-    name = this.normalizeToolName(name);
-    args = this.normalizeToolArgs(name, args);
-    const allowed = tools.some(tool => tool.name === name);
-    if (!allowed) {
-      const record = agentRunManager.recordToolCall(taskId, {
-        id: `${name}-${Date.now()}`,
-        name,
-        arguments: args,
-        success: false,
-        error: `Tool '${name}' is not allowed for this delegated agent.`
+  /** Mirror each child task's tool executions onto the legacy run record
+   *  (task_memory rendering + reviewPrompt + agent_runs.json consumers). */
+  private bookChildEvidence(runTaskId: string, childTaskId: string): void {
+    const task = this.taskEngine.get(childTaskId);
+    if (!task) return;
+    for (const execution of task.toolExecutions || []) {
+      const record: Omit<AgentToolCallRecord, 'timestamp'> = {
+        id: execution.id,
+        name: execution.name,
+        arguments: execution.arguments || {},
+        success: execution.status === 'COMPLETED',
+        ...(typeof execution.output === 'string'
+          ? { output: execution.output }
+          : execution.output !== undefined
+            ? { output: JSON.stringify(execution.output) }
+            : {}),
+        ...(execution.error ? { error: execution.error } : {})
+      };
+      agentRunManager.recordToolCall(runTaskId, record);
+      agentRunManager.appendMessage(runTaskId, {
+        role: 'tool',
+        toolName: execution.name,
+        content: execution.status === 'COMPLETED'
+          ? `Tool '${execution.name}' result:\n${record.output || ''}`
+          : `Tool '${execution.name}' error:\n${execution.error || 'Unknown error'}`
       });
-      return record as AgentToolCallRecord;
-    }
-
-    try {
-      const native = SkillRegistry.get(name);
-      let output: any;
-      if (native) {
-        const childSessionId = `${sessionId || 'delegated'}:child:${taskId}`;
-        const command = String(args?.command || '');
-        if (workspacePath && (name === 'apply_patch' || (name === 'shell' && checkpointManager.shouldCheckpointShell(command)))) {
-          checkpointManager.create(workspacePath, `Before delegated ${name}: ${command || 'file patch'}`, childSessionId);
-        }
-        const runtimeArgs: any = {
-          ...(args || {}),
-          __sessionId: childSessionId,
-          __workspacePath: workspacePath,
-          __projectId: projectId
-        };
-        if (workspacePath && name === 'apply_patch') runtimeArgs.basePath = workspacePath;
-        output = await native.execute(runtimeArgs);
-        if (output?.error || output?.success === false || Number(output?.summary?.failed || 0) > 0) {
-          throw new Error(String(output?.error || `Tool '${name}' reported failure.`));
-        }
-      } else {
-        output = await this.deps.callMcpTool(name, args || {});
-      }
-      const record = agentRunManager.recordToolCall(taskId, {
-        id: `${name}-${Date.now()}`,
-        name,
-        arguments: args,
-        success: true,
-        output: this.stringifyToolOutput(output)
-      });
-      return record as AgentToolCallRecord;
-    } catch (err: any) {
-      const record = agentRunManager.recordToolCall(taskId, {
-        id: `${name}-${Date.now()}`,
-        name,
-        arguments: args,
-        success: false,
-        error: err?.message || String(err)
-      });
-      return record as AgentToolCallRecord;
     }
   }
 
-  private resolveAgent(idOrName: string): ResolvedAgent | null {
-    const custom = customAgentManager.getAgent(idOrName);
-    if (custom && custom.enabled !== false) return this.resolveCustomAgent(custom);
-
-    const profile = agentProfileManager.get(idOrName);
-    if (profile) return this.resolveProfileAgent(profile);
-
-    const swarm = agentSwarm.getAgent(idOrName) || agentSwarm.getAgentByName(idOrName);
-    if (swarm) return this.resolveSwarmAgent(swarm);
-
-    const ephemeralName = idOrName.toLowerCase() === 'auto' ? 'Ephemeral Specialist' : idOrName;
+  /** Map the canonical AgentResult onto the legacy AgentTaskReport shape. */
+  private buildReport(
+    run: { taskId: string; startedAt?: string },
+    resolved: ResolvedAgent,
+    exec: { success: boolean; result: { status: string; summary: string; findings: string[]; evidence: string[]; artifacts: Array<{ name: string; path?: string }>; recommendations: string[]; unresolvedQuestions: string[]; errorSummary?: string; finalOutput?: string }; attempts: number }
+  ): AgentTaskReport {
+    const result = exec.result;
     return {
-      id: `ephemeral-${ephemeralName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'specialist'}`,
-      name: ephemeralName,
-      kind: 'agent_profile',
-      persona: `# Ephemeral Specialist: ${ephemeralName}\n\nYou are an isolated temporary sub-agent. Complete only the delegated task, use the minimum necessary tools, verify evidence, and return a structured report.`,
-      allowedSkillNames: [
-        'system_info', 'current_time', 'web_search', 'web_fetch', 'brave_search', 'serper_search',
-        'shell', 'apply_patch', 'playwright', 'notes', 'memory', 'task_memory', 'checkpoints',
-        'code_search', 'git', 'code_review'
-      ]
+      taskId: run.taskId,
+      agentId: resolved.id,
+      status: result.status === 'completed' ? 'completed' : 'failed',
+      summary: result.summary,
+      workDone: [...result.findings],
+      filesChanged: result.artifacts.map(artifact => artifact.path || artifact.name),
+      toolCalls: [],
+      evidence: [...result.evidence],
+      risks: [...result.unresolvedQuestions],
+      nextSteps: [...result.recommendations],
+      finalOutput: result.finalOutput || result.summary,
+      errorSummary: result.errorSummary || (exec.success ? undefined : result.summary),
+      attempts: exec.attempts,
+      startedAt: run.startedAt,
+      completedAt: new Date().toISOString(),
+      expectedOutput: undefined,
+      reviewCriteria: undefined
     };
-  }
-
-  private resolveCustomAgent(agent: CustomAgentConfig): ResolvedAgent {
-    const profile = agent.profileId ? agentProfileManager.get(agent.profileId) : undefined;
-    return {
-      id: agent.id,
-      name: agent.displayName || agent.name,
-      kind: 'custom_agent',
-      persona: customAgentManager.buildSystemPrompt(agent),
-      modelId: agent.model || profile?.modelId,
-      profile,
-      allowedSkillNames: this.unique([...(agent.skills || []), ...(profile?.allowedSkills || []), ...(profile?.learnedPreferences?.preferredTools || [])])
-    };
-  }
-
-  private resolveProfileAgent(profile: AgentProfile): ResolvedAgent {
-    const capability = agentProfileManager.getCapabilitySummary(profile.id);
-    return {
-      id: profile.id,
-      name: profile.name,
-      kind: 'agent_profile',
-      persona: [
-        `# Agent Profile: ${profile.name}`,
-        profile.description || 'You are a specialized agent profile.',
-        capability ? `Learned capabilities: ${capability}` : '',
-        'Stay within this profile and complete the delegated task carefully.'
-      ].filter(Boolean).join('\n\n'),
-      modelId: profile.modelId,
-      profile,
-      allowedSkillNames: this.unique([...(profile.allowedSkills || []), ...(profile.learnedPreferences?.preferredTools || [])])
-    };
-  }
-
-  private resolveSwarmAgent(agent: SwarmAgent): ResolvedAgent {
-    const profile = agent.profileId ? agentProfileManager.get(agent.profileId) : undefined;
-    return {
-      id: agent.id,
-      name: agent.name,
-      kind: 'swarm_agent',
-      persona: `# Swarm Agent: ${agent.name}\n\nRole: ${agent.role}\nSpecialization: ${agent.specialization}\n\nComplete the delegated task according to this role.`,
-      modelId: agent.modelId || profile?.modelId,
-      profile,
-      allowedSkillNames: this.unique([...(profile?.allowedSkills || []), ...(profile?.learnedPreferences?.preferredTools || [])])
-    };
-  }
-
-  private async getAllowedToolSchemas(agent: ResolvedAgent, requested: string[]): Promise<Tool[]> {
-    const baseAllowed = new Set(agent.allowedSkillNames.map(name => name.trim()).filter(Boolean));
-    const requestedSet = new Set(requested.map(name => name.trim()).filter(Boolean));
-    const finalAllowed = new Set<string>();
-
-    for (const name of baseAllowed) {
-      if (name === this.name) continue;
-      if (requestedSet.size === 0 || requestedSet.has(name)) finalAllowed.add(name);
-    }
-
-    const nativeTools = SkillRegistry.getAll()
-      .filter(skill => finalAllowed.has(skill.name))
-      .map(skill => ({
-        name: skill.name,
-        description: skill.description,
-        inputSchema: skill.inputSchema || { type: 'object', properties: {} }
-      }));
-
-    const mcpTools = (await this.deps.listMcpTools())
-      .filter(tool => finalAllowed.has(tool.name))
-      .map(tool => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema
-      }));
-
-    const byName = new Map<string, Tool>();
-    for (const tool of [...nativeTools, ...mcpTools]) byName.set(tool.name, tool);
-    return [...byName.values()];
-  }
-
-  private normalizeToolName(name: string): string {
-    const original = String(name || '').trim();
-    if (!original) return original;
-    if (SkillRegistry.get(original)) return original;
-    const lower = original.toLowerCase().replace(/^mcp_/, '').replace(/_+/g, '_');
-    const isPlaywrightAlias = /^playwright(_[a-z0-9_]+)?$/.test(lower)
-      || /^browser(_[a-z0-9_]+)?$/.test(lower);
-    if (!isPlaywrightAlias) return original;
-    return 'playwright';
-  }
-
-  private normalizeToolArgs(name: string, args: any): any {
-    if (name !== 'playwright') return args;
-    const out = (args && typeof args === 'object') ? { ...args } : {};
-    if (!out.action) {
-      const suffix = String(name).toLowerCase().replace(/^(playwright|browser)_?/, '');
-      let action = 'extract_text';
-      if (/screenshot|shot/.test(suffix)) action = 'screenshot';
-      else if (/navigate|goto|open|visit|go_/.test(suffix)) action = 'extract_text';
-      else if (/snapshot|scrape|extract|text|content|get_/.test(suffix)) action = 'extract_text';
-      out.action = action;
-    }
-    if (!out.url) {
-      out.url = out.link || out.href || out.page || out.target || out.website || '';
-    }
-    return out;
-  }
-
-  private selectModel(agent: ResolvedAgent): ModelProvider {
-    if (agent.modelId) return this.deps.getModelById(agent.modelId);
-    return this.deps.getDefaultModel();
-  }
-
-  private buildChildSystemPrompt(agent: ResolvedAgent, tools: Tool[]): string {
-    const toolList = tools.length
-      ? tools.map(tool => `- ${tool.name}: ${tool.description || 'No description'}`).join('\n')
-      : '- No tools allowed for this delegation.';
-
-    return [
-      agent.persona,
-      '',
-      'You are running as a delegated child agent. Use only the tools provided in this call.',
-      'Do not ask the user questions. If blocked, describe the blocker in the final report.',
-      '',
-      'Allowed tools:',
-      toolList,
-      '',
-      'When finished, respond with one JSON object and no extra prose:',
-      '{',
-      '  "taskId": "<provided task id>",',
-      '  "agentId": "<your agent id>",',
-      '  "status": "completed | failed",',
-      '  "summary": "brief result summary",',
-      '  "workDone": ["specific work item"],',
-      '  "filesChanged": ["path if any"],',
-      '  "toolCalls": [],',
-      '  "evidence": ["commands, outputs, sources, files, or observations supporting the result"],',
-      '  "risks": ["remaining risk or empty"],',
-      '  "nextSteps": ["recommended follow-up or empty"],',
-      '  "finalOutput": "the child agent final answer or artifact summary"',
-      '}'
-    ].join('\n');
-  }
-
-  private buildInitialTaskPrompt(task: string, expectedOutput: string | undefined, reviewCriteria: string[], attempt: number, maxAttempts: number): string {
-    const lines = [
-      `Delegated task: ${task}`,
-      expectedOutput ? `Expected output: ${expectedOutput}` : '',
-      reviewCriteria.length ? `Review criteria: ${reviewCriteria.join('; ')}` : '',
-      `Attempt ${attempt} of ${maxAttempts}.`
-    ].filter(Boolean);
-    return lines.join('\n');
-  }
-
-  private buildConversationPrompt(taskId: string): string {
-    const run = agentRunManager.getRun(taskId);
-    if (!run) return '';
-    return run.messages.map((msg) => {
-      if (msg.role === 'tool') return `Tool (${msg.toolName || 'unknown'}): ${msg.content}`;
-      const role = msg.role === 'assistant' ? 'Assistant' : msg.role === 'user' ? 'User' : 'System';
-      return `${role}: ${msg.content}`;
-    }).join('\n\n');
   }
 
   private formatSkillResult(report: AgentTaskReport, sessionId?: string) {
@@ -536,6 +293,93 @@ export class DelegateAgentSkill implements Skill {
     agentProfileManager.recordPerformance(profileId, success, durationMs, 'delegated_agent_task');
   }
 
+  // ------------------------------------------------------------- resolution
+
+  private resolveAgent(idOrName: string): ResolvedAgent | null {
+    const custom = customAgentManager.getAgent(idOrName);
+    if (custom && custom.enabled !== false) {
+      return { ...this.resolveCustomAgent(custom), canonicalId: `custom:${custom.id}` };
+    }
+
+    const profile = agentProfileManager.get(idOrName);
+    if (profile) {
+      return { ...this.resolveProfileAgent(profile), canonicalId: `profile:${profile.id}` };
+    }
+
+    const swarm = agentSwarm.getAgent(idOrName) || agentSwarm.getAgentByName(idOrName);
+    if (swarm) {
+      return { ...this.resolveSwarmAgent(swarm), canonicalId: `swarm:${swarm.id}` };
+    }
+
+    const ephemeralName = idOrName.toLowerCase() === 'auto' ? 'Ephemeral Specialist' : idOrName;
+    const id = `ephemeral-${ephemeralName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'specialist'}`;
+    return {
+      id,
+      name: ephemeralName,
+      kind: 'agent_profile',
+      canonicalId: this.ensureEphemeralAgent(ephemeralName),
+      persona: `# Ephemeral Specialist: ${ephemeralName}\n\nYou are an isolated temporary sub-agent. Complete only the delegated task, use the minimum necessary tools, verify evidence, and return a structured report.`,
+      allowedSkillNames: [...EPHEMERAL_TOOLS]
+    };
+  }
+
+  private ensureEphemeralAgent(name: string): string {
+    const existing = agentRegistry.get(name);
+    if (existing) return existing.id;
+    const agent = agentRegistry.register({
+      name,
+      description: `Ephemeral specialist: ${name}`,
+      persona: `# Ephemeral Specialist: ${name}\n\nYou are an isolated temporary sub-agent. Complete only the delegated task, use the minimum necessary tools, verify evidence, and return a structured report.`,
+      tools: [...EPHEMERAL_TOOLS],
+      taskScope: 'delegation',
+      role: 'general'
+    });
+    return agent.id;
+  }
+
+  private resolveCustomAgent(agent: CustomAgentConfig): Omit<ResolvedAgent, 'canonicalId'> {
+    const profile = agent.profileId ? agentProfileManager.get(agent.profileId) : undefined;
+    return {
+      id: agent.id,
+      name: agent.displayName || agent.name,
+      kind: 'custom_agent',
+      persona: customAgentManager.buildSystemPrompt(agent),
+      profile,
+      allowedSkillNames: this.unique([...(agent.skills || []), ...(profile?.allowedSkills || []), ...(profile?.learnedPreferences?.preferredTools || [])])
+    };
+  }
+
+  private resolveProfileAgent(profile: AgentProfile): Omit<ResolvedAgent, 'canonicalId'> {
+    const capability = agentProfileManager.getCapabilitySummary(profile.id);
+    return {
+      id: profile.id,
+      name: profile.name,
+      kind: 'agent_profile',
+      persona: [
+        `# Agent Profile: ${profile.name}`,
+        profile.description || 'You are a specialized agent profile.',
+        capability ? `Learned capabilities: ${capability}` : '',
+        'Stay within this profile and complete the delegated task carefully.'
+      ].filter(Boolean).join('\n\n'),
+      profile,
+      allowedSkillNames: this.unique([...(profile.allowedSkills || []), ...(profile.learnedPreferences?.preferredTools || [])])
+    };
+  }
+
+  private resolveSwarmAgent(agent: SwarmAgent): Omit<ResolvedAgent, 'canonicalId'> {
+    const profile = agent.profileId ? agentProfileManager.get(agent.profileId) : undefined;
+    return {
+      id: agent.id,
+      name: agent.name,
+      kind: 'swarm_agent',
+      persona: `# Swarm Agent: ${agent.name}\n\nRole: ${agent.role}\nSpecialization: ${agent.specialization}\n\nComplete the delegated task according to this role.`,
+      profile,
+      allowedSkillNames: this.unique([...(profile?.allowedSkills || []), ...(profile?.learnedPreferences?.preferredTools || [])])
+    };
+  }
+
+  // -------------------------------------------------------------- helpers
+
   private normalizeString(value: any): string {
     return typeof value === 'string' ? value.trim() : '';
   }
@@ -553,14 +397,5 @@ export class DelegateAgentSkill implements Skill {
 
   private unique(values: string[]): string[] {
     return [...new Set(values.map(value => this.normalizeString(value)).filter(Boolean))];
-  }
-
-  private stringifyToolOutput(output: any): string {
-    if (typeof output === 'string') return output;
-    try {
-      return JSON.stringify(output);
-    } catch {
-      return String(output);
-    }
   }
 }

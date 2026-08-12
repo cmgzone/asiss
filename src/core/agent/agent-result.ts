@@ -36,6 +36,8 @@ export interface AgentResult {
   attempts?: number;
   startedAt?: string;
   completedAt?: string;
+  /** The child agent's final answer / artifact summary (review-prompt feed). */
+  finalOutput?: string;
 }
 
 /** Adapter: legacy AgentTaskReport -> canonical AgentResult. */
@@ -54,7 +56,8 @@ export function agentResultFromTaskReport(report: AgentTaskReport): AgentResult 
     errorSummary: report.errorSummary,
     attempts: report.attempts,
     startedAt: report.startedAt,
-    completedAt: report.completedAt
+    completedAt: report.completedAt,
+    finalOutput: report.finalOutput
   };
 }
 
@@ -71,7 +74,7 @@ export function taskReportFromAgentResult(result: AgentResult): AgentTaskReport 
     evidence: [...result.evidence],
     risks: [...result.unresolvedQuestions],
     nextSteps: [...result.recommendations],
-    finalOutput: result.summary,
+    finalOutput: result.finalOutput || result.summary,
     errorSummary: result.errorSummary || (result.status === 'failed' ? result.summary : undefined),
     attempts: result.attempts,
     startedAt: result.startedAt,
@@ -151,6 +154,7 @@ export function parseAgentResultFromText(
     recommendations: [...(Array.isArray(parsed.nextSteps) ? parsed.nextSteps : [])],
     unresolvedQuestions: [...(Array.isArray(parsed.risks) ? parsed.risks : [])],
     errorSummary: parsed.errorSummary,
-    attempts: parsed.attempts
+    attempts: parsed.attempts,
+    finalOutput: String(parsed.finalOutput || parsed.summary || '')
   };
 }
