@@ -11,6 +11,8 @@
  *      (the guard does not stick).
  *   4. One-shot jobs are unaffected and disable themselves.
  *   5. skippedRuns persists to scheduler.json.
+ *   6. The scheduler skill's list output surfaces skippedRuns, a readable
+ *      lastSkippedAtLabel, and an overlap summary.
  *
  * Run: npm run smoke:scheduler
  */
@@ -85,6 +87,16 @@ async function main() {
   // ------------------------------------------------------------ 4. persistence
   const raw = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'scheduler.json'), 'utf-8'));
   assert.strictEqual(raw[job.id].skippedRuns, 1, 'skippedRuns persisted');
+
+  // ------------------------------------------------------------ 5. skill list surface
+  const { SchedulerSkill } = await import('../src/skills/scheduler');
+  const skill = new SchedulerSkill(scheduler);
+  const listed = await skill.execute({ action: 'list', sessionId: 's1' });
+  const listedJob = (listed.jobs as any[]).find((j: any) => j.id === job.id);
+  assert.ok(listedJob, 'job listed');
+  assert.strictEqual(listedJob.skippedRuns, 1, 'skippedRuns surfaced in skill list');
+  assert.ok(listedJob.lastSkippedAtLabel, 'lastSkippedAtLabel surfaced in skill list');
+  assert.ok(String(listedJob.overlap).includes('Skipped 1 run'), 'overlap summary surfaced in skill list');
 
   console.log('\n{"success":true}');
 }

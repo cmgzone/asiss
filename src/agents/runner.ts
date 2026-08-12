@@ -3380,7 +3380,13 @@ export class AgentRunner {
         void this.gateway.sendResponse(sessionId, 'No scheduled jobs.');
         return true;
       }
-      const lines = jobs.map(j => `${j.enabled ? '✅' : '⏸️'} ${j.id} @ ${new Date(j.runAt).toLocaleString()}${j.intervalMs ? ` every ${Math.round(j.intervalMs / 1000)}s` : ''} :: ${j.prompt}`);
+      const lines = jobs.map(j => {
+        const skipped = j.skippedRuns || 0;
+        const skipInfo = skipped > 0
+          ? ` ⏭️ ${skipped} skipped run${skipped === 1 ? '' : 's'}${j.lastSkippedAt ? ` (last ${new Date(j.lastSkippedAt).toLocaleString()})` : ''}`
+          : '';
+        return `${j.enabled ? '✅' : '⏸️'} ${j.id} @ ${new Date(j.runAt).toLocaleString()}${j.intervalMs ? ` every ${Math.round(j.intervalMs / 1000)}s` : ''} :: ${j.prompt}${skipInfo}`;
+      });
       void this.gateway.sendResponse(sessionId, lines.join('\n'));
       return true;
     }

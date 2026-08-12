@@ -1,5 +1,5 @@
 import { Skill } from '../core/skills';
-import { SchedulerManager } from '../core/scheduler';
+import { SchedulerManager, type ScheduledJob } from '../core/scheduler';
 
 export class SchedulerSkill implements Skill {
   name = 'scheduler';
@@ -29,7 +29,8 @@ export class SchedulerSkill implements Skill {
     const sessionId = String(params?.sessionId || params?.__sessionId || '').trim();
 
     if (action === 'list') {
-      return { jobs: this.scheduler.list(sessionId ? { sessionId } : undefined) };
+      const jobs = this.scheduler.list(sessionId ? { sessionId } : undefined);
+      return { jobs: jobs.map(job => this.describeJob(job)) };
     }
 
     if (action === 'cancel') {
@@ -62,6 +63,19 @@ export class SchedulerSkill implements Skill {
     }
 
     return { error: `Unknown action: ${action}` };
+  }
+
+  /** Enrich a job with readable overlap-skip info for the list output. */
+  private describeJob(job: ScheduledJob) {
+    const skipped = job.skippedRuns || 0;
+    const lastSkippedAt = job.lastSkippedAt ? new Date(job.lastSkippedAt).toISOString() : undefined;
+    return {
+      ...job,
+      lastSkippedAtLabel: lastSkippedAt,
+      overlap: skipped > 0
+        ? `Skipped ${skipped} run${skipped === 1 ? '' : 's'} because the previous run was still in flight${lastSkippedAt ? ` (last at ${lastSkippedAt})` : ''}`
+        : undefined
+    };
   }
 }
 
