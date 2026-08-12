@@ -562,6 +562,21 @@ so the cadence shifts instead of overlapping; the recurring path was already
 serial by construction, the guard hardens `start()`-re-entry and future
 re-arm paths). On any failure the legacy mission path takes over.
 `AgentTaskScope` gained 'scheduled'. Verified by smoke:agent-execution
-section 7 (kind-'scheduled' child Task + linkage), smoke:agent-task-profile
-(scheduled task-scope selection), `smoke:scheduler` (overlap guard), and all
+section 7 (kind-'scheduled' child Task + linkage),smoke:agent-task-profile (scheduled task-scope selection), `smoke:scheduler` (overlap guard), and all
 prior smokes unchanged.
+
+**Phase 13 closeout — Audit 4 (done, `docs/hermes/AUDIT_4.md`).**
+Single-source-of-truth verified across the migrated work origins: every one
+executes as a canonical Task through AgentEngine.executeTask (single HOW), the
+scheduler/worker are WHEN-only triggers, and worker selection is engine-owned
+where it applies (background/scheduled via selectForProfile; swarm uses
+explicit store agents by design). One duplicate consolidated (S1): the swarm
+store could not be traced to its canonical child Tasks — delegate_agent now
+surfaces `canonicalTaskIds` on its result and the runner's swarm executor
+records them on the swarm agent (`SwarmAgent.canonicalTaskIds`, persisted to
+swarm_data.json), closing the linkage gap that background
+(`canonicalTaskId`) and scheduled (`schedulerJobId`) already had. Verified by
+smoke:delegation (canonical child id surfaced + kind-'delegation' task
+resolves). Deferred: agentRunManager shim consumers (S4), store statuses vs
+Task status by design (S2), store path sprawl (S5).
+

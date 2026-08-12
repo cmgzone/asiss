@@ -14,6 +14,8 @@ export interface SwarmAgent {
     assignedTasks: string[];
     completedTasks: string[];
     results: AgentResult[];
+    /** Canonical child Task ids from AgentEngine.executeTask (Audit 4 S1 linkage). */
+    canonicalTaskIds?: string[];
     createdAt: string;
 }
 

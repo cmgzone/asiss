@@ -356,6 +356,18 @@ export class AgentRunner {
         // Step 9: swarm jobs execute as canonical kind-'swarm' child Tasks.
         __kind: 'swarm'
       });
+      // Audit 4 (S1): link the canonical child Task ids onto the swarm agent
+      // record so swarm_data.json is traceable to the engine-owned execution.
+      const canonicalIds = Array.isArray(result?.canonicalTaskIds)
+        ? result.canonicalTaskIds.filter((id: unknown): id is string => typeof id === 'string')
+        : [];
+      if (canonicalIds.length > 0) {
+        const swarmAgent = agentSwarm.getAgent(agentId);
+        if (swarmAgent) {
+          const existing = Array.isArray(swarmAgent.canonicalTaskIds) ? swarmAgent.canonicalTaskIds : [];
+          agentSwarm.updateAgent(agentId, { canonicalTaskIds: [...new Set([...existing, ...canonicalIds])] });
+        }
+      }
       const report = result?.report;
       return report?.finalOutput || report?.summary || JSON.stringify(result);
     });

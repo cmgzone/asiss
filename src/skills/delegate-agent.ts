@@ -215,7 +215,10 @@ export class DelegateAgentSkill implements Skill {
     // completeRun normalizes the report with the run's recorded tool calls and
     // metadata — return THAT report so consumers see the full evidence.
     this.recordProfilePerformance(resolved, exec.success, run.startedAt);
-    return this.formatSkillResult(completed?.report || report, sessionId);
+    // Audit 4 (S1): expose the canonical child Task ids so hosts (swarm,
+    // background, scheduler) can trace their store records back to the
+    // engine-owned execution instead of keeping an unlinked duplicate.
+    return this.formatSkillResult(completed?.report || report, sessionId, exec.taskIds);
   }
 
   // ---------------------------------------------------- canonical-path shim
@@ -277,13 +280,14 @@ export class DelegateAgentSkill implements Skill {
     };
   }
 
-  private formatSkillResult(report: AgentTaskReport, sessionId?: string) {
+  private formatSkillResult(report: AgentTaskReport, sessionId?: string, canonicalTaskIds?: string[]) {
     return {
       success: report.status === 'completed',
       taskId: report.taskId,
       agentId: report.agentId,
       status: report.status,
       report,
+      canonicalTaskIds,
       reviewPrompt: agentRunManager.buildReviewPrompt(sessionId),
       _synthesisInstructions: 'Review the AgentTaskReport before answering the user. Verify claims against evidence, include useful child output, and mention failed or risky items clearly.'
     };
