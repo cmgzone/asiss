@@ -31,6 +31,7 @@ import assert from 'assert';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { ContextEngine } from '../src/core/context';
 
 interface StubModelOptions {
   /** Tool the model requests on its first (tool) turn. */
@@ -59,6 +60,9 @@ class FailingModel {
 /** Scripted model: turn 1 = one tool call, turn 2 = final JSON report. */
 class StubModel {
   calls = 0;
+  /** System prompt of the last generate() call — lets smokes assert the
+   *  child context (Phase 18 Move 4: the repository section). */
+  lastSystemPrompt?: string;
   readonly id: string;
   readonly name: string;
   constructor(readonly options: StubModelOptions) {
@@ -66,8 +70,9 @@ class StubModel {
     this.name = 'Stub';
   }
 
-  async generate() {
+  async generate(_prompt?: string, systemPrompt?: string) {
     this.calls += 1;
+    this.lastSystemPrompt = systemPrompt;
     if (this.calls === 1) {
       return {
         content: '',
@@ -557,7 +562,83 @@ async function main() {
   assert.strictEqual(delegRefused.success, false, 'delegation from an agent that disallows it is refused');
   assert.ok(String(delegRefused.error).includes('does not allow delegation'), 'refusal names allowDelegation');
 
-  console.log('\n{"success":true,"turns":' + (child.timing.turns || 0) + '}');
+  // ------------------------------------------------------------ 15. Phase 18 Move 4 — child repo context ('repo' source)
+  // (AUDIT_9 G3): the deferred 'repo' ContextPolicy source is live — a child
+  // agent whose contextPolicy includes 'repo' gets the warmed, goal-matched
+  // repository section in its system prompt; an agent without the source
+  // gets none (control).
+  {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gitu-child-repo-'));
+    const repoData = fs.mkdtempSync(path.join(os.tmpdir(), 'gitu-child-repo-data-'));
+    try {
+      fs.mkdirSync(path.join(repoRoot, 'src', 'auth'), { recursive: true });
+      fs.writeFileSync(path.join(repoRoot, 'src/auth/auth.ts'), 'export function authenticate() { return true; }\n');
+      fs.writeFileSync(path.join(repoRoot, 'src/auth/auth.test.ts'), 'test("auth works", () => {});\n');
+      const ctxEngine = new ContextEngine({ config: { repository: { dataRoot: repoData } } });
+
+      const repoModel = new StubModel({
+        toolToCall: 'math_eval',
+        toolArguments: { expression: '2+2' },
+        reportJson: JSON.stringify({
+          taskId: 'c', status: 'completed', summary: 'done', workDone: [], filesChanged: [], evidence: [], risks: [], nextSteps: []
+        })
+      });
+      const controlModel = new StubModel({
+        toolToCall: 'math_eval',
+        toolArguments: { expression: '2+2' },
+        reportJson: JSON.stringify({
+          taskId: 'c', status: 'completed', summary: 'done', workDone: [], filesChanged: [], evidence: [], risks: [], nextSteps: []
+        })
+      });
+      models.set('stub-repo', repoModel);
+      models.set('stub-norepo', controlModel);
+      agentRegistry.register({
+        name: 'RepoBot', role: 'analyst', description: 'Child agent with the repo context source enabled.',
+        capabilities: ['math', 'analysis'], tools: ['math_eval'], modelPolicy: { modelId: 'stub-repo' },
+        contextPolicy: { sources: ['task', 'instructions', 'history', 'repo'] }
+      });
+      agentRegistry.register({
+        name: 'NoRepoBot', role: 'analyst', description: 'Child agent without the repo source (control).',
+        capabilities: ['math', 'analysis'], tools: ['math_eval'], modelPolicy: { modelId: 'stub-norepo' },
+        contextPolicy: { sources: ['task', 'instructions', 'history'] }
+      });
+      const repoEngine = new AgentEngine();
+      repoEngine.configure({
+        getModelById: (id?: string) => {
+          const found = id ? models.get(id) : undefined;
+          if (found) return found;
+          throw new Error(`Unknown model: ${id}`);
+        },
+        getDefaultModel: () => repoModel,
+        listMcpTools: async () => [],
+        toolEngine,
+        taskEngine,
+        contextEngine: ctxEngine
+      });
+
+      const repoParent = await taskEngine.create({ goal: 'Fix authentication.', kind: 'mission', constraints: { maxTurns: 2 } });
+      const withRepo = await repoEngine.executeTask({
+        agentId: 'RepoBot', task: 'Fix the authentication flow and report.', expectedOutput: 'fixed',
+        maxTurns: 2, parentTaskId: repoParent.id, sessionId: 'move4-repo-session', workspacePath: repoRoot
+      });
+      assert.strictEqual(withRepo.success, true, 'repo-context delegation succeeds');
+      assert.ok(repoModel.lastSystemPrompt?.includes('Repository context:'), 'repo source renders the repository section');
+      assert.ok(repoModel.lastSystemPrompt!.includes('src/auth/auth.ts'), 'repo section names the goal-matched file');
+
+      const controlParent = await taskEngine.create({ goal: 'Fix authentication.', kind: 'mission', constraints: { maxTurns: 2 } });
+      const withoutRepo = await repoEngine.executeTask({
+        agentId: 'NoRepoBot', task: 'Fix the authentication flow and report.', expectedOutput: 'fixed',
+        maxTurns: 2, parentTaskId: controlParent.id, sessionId: 'move4-norepo-session', workspacePath: repoRoot
+      });
+      assert.strictEqual(withoutRepo.success, true, 'control delegation succeeds');
+      assert.ok(!(controlModel.lastSystemPrompt || '').includes('Repository context:'), 'no repo section without the repo source');
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+      fs.rmSync(repoData, { recursive: true, force: true });
+    }
+  }
+
+  console.log('\n{"success":true,"turns":' + (child.timing.turns || 0) + ',"childRepoContext":true}');
 }
 
 main().then(() => process.exit(0)).catch((err) => {

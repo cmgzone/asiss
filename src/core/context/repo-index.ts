@@ -533,6 +533,106 @@ export interface SymbolResolution {
   files: IndexedFileDetail[];
 }
 
+/** ------------------------------------------------------------------ */
+/* Reverse dependency lookup — Phase 18 Move 2.                         */
+/* The persisted `importers` map (write-only since Phase 8) becomes a    */
+/* queried capability: which files import the target module/file?        */
+/** ------------------------------------------------------------------ */
+
+export interface DependentsOptions {
+  /** Include transitive dependents (dependents of dependents). Default false. */
+  transitive?: boolean;
+  /** Cap results. Default 50. */
+  limit?: number;
+}
+
+/** One importing file, with the specifier as written and its flags. */
+export interface Dependent {
+  /** Root-relative path of the importing file. */
+  path: string;
+  /** The import specifier exactly as written in that file (e.g. `../auth/auth`). */
+  specifier: string;
+  isTest: boolean;
+  isConfig: boolean;
+}
+
+/** Strip extension and /index suffix -> comparable normalized path. */
+function normPath(relPath: string): string {
+  return relPath.replace(/\.[^.\\/]+$/, '').replace(/\/index$/, '');
+}
+
+/**
+ * Resolve a RELATIVE import specifier against the importing file's
+ * directory into a normalized root-relative path (no extension, /index
+ * collapsed). Bare specifiers (packages/aliases) return null — they are
+ * matched tolerantly by `bareMatches` instead.
+ */
+function resolveSpecifier(importingPath: string, specifier: string): string | null {
+  if (!specifier.startsWith('./') && !specifier.startsWith('../')) return null;
+  const dir = path.posix.dirname(importingPath);
+  const joined = path.posix.normalize(path.posix.join(dir, specifier));
+  if (joined === '.' || joined.startsWith('../')) return null; // escapes the workspace
+  return normPath(joined);
+}
+
+/** Tolerant bare-specifier match: package/alias name vs target forms. */
+function bareMatches(specifier: string, target: string): boolean {
+  const lower = specifier.toLowerCase();
+  const base = path.posix.basename(target).replace(/\.[^.]+$/, '').toLowerCase();
+  return lower === base || lower === normPath(target).toLowerCase() || lower === target.toLowerCase();
+}
+
+/**
+ * Files that depend on a target (file path or module) via the persisted
+ * `importers` reverse index. Relative specifiers are resolved against each
+ * importing file's directory (so `../auth/auth` and `./auth/auth` from
+ * different dirs both hit `src/auth/auth.ts`); bare specifiers match the
+ * target's basename / path forms (tolerant, alias-style). Deduped, sorted
+ * by path. Empty when nothing imports the target. Persistent index only.
+ */
+export function findDependents(
+  index: PersistentRepositoryIndex,
+  target: string,
+  options: DependentsOptions = {}
+): Dependent[] {
+  const limit = options.limit ?? 50;
+  const targetNorm = normPath(target);
+  const direct = new Map<string, Dependent>();
+  for (const [specifier, importingPaths] of Object.entries(index.importers)) {
+    for (const importingPath of importingPaths) {
+      if (direct.has(importingPath)) continue;
+      const resolved = resolveSpecifier(importingPath, specifier);
+      const matches = resolved
+        ? resolved === targetNorm || resolved === `${targetNorm}/index`
+        : bareMatches(specifier, target);
+      if (!matches) continue;
+      const file = index.files.find((f) => f.path === importingPath);
+      direct.set(importingPath, {
+        path: importingPath,
+        specifier,
+        isTest: Boolean(file?.isTest),
+        isConfig: Boolean(file?.isConfig)
+      });
+    }
+  }
+  const ordered = [...direct.values()].sort((a, b) => a.path.localeCompare(b.path)).slice(0, limit);
+  if (!options.transitive) return ordered;
+  // BFS over direct dependents (each hop re-queries the same reverse index).
+  const out = new Map<string, Dependent>();
+  for (const d of ordered) out.set(d.path, d);
+  const queue = ordered.map((d) => d.path);
+  while (queue.length > 0 && out.size < limit) {
+    const current = queue.shift()!;
+    for (const d of findDependents(index, current, { limit: limit - out.size })) {
+      if (out.has(d.path)) continue;
+      out.set(d.path, d);
+      queue.push(d.path);
+      if (out.size >= limit) break;
+    }
+  }
+  return [...out.values()].sort((a, b) => a.path.localeCompare(b.path)).slice(0, limit);
+}
+
 /**
  * Resolve bare symbol references in a goal to defining file paths via the
  * persistent index's exportedSymbols map: "fix authenticate()" ->

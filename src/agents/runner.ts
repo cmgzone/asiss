@@ -6,6 +6,7 @@ import { createUnifiedMemory, type UnifiedMemoryCatalog } from '../core/memory-u
 import { MemoryConsolidation } from '../core/memory-unified/memory-consolidation';
 import { TaskLessonBridge } from '../core/memory-unified/lesson-capture';
 import { EpisodicCapture } from '../core/memory-unified/episodic-capture';
+import { ProjectMemoryBridge } from '../core/memory-unified/project-memory';
 import { McpManager } from '../core/mcp';
 import { LearningManager } from '../core/learning-manager';
 import { MockProvider } from './mock-provider';
@@ -129,6 +130,8 @@ export class AgentRunner {
   private memoryConsolidation: MemoryConsolidation;
   private episodicCapture: EpisodicCapture;
   private taskLessonBridge: TaskLessonBridge;
+  /** Phase 18 Move 4 (G4): durable project-scoped repository knowledge. */
+  private projectMemory?: ProjectMemoryBridge;
   private marketplace: SkillMarketplaceManager;
   private mcpManager: McpManager;
   private scheduler: SchedulerManager;
@@ -226,7 +229,10 @@ export class AgentRunner {
       // the consolidation layer (dedupe/merge + lifecycle applied, archived/
       // expired excluded) per the child agent's memoryPolicy. AgentEngine
       // never sees how memory is stored.
-      retrieveMemory: (query, opts) => this.memoryConsolidation.retrieve(query, opts)
+      retrieveMemory: (query, opts) => this.memoryConsolidation.retrieve(query, opts),
+      // Phase 18 Move 4 (G3): child missions render the repository section
+      // when the agent's contextPolicy includes 'repo' (AUDIT_7 D2 closed).
+      contextEngine: this.contextEngine
     });
 
     // Phase 14 Move 2: episodic capture subscribes to terminal TaskEvents and
@@ -246,6 +252,11 @@ export class AgentRunner {
     // and success feedback, archive/expiry, durable access stats. The context
     // builder reads THROUGH it (archived/expired excluded).
     this.memoryConsolidation = new MemoryConsolidation(this.unifiedMemory);
+    // Phase 18 Move 4 (G4): project-scoped repository knowledge — durable
+    // facts from the repository index plus caller-captured conventions /
+    // failure patterns, keyed by workspace root, retrieved through the same
+    // consolidation layer (the 'project' provider registers on the catalog).
+    this.projectMemory = new ProjectMemoryBridge({ catalog: this.unifiedMemory });
     // Phase 14 Move 5: terminal Task outcomes feed the learning pipeline —
     // each completed/failed canonical task queues a self-review whose lesson
     // flows through the existing approval queue into retrievable memory.
@@ -2372,6 +2383,16 @@ export class AgentRunner {
                 sessionId,
                 taskId: missionTaskId || undefined
               });
+              // Phase 18 Move 4 (G4) — capture durable project facts from
+              // the index (idempotent; no disk write when unchanged).
+              try {
+                const index = this.contextEngine.indexRepository(repoWorkspace);
+                if (index && typeof (index as any).version === 'number') {
+                  this.projectMemory?.captureIndexFacts(index as any);
+                }
+              } catch (factError: any) {
+                console.warn('[ProjectMemory] index-facts capture failed:', factError?.message || factError);
+              }
               // Event-driven warming: refresh as soon as a mutating tool
               // completes instead of waiting for the next turn.
               if (!this.repoWarmers.has(sessionId)) {

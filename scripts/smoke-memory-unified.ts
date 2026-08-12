@@ -409,6 +409,67 @@ async function main() {
   assert(restartHits.some(r => r.id === lessonRuleId),
     'restart retrieval finds the learned knowledge without the old process alive');
 
+  // --- Phase 18 Move 4 — project-scoped repository knowledge (G4) -------
+  // The 'project' provider registers on the catalog; index facts and
+  // caller-captured conventions/failure patterns are durable per workspace
+  // root and retrieved through the consolidation layer.
+  const { ProjectMemoryBridge } = await import('../src/core/memory-unified/project-memory');
+  const { buildPersistentIndex } = await import('../src/core/context/repo-index');
+  const projData = path.join(tempDir, 'memory', 'project-memory.json');
+  const bridge = new ProjectMemoryBridge({ catalog, dataPath: projData });
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gitu-proj-repo-'));
+  let projFactsId = '';
+  let projHits: Array<{ metadata?: Record<string, unknown> }> = [];
+  let restartedBridge: any;
+  try {
+    fs.mkdirSync(path.join(repoRoot, 'src', 'auth'), { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, 'src/auth/auth.ts'), 'export function authenticate() { return true; }\n');
+    fs.writeFileSync(path.join(repoRoot, 'src/auth/auth.test.ts'), 'test("auth works", () => {});\n');
+    fs.writeFileSync(path.join(repoRoot, 'tsconfig.json'), '{}\n');
+    const index = buildPersistentIndex(repoRoot);
+    const facts = bridge.captureIndexFacts(index);
+    assert(facts, 'index facts captured');
+    projFactsId = facts!.id;
+    assert(facts!.content.includes('Languages:'), 'facts carry the language breakdown');
+    assert(facts!.content.includes('1 test file'), 'facts carry test counts');
+
+    const failure = bridge.capture({
+      workspaceRoot: repoRoot,
+      kind: 'failure',
+      title: 'Known failure: flaky auth test',
+      content: 'The auth test flakes under load; rerun before blaming the fix.',
+      origin: 'lesson',
+      importance: 4,
+      confidence: 0.8
+    });
+
+    // The 'project' provider is live on the unified catalog.
+    const projectRecords = catalog.records({ source: 'project' });
+    assert(projectRecords.some(r => r.id === `project:${projFactsId}`), 'index facts reach the catalog');
+    assert(projectRecords.some(r => r.id === `project:${failure.id}`), 'captured knowledge reaches the catalog');
+
+    // Retrieval through the consolidation layer, scoped to the workspace
+    // root. A fresh clock (not the smoke's advanced fakeNow) so the just-
+    // captured records are not TTL-expired on first retrieval.
+    const projectConsolidation = new MemoryConsolidation(catalog);
+    projHits = bridge.retrieve(repoRoot, 'auth test flakes', { layer: projectConsolidation });
+    assert(projHits.some(r => r.metadata?.title === 'Known failure: flaky auth test'), 'retrieval finds the failure pattern');
+    assert(projHits.some(r => r.metadata?.title === 'Repository facts'), 'retrieval finds the architecture facts');
+
+    // Idempotent index capture: a refresh never grows the store.
+    const before = bridge.store.list(repoRoot).length;
+    bridge.captureIndexFacts(index);
+    assert.strictEqual(bridge.store.list(repoRoot).length, before, 'index-facts capture is idempotent');
+
+    // Durability: a fresh bridge over the same file recalls the entries.
+    restartedBridge = new ProjectMemoryBridge({ dataPath: projData });
+    const recalled: Array<{ title: string }> = restartedBridge.store.list(repoRoot);
+    assert(recalled.some(e => e.title === 'Repository facts'), 'project facts durable across instances');
+    assert(recalled.some(e => e.title === 'Known failure: flaky auth test'), 'captured knowledge durable across instances');
+  } finally {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+  }
+
   console.log(JSON.stringify({
     success: true,
     tempDir,
@@ -443,6 +504,13 @@ async function main() {
       restartEpisode: restartedEpisodes.some(r => r.metadata?.taskId === lessonTask.id),
       restartLesson: Boolean(restartedRule),
       restartRetrieval: restartHits.some(r => r.id === lessonRuleId)
+    },
+    projectMemory: {
+      factsCaptured: Boolean(projFactsId),
+      catalogExposed: catalog.records({ source: 'project' }).length >= 2,
+      retrievalScoped: projHits.some(r => r.metadata?.title === 'Known failure: flaky auth test'),
+      idempotent: bridge.store.list(repoRoot).length >= 2,
+      durable: restartedBridge.store.list(repoRoot).length >= 2
     }
   }, null, 2));
 }

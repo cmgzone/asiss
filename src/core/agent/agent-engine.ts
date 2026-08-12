@@ -39,6 +39,7 @@ import {
 import type { Agent, AgentInput } from './agent-types';
 import { profileFromTask, type TaskProfile } from './task-profile';
 import type { Task, TaskKind } from '../task';
+import type { ContextEngine } from '../context';
 import { SkillRegistry } from '../skills';
 import { ToolEngine } from '../tools';
 import { TaskEngine, taskEngine as defaultTaskEngine } from '../task';
@@ -126,6 +127,13 @@ export interface AgentEngineRuntime {
    * decides, the memory system executes.
    */
   retrieveMemory?: (query: string, opts: RetrieveOptions) => RetrievedMemory[] | Promise<RetrievedMemory[]>;
+  /**
+   * Phase 18 Move 4 (G3) — repository context for child missions. When the
+   * agent's contextPolicy includes 'repo' and the runtime wires a
+   * ContextEngine, the child system prompt renders the warmed, goal-matched
+   * repository section — the AUDIT_7 D2 deferred source is now live.
+   */
+  contextEngine?: ContextEngine;
 }
 
 export class AgentEngine {
@@ -529,7 +537,7 @@ export class AgentEngine {
     return Array.from(byName.values());
   }
 
-  private buildChildSystemPrompt(agent: Agent, tools: Tool[], memorySection: string): string {
+  private buildChildSystemPrompt(agent: Agent, tools: Tool[], memorySection: string, repoSection = ''): string {
     const toolList = tools.length
       ? tools.map(tool => `- ${tool.name}: ${tool.description || 'No description'}`).join('\n')
       : '- No tools allowed for this delegation.';
@@ -544,6 +552,7 @@ export class AgentEngine {
       'Allowed tools:',
       toolList,
       ...(memorySection ? ['', memorySection] : []),
+      ...(repoSection ? ['', repoSection] : []),
       '',
       'When finished, respond with one JSON object and no extra prose:',
       '{',
@@ -579,6 +588,30 @@ export class AgentEngine {
     ].filter(Boolean).join('\n');
   }
 
+  /**
+   * Phase 18 Move 4 (G3) — the child's repository context per the agent's
+   * contextPolicy 'repo' source: warm (throttled) then render the
+   * goal-matched repository section through the runtime's ContextEngine —
+   * the same section the mission loop renders. Never throws — repo context
+   * is advisory.
+   */
+  private buildChildRepoSection(
+    runtime: AgentEngineRuntime,
+    workspace: string | undefined,
+    goal: string,
+    taskId: string,
+    sessionId?: string
+  ): string {
+    try {
+      if (!workspace || !runtime.contextEngine) return '';
+      const engine = runtime.contextEngine;
+      engine.refreshRepository(workspace, { sessionId, taskId });
+      return engine.repositorySection(workspace, goal);
+    } catch {
+      return '';
+    }
+  }
+
   /** Render the child turn context: prior assistant content + tool results. */
   private buildChildConversation(history: Array<{ role: string; content: string }>): string {
     if (!history.length) return '';
@@ -610,17 +643,21 @@ export class AgentEngine {
       priorOutcomes: Array<{ attempt: number; summary: string }>;
     }
   ): Promise<{ success: boolean; result: AgentResult }> {
-    // Phase 16 Move 4 (D2/D5) — the child context assembles from the agent's
-    // contextPolicy sources: task/instructions/history are structural (the
-    // task contract + loop contract — always rendered), 'memory' gates the
-    // unified-memory section (memoryPolicy drives retrieval), 'attempts' gates
-    // prior-attempt outcome lines, 'repo' is deferred (needs ContextEngine in
-    // the child runtime — tracked in AUDIT_7 D2).
+    // Phase 16 Move 4 (D2/D5) + Phase 18 Move 4 (G3) — the child context
+    // assembles from the agent's contextPolicy sources: task/instructions/
+    // history are structural (the task contract + loop contract — always
+    // rendered), 'memory' gates the unified-memory section (memoryPolicy
+    // drives retrieval), 'attempts' gates prior-attempt outcome lines, and
+    // 'repo' (deferred in AUDIT_7 D2) now renders the warmed, goal-matched
+    // repository section when the runtime wires a ContextEngine.
     const sources = new Set<string>(agent.contextPolicy?.sources || ['task', 'instructions', 'history']);
     const memorySection = sources.has('memory') && (agent.memoryPolicy?.injectLimit || 0) > 0 && runtime.retrieveMemory
       ? await this.buildChildMemorySection(runtime, agent, params.task, params.sessionId)
       : '';
-    const systemPrompt = this.buildChildSystemPrompt(agent, params.allToolSchemas, memorySection);
+    const repoSection = sources.has('repo') && runtime.contextEngine
+      ? this.buildChildRepoSection(runtime, params.workspacePath, params.task, childTaskId, params.sessionId)
+      : '';
+    const systemPrompt = this.buildChildSystemPrompt(agent, params.allToolSchemas, memorySection, repoSection);
     const priorOutcomes = sources.has('attempts') ? params.priorOutcomes : [];
     const initialUser = this.buildChildTaskPrompt(
       params.task,

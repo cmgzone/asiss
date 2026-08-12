@@ -8,7 +8,7 @@
  */
 
 export type MemoryType = 'working' | 'episodic' | 'semantic' | 'procedural' | 'project' | 'task';
-export type MemorySource = 'conversation' | 'learning' | 'task' | 'user' | 'agent' | 'checkpoint';
+export type MemorySource = 'conversation' | 'learning' | 'task' | 'user' | 'agent' | 'checkpoint' | 'project';
 export type MemoryScope = 'global' | 'project' | 'session' | 'task' | 'agent';
 export type MemoryImportance = 0 | 1 | 2 | 3 | 4 | 5;
 export type MemoryConfidence = number;

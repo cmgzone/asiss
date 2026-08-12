@@ -23,6 +23,7 @@
  */
 
 import { TaskEventBus, taskEventBus } from '../task/task-events';
+import { analyzeChangeImpact, ChangeImpact, ChangeImpactOptions, emptyChangeImpact } from './change-impact';
 import { buildContextPackage, ContextMemory, ContextPackage, ContextSourceInput, ContextTool } from './context-builder';
 import { estimateTokens, truncateChars } from './context-budget';
 import { Summarizer } from './summarizer';
@@ -35,6 +36,9 @@ import {
   RepositoryIndex
 } from './repository-context';
 import {
+  DependentsOptions,
+  Dependent,
+  findDependents,
   getRepositoryIndex,
   matchBySymbols,
   PersistentIndexOptions,
@@ -375,6 +379,34 @@ ${hints}` : staticText;
     const index = this.indexRepository(root);
     if (!index) return '';
     return renderGoalFileHints(index, goal, { maxFiles: this.config.repository?.goalHints?.maxFiles ?? 8 });
+  }
+
+  /**
+   * Phase 18 Move 2 — reverse dependency lookup: files that import the
+   * target (file path or module). Uses the persistent index's `importers`
+   * map — persisted since Phase 8 but never queried — resolved per
+   * importing file (relative specifiers against the importer's directory,
+   * bare specifiers matched tolerantly by basename/path). `transitive`
+   * walks dependents of dependents (the dependency closure Change-impact
+   * Move 3 builds on). Empty for lightweight indexes or no dependents.
+   */
+  dependents(root: string, target: string, options: DependentsOptions = {}): Dependent[] {
+    const index = this.indexRepository(root);
+    if (!index || !isPersistentIndex(index)) return [];
+    return findDependents(index, target, options);
+  }
+
+  /**
+   * Phase 18 Move 3 — change-impact analysis for a changed file/module:
+   * the target's exported API surface, the dependency closure (direct
+   * first, then transitive when requested), and the ranked regression
+   * surface of sibling + goal tests. Built on the Move 2 dependents API;
+   * empty impact for lightweight indexes or unknown targets.
+   */
+  changeImpact(root: string, target: string, options: ChangeImpactOptions = {}): ChangeImpact {
+    const index = this.indexRepository(root);
+    if (!index || !isPersistentIndex(index)) return emptyChangeImpact(target);
+    return analyzeChangeImpact(index, target, options);
   }
 
   /** Relevant files for the goal: symbol-aware when the index is persistent. */

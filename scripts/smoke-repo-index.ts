@@ -857,6 +857,105 @@ async function main(): Promise<void> {
     assert.ok(!fs.existsSync('current_task.json'), 'current_task.json never written');
   }
 
+  // ---- 19. Phase 18 Move 2 — queried dependents API (reverse deps) ----
+  // The persisted importers map becomes a queried capability: who imports
+  // this file/module? Relative specifiers resolve against each importer's
+  // directory; bare specifiers match tolerantly by basename/path.
+  {
+    const root = tmpRepo('repo-index-19-');
+    const dataRoot = tmpRepo('repo-data-19-');
+    try {
+      write(root, 'src/auth/auth.ts', 'export function authenticate() { return true; }\n');
+      write(root, 'src/app.ts', "import { authenticate } from './auth/auth';\nexport function main() { authenticate(); }\n");
+      write(root, 'src/payments/billing.ts', "import { authenticate } from '../auth/auth';\nexport function charge() { authenticate(); }\n");
+      write(root, 'src/auth/auth.test.ts', "import { authenticate } from './auth';\ntest('auth works', () => { authenticate(); });\n");
+      write(root, 'src/client.ts', "import 'auth';\nexport const clientReady = 1;\n");
+      write(root, 'src/utils/format.ts', "import { fmt } from '../format-helpers';\nexport const formatted = fmt;\n");
+      write(root, 'src/server.ts', "import { main } from './app';\nexport function serve() { main(); }\n");
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+
+      const deps = engine.dependents(root, 'src/auth/auth.ts');
+      const paths = deps.map((d) => d.path);
+      assert.ok(paths.includes('src/app.ts'), 'same-dir relative import resolved');
+      assert.ok(paths.includes('src/payments/billing.ts'), 'cross-directory ../ import resolved');
+      assert.ok(paths.includes('src/auth/auth.test.ts'), 'sibling ./auth import resolved');
+      assert.ok(paths.includes('src/client.ts'), 'bare alias specifier matched tolerantly');
+      assert.ok(!paths.includes('src/utils/format.ts'), 'unrelated module is not a dependent');
+      const test = deps.find((d) => d.path === 'src/auth/auth.test.ts');
+      assert.ok(test && test.isTest, 'dependent carries isTest flag');
+      assert.ok(test && typeof test.specifier === 'string' && test.specifier === './auth', 'dependent carries the written specifier');
+      assert.strictEqual(new Set(paths).size, paths.length, 'dependents deduped');
+
+      const transitive = engine.dependents(root, 'src/auth/auth.ts', { transitive: true });
+      const tPaths = transitive.map((d) => d.path);
+      assert.ok(tPaths.includes('src/server.ts'), 'transitive dependent (via app.ts) included');
+      assert.ok(tPaths.indexOf('src/app.ts') < tPaths.indexOf('src/server.ts'), 'transitive hops ordered after direct');
+
+      assert.deepStrictEqual(engine.dependents(root, 'src/does-not-exist.ts'), [], 'unknown target -> no dependents');
+      assert.strictEqual(engine.dependents(root, 'src/auth/auth.ts', { limit: 1 }).length, 1, 'limit caps direct dependents');
+
+      const light = new ContextEngine({ config: { repository: { dataRoot, persistent: false } } });
+      assert.deepStrictEqual(light.dependents(root, 'src/auth/auth.ts'), [], 'lightweight index has no dependents (persistent-only)');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+    console.log('19. queried dependents API (reverse deps)          ok');
+  }
+
+  // ---- 20. Phase 18 Move 3 — change-impact analysis (regression surface) ----
+  // target -> dependents (direct first, then transitive) -> exported API
+  // surface -> sibling + goal tests ranked as the regression surface.
+  {
+    const root = tmpRepo('repo-index-20-');
+    const dataRoot = tmpRepo('repo-data-20-');
+    try {
+      write(root, 'src/auth/auth.ts', 'export function authenticate() { return true; }\n');
+      write(root, 'src/app.ts', "import { authenticate } from './auth/auth';\nexport function main() { authenticate(); }\n");
+      write(root, 'src/payments/billing.ts', "import { authenticate } from '../auth/auth';\nexport function charge() { authenticate(); }\n");
+      write(root, 'src/server.ts', "import { main } from './app';\nexport function serve() { main(); }\n");
+      write(root, 'src/auth/auth.test.ts', "import { authenticate } from './auth';\ntest('auth works', () => { authenticate(); });\n");
+      write(root, 'src/app.test.ts', "import { main } from './app';\ntest('app works', () => { main(); });\n");
+      write(root, 'src/payments/billing.test.ts', "import { charge } from './billing';\ntest('billing works', () => { charge(); });\n");
+      write(root, 'src/server.test.ts', "import { serve } from './server';\ntest('server works', () => { serve(); });\n");
+      write(root, 'src/features/login.test.ts', "test('login flow', () => {});\n");
+      write(root, 'src/utils/format.ts', "import { fmt } from '../format-helpers';\nexport const formatted = fmt;\n");
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+
+      const impact = engine.changeImpact(root, 'src/auth/auth.ts');
+      assert.ok(impact.exportedSymbols.includes('authenticate'), 'target API surface listed');
+      const dPaths = impact.dependents.map((d) => d.path);
+      assert.deepStrictEqual(dPaths, ['src/app.ts', 'src/auth/auth.test.ts', 'src/payments/billing.ts'], 'direct dependents, sorted by path');
+      assert.ok(impact.dependents.every((d) => d.depth === 1), 'non-transitive impact is all direct');
+      assert.ok(!dPaths.includes('src/utils/format.ts'), 'unrelated module not impacted');
+      const surface = impact.regressionSurface.map((t) => t.path);
+      assert.ok(surface.includes('src/auth/auth.test.ts'), "target's own sibling test in surface");
+      assert.ok(surface.includes('src/app.test.ts'), 'dependent app.ts sibling test in surface');
+      assert.ok(surface.includes('src/payments/billing.test.ts'), 'dependent billing.ts sibling test in surface');
+      assert.ok(!surface.includes('src/server.test.ts'), 'transitive sibling test NOT in direct surface');
+      assert.ok(!surface.includes('src/features/login.test.ts'), 'goal-unrelated test NOT in goal-less surface');
+      assert.ok(impact.detail.includes('Change impact for src/auth/auth.ts'), 'detail renders the target');
+
+      const transitive = engine.changeImpact(root, 'src/auth/auth.ts', { transitive: true });
+      const tDepths = transitive.dependents.map((d) => `${d.path}:${d.depth}`);
+      assert.ok(tDepths.includes('src/server.ts:2'), 'transitive dependent carries depth 2');
+      assert.ok(tDepths.indexOf('src/app.ts:1') < tDepths.indexOf('src/server.ts:2'), 'direct before transitive');
+      assert.ok(transitive.regressionSurface.some((t) => t.path === 'src/server.test.ts'), 'transitive sibling test joins the surface');
+
+      const goalBias = engine.changeImpact(root, 'src/auth/auth.ts', { goal: 'fix the login flow' });
+      assert.ok(goalBias.regressionSurface.some((t) => t.path === 'src/features/login.test.ts'), 'goal surfaces the related login test');
+
+      assert.deepStrictEqual(engine.changeImpact(root, 'src/nope.ts').dependents, [], 'unknown target -> no dependents');
+      assert.strictEqual(engine.changeImpact(root, 'src/nope.ts').regressionSurface.length, 0, 'unknown target -> no regression surface');
+      const light = new ContextEngine({ config: { repository: { dataRoot, persistent: false } } });
+      assert.deepStrictEqual(light.changeImpact(root, 'src/auth/auth.ts').dependents, [], 'lightweight index -> empty impact');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+    console.log('20. change-impact analysis (regression surface)     ok');
+  }
+
   console.log(JSON.stringify({
     symbols: true,
     imports: true,
@@ -875,7 +974,9 @@ async function main(): Promise<void> {
     warmthSkill: true,
     diagnoseRecovery: true,
     eventProjection: true,
-    taskMemoryFold: true
+    taskMemoryFold: true,
+    dependentsQuery: true,
+    changeImpact: true
   }));
 }
 

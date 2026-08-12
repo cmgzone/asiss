@@ -32,7 +32,7 @@
 | 15 | All autonomous work -> Tasks | Every origin funnels through canonical Tasks; skill creation + external research wrapped, legacy fallbacks retired (docs/hermes/AUDIT_6.md) | [x] |
 | 16 | Unified AgentEngine | One engine; agents are configurations (profiles, roles, model/tool/memory policies, handoffs) — one Agent contract, one canonical execution, policies consumed by both paths, handoff enforcement, AgentRun retirement verified, permanent verification gate (docs/hermes/AUDIT_7.md) | [x] |
 | 17 | Self-repair coding loop | code -> test -> diagnose -> repair -> verify with failure memory (docs/hermes/AUDIT_8.md) | [x] |
-| 18 | Repository intelligence | Index/symbol/dependency graphs, change-impact analysis, minimal context | [ ] |
+| 18 | Repository intelligence | Index/symbol/dependency graphs, change-impact analysis, minimal context (docs/hermes/AUDIT_9.md) | [~] |
 | 19 | Verification & quality gates | Deterministic gates: lint/typecheck/tests/build/security/diff + acceptance criteria + evidence | [ ] |
 | 20 | Autonomous operating system | Integration: Goal -> Plan -> Task -> Agent -> Execute -> Verify -> Repair -> Complete -> Learn | [ ] |
 
@@ -1044,7 +1044,88 @@ on clean re-runs. **Phase 17 is complete:** the self-repair loop runs as one
 authority — Task → runMission → bounded turns → verification (PASS →
 complete; FAIL → diagnose → retry/resume → runMission again) — with
 `TaskRepairer` reserved as a declared-only future seam no production origin
-wires (Gate 8). Next per the roadmap: Phase 19 deterministic quality gates,
-decided by the next architecture audit.
+wires (Gate 8).
+
+**Phase 18 — Repository intelligence (in progress, docs/hermes/AUDIT_9.md).**
+
+> Index/symbol/dependency graphs, change-impact analysis, minimal context.
+> The Phase 17 closeout pointed at Phase 19 next, but the audit found Phase
+> 18's row still `[ ]` while Phases 7-11 had already built the foundation
+> underneath it — so repository intelligence proceeds FIRST, before quality
+> gates. The evidence matrix (AUDIT_9 §3) is the source of truth; the row
+> flips [~] on this audit and [x] only when every verified gap is closed.
+
+**Phase 18, Move 1 — the repository-intelligence audit (done, docs only).**
+`docs/hermes/AUDIT_9.md` maps the Phase 18 target against what exists and
+separates implementation from documentation. Verified-real foundation
+(Phases 7-11): the persistent symbol-aware index (repo-index.ts, persisted
+`repo-index/<hash>.json`, load → incremental refresh → save), incremental
+refresh (mtime/size diff, add/remove, cache invalidation), symbol + goal
+matching (matchBySymbols, resolveSymbols, /symbol skill), warmth (throttled
+on-demand + event-driven warming, telemetry, /warmth skill), and test
+intelligence (matchedTestFiles, detectTestCommand, runGoalTests) — proven
+by smoke:repo-index (18 sections) and smoke:runtime. Verified gaps: **G1**
+the `importers` dependency graph is persisted but never queried (write-only);
+**G2** change-impact analysis is missing; **G3** the `'repo'` ContextPolicy
+source stays deferred for child agents (AUDIT_7 D2); **G4** project-scoped
+memory is a declared type with no producer; **G5** symbols are regex-shallow
+(4 kinds, no references/callers/callees); **G6** architecture discovery is
+missing; **G7** context is relevance-ranked + budgeted, not
+minimal-dependency-selected; **G8** no permanent Phase 18 gate.
+
+**Phase 18, Move 2 — the queried dependents API (done).**
+`ContextEngine.dependents(root, target, { transitive, limit })` (repo-index
+`findDependents`) turns the persisted-but-never-queried `importers` reverse
+index into a real capability — no new index authority, no rebuild
+semantics. Relative specifiers resolve against each importing file's
+directory (so `'./auth/auth'`, `'../auth/auth'`, and `'./auth'` from
+different dirs all reach `src/auth/auth.ts`); bare specifiers match
+tolerantly by basename/path; results are deduped, sorted, and carry the
+written specifier + isTest/isConfig; `transitive` walks the dependency
+closure that Move 3's change-impact builds on. Verified by `tsc --noEmit`
+clean + `smoke:repo-index` section 19 (direct/cross-dir/sibling/bare
+resolution, non-dependent exclusion, flags + specifier, dedupe, transitive
+closure, unknown-target [], limit, lightweight opt-out) + the battery green
+in one pass (context, turn-contract, phase16, baseline, terminal-paths,
+runtime).
+
+**Phase 18, Move 3 — change-impact analysis (done).**
+`ContextEngine.changeImpact(root, target, { transitive, goal })`
+(`change-impact.ts` `analyzeChangeImpact`) answers the audit's chain on the
+Move 2 dependents API — target → dependents (direct, then transitive
+closure with per-file depth) → affected API surface (the target's and each
+dependent's exported symbols) → ranked regression surface (sibling tests
+of the target + every impacted non-test file via the matchedTestFiles
+stemOf rule, plus goal-surfaced tests via the same stemOverlap rule) —
+with a human-readable `detail` ready for context/skills. No new index
+authority: the whole capability is the Move 2 API + existing test-matching
+rules. Verified by `tsc --noEmit` clean + `smoke:repo-index` section 20
+(API surface, direct-only ordering, unrelated exclusion, target/dependent
+sibling tests, transitive depth + ordering + surface extension, goal bias,
+unknown-target and lightweight opt-outs) + the battery green in one pass
+(context, turn-contract, phase16, baseline, terminal-paths, runtime).
+
+**Phase 18, Move 4 — child repo context + project memory (done).**
+`AgentEngineRuntime` gains a `contextEngine` slot and `runChildMission`
+renders the warmed, goal-matched repository section for children whose
+`contextPolicy.sources` includes `'repo'` — the AUDIT_7 D2 deferral is
+closed, `'repo'` stays agent-opt-in. `project-memory.ts` lands the durable
+`ProjectMemoryStore` + `ProjectMemoryBridge` (Phase 18 G4): per-root
+architecture facts derived from the index, generic capture for
+conventions/practices/failure patterns, a `'project'` provider on the
+unified catalog, and retrieval scoped to the workspace root through the
+consolidation layer; the runner wires the bridge and captures index facts
+on main-loop warm. Verified by `tsc --noEmit` clean + `smoke:agent-execution`
+section 15 (repo source renders the section, control agent without it gets
+none) + `smoke:memory-unified` (facts captured, catalog exposure, scoped
+consolidation retrieval, idempotent capture, durability across instances)
++ the full battery green in one pass (runtime e2e included — the runner
+constructs the new wiring).
+
+**Phase 18 move plan (from AUDIT_9 §5).** Move 5 — convention-based
+architecture discovery (entry points, workers/queues, test infra,
+integrations). Move 6 — deeper symbol intelligence (evidence-based: parser
+vs usage-reference map). Move 7 — permanent `smoke:phase18` gate + minimal
+dependency-closed context selector.
 
 

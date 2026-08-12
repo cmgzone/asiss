@@ -12,6 +12,7 @@ export * from './summarizer';
 export * from './repository-context';
 export * from './repo-index';
 export * from './repo-watcher';
+export * from './change-impact';
 export * from './verify-then-retry';
 export * from './context-builder';
 export * from './context-engine';
