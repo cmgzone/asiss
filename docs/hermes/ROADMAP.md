@@ -399,5 +399,20 @@ survives for verification-pending). `smoke:runtime` (6-turn e2e),
 
 **Phase 12, Move 4c (planned) — migrate AgentRunner's loop body.** Replace the
 mission loop's model+tool batch body with the `runMission` iterate hook so
-AgentRunner stops owning the loop, keeping the 6-turn e2e green. Then Move 4d
-removes the runner's now-redundant loop scaffolding.
+AgentRunner stops owning the loop. Concretely, the runner's current inner
+body — context construction → model call → tool batch execution → tool-role
+recording — becomes the `iterate` closure returning
+`{ content, usedTools, model, progress, lastBatchHadFailure, toolRequired,
+verificationRequired }`; the outer `for(;;)`/auto-continue/step-limit scaffolding
+maps onto `runMission`'s `budget` + `stoppedByStepLimit`. Two classes of edge
+terminals currently bypass the engine (direct `deliverFinalResponse` + `break`):
+suppressed-tool-budget stops and repeated-tool-batch stops at lines ~2182
+and ~2281 in runner.ts. Move 4c must route those through the engine's `blocked`
+verdict (behavior change — the e2e cannot exercise them; verify manually).
+`onTurn` renders the continue/verify evidence memories; post-driver code renders
+assistant-final memory + `deliverFinalResponse` for complete/blocked. Keep the
+6-turn e2e green. Then Move 4d removes the runner's now-redundant scaffolding.
+
+**Phase 12, Move 4d (planned) — strip dead loop scaffolding.** Remove the
+runner's `for(;;)`/inner-`for` skeleton, `stoppedByStepLimit`, `missionTurn`,
+and per-iteration counters that `runMission` now owns, once 4c proves green.
