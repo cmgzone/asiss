@@ -46,6 +46,7 @@
     "smoke:agent-engine": "ts-node scripts/smoke-agent-engine.ts",
     "smoke:agent-execution": "ts-node scripts/smoke-agent-execution.ts",
     "smoke:agent-task-profile": "ts-node scripts/smoke-agent-task-profile.ts",
+    "smoke:scheduler": "ts-node scripts/smoke-scheduler.ts",
     "smoke:baseline": "ts-node scripts/smoke-baseline.ts",
     "smoke:tools": "ts-node scripts/smoke-tools.ts",
     "smoke:policy": "ts-node scripts/smoke-policy.ts",

@@ -47,7 +47,7 @@
 | 9 | **Retries** | none — `runJob` swallows `onRun` errors, one-shot disables / recurring reschedules | preserve: pass `retries: 0` to executeTask | none |
 | 10 | **Failure handling** | swallowed at scheduler level; mission failure recorded on the Task | Task outcome recorded; job failure traceable via `metadata.canonicalTaskId` | link job → Task |
 | 11 | **Result delivery** | mission streams the response into the session | deliver the child `AgentResult` output to the session after completion | `gateway.sendResponse(sessionId, output)` |
-| 12 | **Overlap** | no guard — a recurring timer can fire while a prior run is in flight | preserve (executeTask per call; timer may still overlap an in-flight run) | documented, not fixed in this step |
+| 12 | **Overlap** | serial by construction — the recurring timer is re-armed only after `onRun` completes, but re-entry edge paths (start() re-entry, future re-arms) had no guard | `SchedulerManager` in-flight guard: a `running` Set skips + re-arms a tick whose previous run is still executing | landed after the audit (smoke:scheduler) |
 
 ---
 
@@ -68,10 +68,11 @@
 - **Missed schedules**: one-shots with a past `runAt` fire once on restart
   (`delay` clamps to 0); recurring jobs fire once, no catch-up. The migration
   does not touch timing, so this behavior is unchanged.
-- **Overlap**: recurring runs can overlap today (no lock). executeTask runs
-  sequentially per call, so the canonical path introduces no *new* overlap;
-  a future guard (skip if the job has an in-flight Task) is deliberately out
-  of scope for the smallest migration.
+- **Overlap**: the recurring path is serial by construction (the timer is
+  re-armed only after the run completes), and an explicit in-flight guard
+  now hardens re-entry edge paths (`start()` re-entry, any future re-arm): a
+  tick whose previous run is still executing is skipped and re-armed for the
+  next interval, bumping `skippedRuns` instead of overlapping.
 - **Cancellation**: `cancel()` prevents rescheduling; in-flight runs finish.
   Same semantics after migration.
 - **Retries**: none today — preserved with `retries: 0`.
@@ -104,6 +105,7 @@
 Concretely: `smoke:agent-execution` gains a section asserting `executeTask`
 with `kind: 'scheduled'` + `metadata.schedulerJobId` produces a COMPLETED
 child Task of kind `'scheduled'` with the linkage intact; `smoke:agent-task-profile`
-gains a task-scope `'scheduled'` selection check. The scheduler's own
-timers/persistence are untouched (verified by `tsc --noEmit` + the existing
-smoke battery).
+gains a task-scope `'scheduled'` selection check; `smoke:scheduler` proves the
+overlap guard (in-flight re-entry is skipped, `skippedRuns` bumps, the job
+reschedules and runs again after completion). Verified by `tsc --noEmit` + the
+existing smoke battery.

@@ -556,8 +556,12 @@ back to an ephemeral Scheduled Worker agent), `metadata.schedulerJobId` /
 `schedulerJobType` linkage on the child Task, and the completed result
 delivered back into the job's session. Scheduler semantics are preserved
 byte-for-byte: timing, scheduler.json persistence, cancellation, no retries
-(`retries: 0`), and the same overlap behavior; on any failure the legacy
-mission path takes over. `AgentTaskScope` gained 'scheduled'. Verified by
-smoke:agent-execution section 7 (kind-'scheduled' child Task + linkage),
-smoke:agent-task-profile (scheduled task-scope selection), and all prior
-smokes unchanged.
+(`retries: 0`), and an explicit in-flight overlap guard — a tick whose
+previous run is still executing is skipped and re-armed (bumping `skippedRuns`,
+so the cadence shifts instead of overlapping; the recurring path was already
+serial by construction, the guard hardens `start()`-re-entry and future
+re-arm paths). On any failure the legacy mission path takes over.
+`AgentTaskScope` gained 'scheduled'. Verified by smoke:agent-execution
+section 7 (kind-'scheduled' child Task + linkage), smoke:agent-task-profile
+(scheduled task-scope selection), `smoke:scheduler` (overlap guard), and all
+prior smokes unchanged.

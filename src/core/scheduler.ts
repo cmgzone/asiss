@@ -19,12 +19,17 @@ export type ScheduledJob = {
   createdAt: number;
   lastRunAt?: number;
   runCount: number;
+  /** Overlap-guard bookkeeping: how many ticks were skipped because the previous run was still in flight. */
+  skippedRuns?: number;
+  lastSkippedAt?: number;
 };
 
 export class SchedulerManager {
   private filePath: string;
   private jobs: Record<string, ScheduledJob> = {};
   private timers: Map<string, NodeJS.Timeout> = new Map();
+  /** Job ids whose onRun is currently executing (overlap guard). */
+  private running: Set<string> = new Set();
   private onRun: (job: ScheduledJob) => Promise<void>;
 
   constructor(onRun: (job: ScheduledJob) => Promise<void>, filename: string = 'scheduler.json') {
@@ -56,6 +61,9 @@ export class SchedulerManager {
   start() {
     for (const job of Object.values(this.jobs)) {
       if (!job.enabled) continue;
+      // Never re-arm a job whose previous run is still executing (e.g. when
+      // start() is re-entered mid-run): the overlap guard owns in-flight jobs.
+      if (this.running.has(job.id)) continue;
       this.scheduleTimer(job);
     }
   }
@@ -123,18 +131,38 @@ export class SchedulerManager {
   private async runJob(id: string) {
     const job = this.jobs[id];
     if (!job || !job.enabled) return;
-    job.lastRunAt = Date.now();
-    job.runCount = (job.runCount || 0) + 1;
-    this.jobs[id] = job;
-    this.save();
 
-    try {
-      await this.onRun(job);
-    } catch {
+    // Overlap guard: a recurring job never starts while its previous run is
+    // still in flight. Skip this tick and re-arm so the cadence shifts instead
+    // of the job being lost (one-shots have no timer during a run, so this only
+    // matters for recurring jobs and start()-re-entry edge paths).
+    if (this.running.has(id)) {
+      if (typeof job.intervalMs === 'number' && job.intervalMs > 0) {
+        job.skippedRuns = (job.skippedRuns || 0) + 1;
+        job.lastSkippedAt = Date.now();
+        job.runAt = Date.now() + job.intervalMs;
+        this.jobs[id] = job;
+        this.save();
+        this.scheduleTimer(job);
+        console.warn(`[Scheduler] Job '${job.id}' still running; skipped this tick (skippedRuns=${job.skippedRuns}).`);
+      }
+      return;
     }
 
-    const updated = this.jobs[id];
-    if (!updated || !updated.enabled) return;
+    this.running.add(id);
+    try {
+      job.lastRunAt = Date.now();
+      job.runCount = (job.runCount || 0) + 1;
+      this.jobs[id] = job;
+      this.save();
+
+      try {
+        await this.onRun(job);
+      } catch {
+      }
+
+      const updated = this.jobs[id];
+      if (!updated || !updated.enabled) return;
 
     if (typeof updated.intervalMs === 'number' && updated.intervalMs > 0) {
       updated.runAt = Date.now() + updated.intervalMs;
@@ -150,6 +178,9 @@ export class SchedulerManager {
     const t = this.timers.get(id);
     if (t) clearTimeout(t);
     this.timers.delete(id);
+    } finally {
+      this.running.delete(id);
+    }
   }
 }
 
