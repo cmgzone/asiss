@@ -433,9 +433,16 @@ execution-authority audit.
 > Phase 16 "AgentEngine", pulled forward into the current track.)
 
 - [~] Step 1 — Agent architecture audit (`AGENT_ARCHITECTURE_AUDIT.md`)
-- [ ] Step 2 — Canonical `Agent` + unified registry over the existing
-      stores (`src/core/agent/`: `agent.ts`, `agent-role.ts`,
-      `agent-capabilities.ts`, `agent-registry.ts`, `agent-policy.ts`)
+- [x] Step 2 — Canonical `Agent` + unified registry over the existing
+      stores (`src/core/agent/`: `agent-types.ts`, `agent.ts`-surface via
+      `agent-capabilities.ts`, `agent-registry.ts`, `agent-engine.ts`,
+      `agent-result.ts` + `index.ts`). Wrap-first: adapters normalize
+      custom agents / profiles / swarm agents / A2A cards; stores stay
+      authoritative. Selection is capability-only (no performance
+      ranking); `executeTask` is a guard that refuses a second execution
+      authority until Step 3 wires it onto TaskEngine. Verified by
+      `npm run smoke:agent-engine` (adapters, registry, selection,
+      result round-trip, guard, lifecycle) + `tsc --noEmit` clean.
 - [ ] Step 3 — `AgentEngine` (`agent-engine.ts`): registerAgent /
       getAgent / selectAgent / assignTask / executeTask / releaseAgent,
       execution delegated to TaskEngine

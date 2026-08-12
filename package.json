@@ -43,6 +43,7 @@
     "smoke:casual": "ts-node scripts/smoke-casual-conversation.ts",
     "smoke:repetition": "ts-node scripts/smoke-repetition-guard.ts",
     "smoke:terminal-paths": "ts-node scripts/smoke-terminal-paths.ts",
+    "smoke:agent-engine": "ts-node scripts/smoke-agent-engine.ts",
     "smoke:baseline": "ts-node scripts/smoke-baseline.ts",
     "smoke:tools": "ts-node scripts/smoke-tools.ts",
     "smoke:policy": "ts-node scripts/smoke-policy.ts",
