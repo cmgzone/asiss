@@ -2,15 +2,53 @@
  * Canonical AgentResult — Phase 13 Step 2.
  *
  * Agents return EVIDENCE, not "Done." The canonical shape maps to/from
- * the legacy `AgentTaskReport` (agent-run-manager) so wrap-first users
- * get the stable surface. `confidence` is OPTIONAL and deliberately not
- * produced by delegations yet — the measurement infrastructure lands
- * later; selection must not rank on invented numbers.
+ * the legacy `AgentTaskReport` shape so wrap-first users get the stable
+ * surface. `confidence` is OPTIONAL and deliberately not produced by
+ * delegations yet — the measurement infrastructure lands later; selection
+ * must not rank on invented numbers.
+ *
+ * Audit 5 — the legacy `AgentTaskReport` / `AgentToolCallRecord` types and
+ * the review-prompt renderer moved here from agent-run-manager.ts (deleted):
+ * the report is now rendered from canonical Tasks' `outcome.result`, with
+ * tool evidence read from `Task.toolExecutions`. One report shape, one
+ * authority.
  */
 
-import type { AgentTaskReport } from '../agent-run-manager';
+import type { Task } from '../task/task-types';
 
 export type AgentResultStatus = 'completed' | 'failed' | 'cancelled';
+
+export type AgentTaskReportStatus = 'completed' | 'failed';
+
+export interface AgentToolCallRecord {
+  id: string;
+  name: string;
+  arguments: any;
+  success: boolean;
+  output?: string;
+  error?: string;
+  timestamp: string;
+}
+
+export interface AgentTaskReport {
+  taskId: string;
+  agentId: string;
+  status: AgentTaskReportStatus;
+  summary: string;
+  workDone: string[];
+  filesChanged: string[];
+  toolCalls: AgentToolCallRecord[];
+  evidence: string[];
+  risks: string[];
+  nextSteps: string[];
+  finalOutput: string;
+  errorSummary?: string;
+  attempts?: number;
+  startedAt?: string;
+  completedAt?: string;
+  expectedOutput?: string;
+  reviewCriteria?: string[];
+}
 
 export interface AgentArtifactRef {
   name: string;
@@ -80,6 +118,69 @@ export function taskReportFromAgentResult(result: AgentResult): AgentTaskReport 
     startedAt: result.startedAt,
     completedAt: result.completedAt
   };
+}
+
+/**
+ * Normalize a canonical Task's stored outcome.result into an AgentTaskReport.
+ * The engine stores the legacy report shape on child Task outcomes (it is the
+ * stable surface); when a Task carries a raw AgentResult instead (future
+ * consumers), adapt it. Returns null when the outcome carries no report.
+ */
+export function taskReportFromOutcome(task: Task): AgentTaskReport | null {
+  const result: any = task.outcome?.result;
+  if (!result || typeof result !== 'object') return null;
+  if (Array.isArray(result.workDone) && typeof result.status === 'string') {
+    return result as AgentTaskReport;
+  }
+  if (typeof result.summary === 'string' && typeof result.agentId === 'string') {
+    return taskReportFromAgentResult(result as AgentResult);
+  }
+  return null;
+}
+
+/** The canonical Task kinds that represent delegated child work. */
+const DELEGATION_TASK_KINDS: Task['kind'][] = ['delegation', 'swarm', 'background', 'scheduled'];
+
+/**
+ * The terminal delegated child Tasks of a session, newest first. This is the
+ * canonical replacement for the legacy manager's listReports({ sessionId })
+ * used by the review-prompt consumers.
+ */
+export function delegationTasksForSession(tasks: Task[], sessionId?: string): Task[] {
+  return tasks
+    .filter(t => (sessionId ? t.sessionId === sessionId : true))
+    .filter(t => DELEGATION_TASK_KINDS.includes(t.kind))
+    .filter(t => t.status === 'COMPLETED' || t.status === 'FAILED' || t.status === 'CANCELLED')
+    .filter(t => taskReportFromOutcome(t) !== null)
+    .sort((a, b) =>
+      (b.timing?.completedAt ?? b.timing?.createdAt ?? 0) - (a.timing?.completedAt ?? a.timing?.createdAt ?? 0)
+    );
+}
+
+/**
+ * Render the "Agent Delegation Reports" review block from canonical Tasks.
+ * Produces the identical block the legacy AgentRunManager.buildReviewPrompt
+ * did, so the main agent's context and the delegate result's reviewPrompt
+ * change shape only in source, not in content.
+ */
+export function renderDelegationReports(tasks: Task[]): string {
+  const reports = tasks.map(t => taskReportFromOutcome(t)).filter((r): r is AgentTaskReport => r !== null);
+  if (reports.length === 0) return '';
+  const lines: string[] = [
+    'Agent Delegation Reports:',
+    'Review these child-agent reports before producing the final user response. Treat them as evidence to verify, not as unquestioned truth. Mention unresolved risks or failed delegated work when relevant.'
+  ];
+  for (const report of reports) {
+    lines.push(`- Task ${report.taskId} by ${report.agentId}: ${report.status}`);
+    if (report.summary) lines.push(`  Summary: ${report.summary}`);
+    if (report.workDone.length) lines.push(`  Work done: ${report.workDone.join('; ')}`);
+    if (report.filesChanged.length) lines.push(`  Files changed: ${report.filesChanged.join(', ')}`);
+    if (report.evidence.length) lines.push(`  Evidence: ${report.evidence.join('; ')}`);
+    if (report.risks.length) lines.push(`  Risks: ${report.risks.join('; ')}`);
+    if (report.nextSteps.length) lines.push(`  Next steps: ${report.nextSteps.join('; ')}`);
+    if (report.finalOutput) lines.push(`  Final output: ${report.finalOutput}`);
+  }
+  return lines.join('\n');
 }
 
 /**

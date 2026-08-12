@@ -24,7 +24,7 @@ import { AgentsMdSkill } from '../skills/agents-md';
 import { thinkingManager } from '../core/thinking';
 import { scratchpad } from '../core/scratchpad';
 import { agentSwarm } from '../core/agent-swarm';
-import { agentEngine, agentRegistry, type SelectResult, type TaskProfile } from '../core/agent';
+import { agentEngine, agentRegistry, delegationTasksForSession, renderDelegationReports, type SelectResult, type TaskProfile } from '../core/agent';
 import { TaskMemorySkill } from '../skills/task-memory';
 import { backgroundWorker, type BackgroundGoal } from '../core/background-worker';
 import { dndManager } from '../core/dnd';
@@ -52,7 +52,6 @@ import { SendEmailSkill } from '../skills/send-email';
 import { WebhookSkill } from '../skills/webhook';
 import { agentProfileManager } from '../core/agent-profiles';
 import { AgentProfilesSkill } from '../skills/agent-profiles';
-import { agentRunManager } from '../core/agent-run-manager';
 import { DelegateAgentSkill } from '../skills/delegate-agent';
 import { ExecuteWorkflowSkill } from '../skills/execute-workflow';
 import { McpAdminSkill } from '../skills/mcp-admin';
@@ -1066,7 +1065,10 @@ export class AgentRunner {
       result += `\n${strategyScores}\n`;
     }
 
-    const delegationReports = agentRunManager.buildReviewPrompt(sessionId);
+    // Audit 5: review prompt renders from the canonical delegated child Tasks
+    // (delegation/swarm/background/scheduled) instead of the removed
+    // agent_runs.json bookkeeping store.
+    const delegationReports = renderDelegationReports(delegationTasksForSession(taskEngine.list(), sessionId));
     if (delegationReports) {
       result += `\n${delegationReports}\n`;
     }

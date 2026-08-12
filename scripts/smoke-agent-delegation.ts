@@ -8,7 +8,6 @@ async function main() {
   process.chdir(tempDir);
 
   const { customAgentManager } = await import('../src/core/custom-agents');
-  const { agentRunManager } = await import('../src/core/agent-run-manager');
   const { SkillRegistry } = await import('../src/core/skills');
   const { taskEngine } = await import('../src/core/task');
   const { DelegateAgentSkill } = await import('../src/skills/delegate-agent');
@@ -103,20 +102,21 @@ async function main() {
   assert(result.report.finalOutput.includes('delegation proof'), 'final answer includes reviewed output');
   assert(result.report.toolCalls.some((call: any) => call.name === 'smoke_echo' && call.success), 'child tool call is recorded');
 
-  const savedRun = agentRunManager.getRun(result.taskId);
-  assert(savedRun?.report, 'child report is saved in manager');
-  assert(fs.existsSync(path.join(tempDir, 'agent_runs.json')), 'agent_runs.json is written');
-
-  const reviewPrompt = agentRunManager.buildReviewPrompt('smoke-session');
-  assert(reviewPrompt.includes('Reviewed child output: delegation proof'), 'main agent review prompt includes child output');
-
-  // Audit 4 (S1): the delegate result surfaces the canonical child Task ids so
-  // hosts (swarm, background, scheduler) can trace store records to the
-  // engine-owned execution instead of keeping an unlinked duplicate.
+  // Audit 4 (S1) + Audit 5: the report's taskId IS the canonical child Task
+  // id (real linkage — no synthetic run id, no agent_runs.json bookkeeping).
   assert(Array.isArray(result.canonicalTaskIds) && result.canonicalTaskIds.length === 1, 'canonical child task ids surfaced');
+  assert.strictEqual(result.taskId, result.canonicalTaskIds[0], 'report taskId is the canonical child task id');
   const canonicalChild = taskEngine.get(result.canonicalTaskIds[0]);
   assert(canonicalChild, 'canonical child task exists');
   assert.strictEqual(canonicalChild.kind, 'delegation', 'canonical child task kind is delegation');
+  assert.strictEqual(canonicalChild.assignedAgent, `custom:${agent.id}`, 'canonical child task is assigned to the canonical agent');
+
+  // Review prompt renders from the canonical child Task (agent-result.ts) and
+  // includes the child's final output — the old manager's buildReviewPrompt
+  // behavior, now engine-backed.
+  const reviewPrompt = result.reviewPrompt;
+  assert(reviewPrompt.includes('Reviewed child output: delegation proof'), 'main agent review prompt includes child output');
+  assert(reviewPrompt.includes(`Task ${canonicalChild.id}`), 'review prompt references the canonical child task');
 
   SkillRegistry.register({
     name: 'slow_probe',
@@ -198,7 +198,8 @@ async function main() {
     reviewPromptContainsFinalOutput: reviewPrompt.includes('delegation proof'),
     parallelChildren: parallelResult.results.length,
     parallelDurationMs,
-    maxActiveParallelTools
+    maxActiveParallelTools,
+    agentRunsJsonAbsent: !fs.existsSync(path.join(tempDir, 'agent_runs.json'))
   }, null, 2));
 }
 

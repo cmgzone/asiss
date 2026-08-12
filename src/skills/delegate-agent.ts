@@ -1,8 +1,9 @@
 /**
- * DelegateAgentSkill — Phase 13 Step 3 (migrated).
+ * DelegateAgentSkill — Phase 13 Step 3 (migrated); Audit 5 (shim removed).
  *
- * The legacy second execution authority (runChildLoop) is GONE. This skill is
- * now a thin shim over the canonical path:
+ * The legacy second execution authority (runChildLoop) is GONE, and so is the
+ * AgentRunManager compatibility shim. This skill is a thin adapter over the
+ * canonical path:
  *
  *   TaskEngine (parent mission) -> AgentEngine.executeTask -> child Task
  *   (kind 'delegation') driven by TaskEngine.runMission -> ToolEngine +
@@ -10,15 +11,19 @@
  *
  * The skill keeps only:
  *   - request parsing + agent resolution (custom/profile/swarm/ephemeral),
- *   - a compatibility shim that books the run in AgentRunManager (task_memory
- *     rendering, reviewPrompt, agent_runs.json consumers),
- *   - result formatting for the main agent.
+ *   - result formatting for the main agent: the AgentTaskReport is adapted
+ *     from the canonical AgentResult, tool evidence comes from the child
+ *     Tasks' toolExecutions, and the reviewPrompt renders from the child
+ *     Tasks (agent-result.ts) — the report's taskId is the canonical child
+ *     Task id, so there is no second bookkeeping store.
  *
  * Every loop/tool-dispatch/prompt-building/retry responsibility moved to the
  * engines per docs/hermes/CHILD_LOOP_MIGRATION_MAP.md. No deletion happened
  * until the new owner was verified by `npm run smoke:agent-execution`.
  */
-import { agentRunManager, AgentTaskReport, AgentToolCallRecord } from '../core/agent-run-manager';
+import { AgentTaskReport, AgentToolCallRecord, renderDelegationReports, taskReportFromAgentResult } from '../core/agent/agent-result';
+import type { ExecuteTaskResult } from '../core/agent/agent-engine';
+import type { Task, ToolExecution } from '../core/task';
 import { agentProfileManager, AgentProfile } from '../core/agent-profiles';
 import { agentSwarm, SwarmAgent } from '../core/agent-swarm';
 import { CustomAgentConfig, customAgentManager } from '../core/custom-agents';
@@ -132,12 +137,16 @@ export class DelegateAgentSkill implements Skill {
         ...taskParams,
         tasks: undefined
       })));
+      const childTasks = results
+        .flatMap((r: any) => Array.isArray(r?.canonicalTaskIds) ? r.canonicalTaskIds : [])
+        .map((id: string) => this.taskEngine.get(id))
+        .filter((t): t is Task => Boolean(t));
       return {
         success: results.every(result => result?.success === true),
         parallel: true,
         count: results.length,
         results,
-        reviewPrompt: agentRunManager.buildReviewPrompt(this.normalizeString(params?.__sessionId) || undefined),
+        reviewPrompt: renderDelegationReports(childTasks),
         _synthesisInstructions: 'Review every parallel child report. Merge non-overlapping findings, verify evidence, and call out any failed child task.'
       };
     }
@@ -177,20 +186,6 @@ export class DelegateAgentSkill implements Skill {
     // The model-facing schema never advertises this field.
     const kind = this.normalizeString(params?.__kind) || 'delegation';
 
-    const run = agentRunManager.createRun({
-      sessionId,
-      agentId: resolved.id,
-      agentName: resolved.name,
-      agentKind: resolved.kind,
-      task,
-      expectedOutput,
-      allowedTools: requestAllowedTools.length ? requestAllowedTools : resolved.allowedSkillNames,
-      reviewCriteria,
-      maxTurns
-    });
-
-    agentRunManager.startAttempt(run.taskId);
-
     const exec = await this.engine.executeTask({
       agentId: resolved.canonicalId,
       task,
@@ -206,81 +201,57 @@ export class DelegateAgentSkill implements Skill {
       kind: kind as any
     });
 
-    for (const childTaskId of exec.taskIds) {
-      this.bookChildEvidence(run.taskId, childTaskId);
+    // The child Tasks ARE the execution evidence: tool calls come from their
+    // toolExecutions (canonical), never a second bookkeeping store.
+    const childTasks = exec.taskIds
+      .map(taskId => this.taskEngine.get(taskId))
+      .filter((t): t is Task => Boolean(t));
+    const toolCalls: AgentToolCallRecord[] = [];
+    for (const child of childTasks) {
+      for (const execution of child.toolExecutions || []) {
+        toolCalls.push(this.toolCallFromExecution(execution));
+      }
     }
 
-    const report = this.buildReport(run, resolved, exec);
-    const completed = agentRunManager.completeRun(run.taskId, report);
-    // completeRun normalizes the report with the run's recorded tool calls and
-    // metadata — return THAT report so consumers see the full evidence.
-    this.recordProfilePerformance(resolved, exec.success, run.startedAt);
-    // Audit 4 (S1): expose the canonical child Task ids so hosts (swarm,
-    // background, scheduler) can trace their store records back to the
-    // engine-owned execution instead of keeping an unlinked duplicate.
-    return this.formatSkillResult(completed?.report || report, sessionId, exec.taskIds);
+    const report = this.buildReport(resolved, exec, toolCalls);
+    this.recordProfilePerformance(resolved, exec.success, exec.result.startedAt);
+    // Audit 4 (S1) + Audit 5: the report's taskId is the canonical child Task
+    // id (real linkage instead of the manager's synthetic id), and the
+    // reviewPrompt renders from the child Tasks.
+    return this.formatSkillResult(report, childTasks, exec.taskIds);
   }
 
-  // ---------------------------------------------------- canonical-path shim
+  // ----------------------------------------------------------- result shape
 
-  /** Mirror each child task's tool executions onto the legacy run record
-   *  (task_memory rendering + reviewPrompt + agent_runs.json consumers). */
-  private bookChildEvidence(runTaskId: string, childTaskId: string): void {
-    const task = this.taskEngine.get(childTaskId);
-    if (!task) return;
-    for (const execution of task.toolExecutions || []) {
-      const record: Omit<AgentToolCallRecord, 'timestamp'> = {
-        id: execution.id,
-        name: execution.name,
-        arguments: execution.arguments || {},
-        success: execution.status === 'COMPLETED',
-        ...(typeof execution.output === 'string'
-          ? { output: execution.output }
-          : execution.output !== undefined
-            ? { output: JSON.stringify(execution.output) }
-            : {}),
-        ...(execution.error ? { error: execution.error } : {})
-      };
-      agentRunManager.recordToolCall(runTaskId, record);
-      agentRunManager.appendMessage(runTaskId, {
-        role: 'tool',
-        toolName: execution.name,
-        content: execution.status === 'COMPLETED'
-          ? `Tool '${execution.name}' result:\n${record.output || ''}`
-          : `Tool '${execution.name}' error:\n${execution.error || 'Unknown error'}`
-      });
-    }
-  }
-
-  /** Map the canonical AgentResult onto the legacy AgentTaskReport shape. */
-  private buildReport(
-    run: { taskId: string; startedAt?: string },
-    resolved: ResolvedAgent,
-    exec: { success: boolean; result: { status: string; summary: string; findings: string[]; evidence: string[]; artifacts: Array<{ name: string; path?: string }>; recommendations: string[]; unresolvedQuestions: string[]; errorSummary?: string; finalOutput?: string }; attempts: number }
-  ): AgentTaskReport {
-    const result = exec.result;
+  /** One canonical ToolExecution -> the stable AgentToolCallRecord shape. */
+  private toolCallFromExecution(execution: ToolExecution): AgentToolCallRecord {
     return {
-      taskId: run.taskId,
-      agentId: resolved.id,
-      status: result.status === 'completed' ? 'completed' : 'failed',
-      summary: result.summary,
-      workDone: [...result.findings],
-      filesChanged: result.artifacts.map(artifact => artifact.path || artifact.name),
-      toolCalls: [],
-      evidence: [...result.evidence],
-      risks: [...result.unresolvedQuestions],
-      nextSteps: [...result.recommendations],
-      finalOutput: result.finalOutput || result.summary,
-      errorSummary: result.errorSummary || (exec.success ? undefined : result.summary),
-      attempts: exec.attempts,
-      startedAt: run.startedAt,
-      completedAt: new Date().toISOString(),
-      expectedOutput: undefined,
-      reviewCriteria: undefined
+      id: execution.id,
+      name: execution.name,
+      arguments: execution.arguments || {},
+      success: execution.status === 'COMPLETED',
+      ...(typeof execution.output === 'string'
+        ? { output: execution.output }
+        : execution.output !== undefined
+          ? { output: JSON.stringify(execution.output) }
+          : {}),
+      ...(execution.error ? { error: execution.error } : {}),
+      timestamp: new Date(execution.startedAt || Date.now()).toISOString()
     };
   }
 
-  private formatSkillResult(report: AgentTaskReport, sessionId?: string, canonicalTaskIds?: string[]) {
+  /** Map the canonical AgentResult onto the stable AgentTaskReport shape. */
+  private buildReport(resolved: ResolvedAgent, exec: ExecuteTaskResult, toolCalls: AgentToolCallRecord[]): AgentTaskReport {
+    const report = taskReportFromAgentResult(exec.result);
+    // Real linkage: the report's taskId is the canonical child Task id, not a
+    // synthetic run id from a removed bookkeeping store.
+    report.taskId = exec.taskIds[0] || exec.result.taskId || '';
+    report.agentId = resolved.id;
+    report.toolCalls = toolCalls;
+    return report;
+  }
+
+  private formatSkillResult(report: AgentTaskReport, childTasks: Task[], canonicalTaskIds?: string[]) {
     return {
       success: report.status === 'completed',
       taskId: report.taskId,
@@ -288,7 +259,7 @@ export class DelegateAgentSkill implements Skill {
       status: report.status,
       report,
       canonicalTaskIds,
-      reviewPrompt: agentRunManager.buildReviewPrompt(sessionId),
+      reviewPrompt: renderDelegationReports(childTasks),
       _synthesisInstructions: 'Review the AgentTaskReport before answering the user. Verify claims against evidence, include useful child output, and mention failed or risky items clearly.'
     };
   }

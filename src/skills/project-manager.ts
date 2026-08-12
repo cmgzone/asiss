@@ -3,8 +3,10 @@ import path from 'path';
 import { Skill } from '../core/skills';
 import { v4 as uuidv4 } from 'uuid';
 import { agentSwarm } from '../core/agent-swarm';
-import { agentRunManager } from '../core/agent-run-manager';
 import { workspaceManager } from '../core/workspace-manager';
+import { taskEngine } from '../core/task';
+import { taskReportFromOutcome } from '../core/agent/agent-result';
+import type { Task as CanonicalTask } from '../core/task';
 
 // ===== DATA TYPES =====
 
@@ -205,8 +207,28 @@ AGENT TEAM ACTIONS:
         }));
     }
 
+    /**
+     * Audit 5: canonical replacement for the removed agent_runs.json reports.
+     * Terminal delegated child Tasks whose canonical assignedAgent matches
+     * this store agent (swarm:<id> etc.), newest first.
+     */
     private getAgentRunReports(agentId: string, limit: number = 20) {
-        return agentRunManager.listReports({ agentId, limit });
+        const tasks = taskEngine.list()
+            .filter(t => this.belongsToAgent(t, agentId))
+            .filter(t => taskReportFromOutcome(t) !== null)
+            .sort((a, b) =>
+                (b.timing?.completedAt ?? b.timing?.createdAt ?? 0) - (a.timing?.completedAt ?? a.timing?.createdAt ?? 0)
+            )
+            .slice(0, limit);
+        return tasks.map(t => taskReportFromOutcome(t)).filter(Boolean);
+    }
+
+    private belongsToAgent(task: CanonicalTask, agentId: string): boolean {
+        const assigned = task.assignedAgent;
+        if (!assigned) return false;
+        return assigned === agentId
+            || assigned === `swarm:${agentId}`
+            || assigned.endsWith(`:${agentId}`);
     }
 
     private normalizeAction(action: unknown, params: any): string {

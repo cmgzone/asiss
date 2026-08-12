@@ -580,3 +580,33 @@ smoke:delegation (canonical child id surfaced + kind-'delegation' task
 resolves). Deferred: agentRunManager shim consumers (S4), store statuses vs
 Task status by design (S2), store path sprawl (S5).
 
+**Phase 13 closeout — Audit 5, `agentRunManager` removed (done,
+`docs/hermes/AUDIT_5.md`).** Pre-removal dependency audit first (documentation
+only): every `agentRunManager` responsibility classified as canonical
+Task/TaskEvent functionality — run bookkeeping (child Task
+outcome/status/timing), tool records (`Task.toolExecutions`), review prompt
+(render from child Tasks), project-manager reports (TaskEngine query), report
+types + adapters (already adjacent to AgentResult). Verdict: purely
+compatibility bookkeeping, no genuinely missing functionality. Removal:
+`src/core/agent-run-manager.ts` (and `agent_runs.json` writes) deleted.
+`AgentTaskReport` / `AgentToolCallRecord` moved into `agent-result.ts`;
+`taskReportFromOutcome` normalizes a child Task's stored outcome.result;
+`renderDelegationReports` / `delegationTasksForSession` produce the identical
+"Agent Delegation Reports" block from canonical Tasks (kinds
+delegation/swarm/background/scheduled, newest first). delegate_agent now
+adapts the report from the canonical AgentResult with toolCalls read from the
+child Tasks' toolExecutions and the report's taskId being the canonical child
+Task id (real linkage instead of the manager's synthetic id); the runner's
+workspace context and the delegate result's reviewPrompt render from
+TaskEngine; project-manager's `agent_run`/`agent_run_all` reports query
+TaskEngine by canonical assignedAgent. `agent_runs.json` data on disk was left
+untouched (runtime state; no code reads it). Verified by tsc --noEmit clean,
+smoke:delegation (report taskId === canonical child id, reviewPrompt from the
+child Task, toolCalls from toolExecutions, no agent_runs.json written), and
+the full battery (agent-engine, agent-execution, agent-task-profile,
+scheduler, runtime, baseline, terminal-paths) unchanged. No reference to
+`agentRunManager` / `agent-run-manager` remains in src/ or scripts/. With the
+shim gone, every work origin executes as a canonical Task and there is no
+legacy execution bookkeeping surrounding it — one execution authority, one
+report shape.
+
