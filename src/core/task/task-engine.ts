@@ -271,6 +271,15 @@ export interface TaskMissionIteration {
   /** Model text produced this iteration. */
   content: string;
   /**
+   * An explicit host-domain decision for this iteration. This is a signal, not
+   * a lifecycle transition: runMission still routes it through runTurn(), so
+   * the engine records the turn and owns the Task state change. It is used for
+   * host safety terminals such as a forced final answer or a repeated failed
+   * tool batch, where asking the normal completion hook would lose the reason
+   * the host stopped the loop.
+   */
+  verdict?: TaskTurnVerdict;
+  /**
    * Tools executed this iteration. Presence marks the iteration as a tool
    * batch (not a completion point) AND records the executions on the Task.
    *
@@ -286,9 +295,17 @@ export interface TaskMissionIteration {
   /** 0-100 progress estimate after this iteration. */
   progress?: number;
   /** Host judgment inputs the completion hook reads. */
+  /** Total tool calls executed by the host across the mission. */
+  totalToolCalls?: number;
   lastBatchHadFailure?: boolean;
   toolRequired?: boolean;
   verificationRequired?: boolean;
+  /**
+   * Whether a host-requested continue/verify should consume the completion
+   * continuation budget. Tool batches and safety-recovery prompts normally do
+   * not; ordinary completion-hook continuations do.
+   */
+  countsTowardForcedContinuation?: boolean;
 }
 
 export type TaskMissionIterate =
@@ -659,7 +676,8 @@ export class TaskEngine {
    *     completion point) — the turn records the tool executions;
    *   - an iteration without tools is a completion candidate: the engine asks
    *     the completion hook (continue / verify / complete / fail / blocked)
-   *     and owns the resulting transition;
+   *     unless the host supplied an explicit safety verdict; the engine owns
+   *     the resulting transition either way;
    *   - continue/verify count as forked continuation points; when
    *     `maxForcedContinuations` is consumed the engine answers `blocked`;
    *   - when the iteration budget (`maxTurns`) is exhausted the mission stops
@@ -693,7 +711,7 @@ export class TaskEngine {
         || (Array.isArray(iteration.tools) && iteration.tools.length > 0);
       const evidence: TaskCompletionEvidence = {
         toolRequired: iteration.toolRequired ?? true,
-        totalToolCalls: snapshot.toolExecutions.length,
+        totalToolCalls: iteration.totalToolCalls ?? snapshot.toolExecutions.length,
         lastBatchHadFailure: iteration.lastBatchHadFailure ?? false,
         verificationRequired: iteration.verificationRequired ?? true,
         lastMutationSequence: -1,
@@ -704,7 +722,12 @@ export class TaskEngine {
       };
 
       let verdict: TaskTurnVerdict;
-      if (usedTools) {
+      if (iteration.verdict) {
+        // The host may surface a forced-final or blocked safety terminal, but
+        // it never mutates the Task directly. runTurn below records the turn
+        // and performs the canonical lifecycle transition.
+        verdict = iteration.verdict;
+      } else if (usedTools) {
         // A tool batch is not a completion point. The engine owns this: the
         // iteration keeps working until the model produces a final answer.
         verdict = { type: 'continue', reason: 'Tool batch executed; continuing the mission.' };
@@ -727,7 +750,11 @@ export class TaskEngine {
       }
 
       if (result.action === 'continue' || result.action === 'verify') {
-        forcedContinuations += 1;
+        const countsTowardForcedContinuation = iteration.countsTowardForcedContinuation
+          ?? (!usedTools && !iteration.verdict);
+        if (countsTowardForcedContinuation) {
+          forcedContinuations += 1;
+        }
         continue;
       }
 

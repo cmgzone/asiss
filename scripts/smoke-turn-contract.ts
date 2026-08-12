@@ -423,6 +423,24 @@ async function main() {
     assert.strictEqual(ownedResult.task.toolExecutions.length, 1, 'host-recorded execution NOT duplicated');
     assert.strictEqual(engine3.verificationPending(selfRecorded.id), true, 'mutation kind preserved without re-record (unverified)');
 
+    // An explicit host safety verdict is still executed by the engine. This is
+    // how Move 4c routes a forced final through TaskEngine rather than letting
+    // AgentRunner complete the Task independently.
+    const engine4 = setup().engine;
+    const forcedFinal = await mission(engine4, 'summarize collected evidence');
+    const forcedFinalResult = await engine4.runMission(forcedFinal.id, {
+      iterate: async () => ({
+        content: 'Collected evidence has been summarized.',
+        verdict: { type: 'complete', summary: 'Collected evidence has been summarized.' }
+      }),
+      completionVerdict: async () => {
+        throw new Error('explicit mission verdict must not call the completion hook');
+      }
+    });
+    assert.strictEqual(forcedFinalResult.action, 'complete', 'explicit forced-final verdict completes through the engine');
+    assert.strictEqual(forcedFinalResult.task.status, 'COMPLETED', 'explicit forced-final owns the terminal state');
+    assert.strictEqual(forcedFinalResult.task.timing.turns, 1, 'explicit forced-final records one canonical turn');
+
     console.log('15. runMission drives the loop                     ok');
   }
 
