@@ -188,15 +188,16 @@ async function main() {
   assert.strictEqual(roundTrip.status, 'completed', 'status round-trips');
 
   // ------------------------------------------------------------------
-  // 5. executeTask guard (no second execution authority before Step 3)
+  // 5. executeTask requires configure() wiring before real execution.
+  //    (Step 3 execution smoke lives in scripts/smoke-agent-delegation.ts.)
   // ------------------------------------------------------------------
   let guardThrew = false;
   try {
-    await agentEngine.executeTask('custom:coder-id', { goal: 'x' });
+    await agentEngine.executeTask({ agentId: 'custom:coder-id', task: 'x' });
   } catch (err: any) {
-    guardThrew = /Step 3/.test(String(err?.message));
+    guardThrew = /not configured/.test(String(err?.message));
   }
-  assert.strictEqual(guardThrew, true, 'executeTask refuses before Step 3 wiring');
+  assert.strictEqual(guardThrew, true, 'executeTask requires configure() wiring before execution');
 
   // ------------------------------------------------------------------
   // 6. assign / release lifecycle state

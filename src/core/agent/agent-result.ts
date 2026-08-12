@@ -78,3 +78,79 @@ export function taskReportFromAgentResult(result: AgentResult): AgentTaskReport 
     completedAt: result.completedAt
   };
 }
+
+/**
+ * Parse a child agent's final answer into a canonical AgentResult.
+ * The model is instructed to reply with one JSON object shaped like
+ * AgentResult's report fields; when it cannot (JSON parse failure) the
+ * whole text becomes the summary with status 'failed' so the engine owns
+ * the terminal decision instead of the model declaring victory.
+ */
+export function parseAgentResultFromText(
+  content: string,
+  meta: { taskId?: string; agentId: string; agentName?: string }
+): AgentResult {
+  const text = String(content || '').trim();
+  if (!text) {
+    return {
+      taskId: meta.taskId,
+      agentId: meta.agentId,
+      agentName: meta.agentName,
+      status: 'failed',
+      summary: 'Child agent returned no final report.',
+      findings: [],
+      evidence: [],
+      artifacts: [],
+      recommendations: [],
+      unresolvedQuestions: []
+    };
+  }
+
+  // Strip code fences if the model wrapped the JSON.
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = fenced ? fenced[1] : text;
+
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch {
+    parsed = null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return {
+      taskId: meta.taskId,
+      agentId: meta.agentId,
+      agentName: meta.agentName,
+      status: 'failed',
+      summary: 'Child agent did not return a structured report.',
+      findings: [],
+      evidence: [],
+      artifacts: [],
+      recommendations: [],
+      unresolvedQuestions: [],
+      errorSummary: 'Unparseable final report; the engine did not accept a self-declared completion.'
+    };
+  }
+
+  const status: AgentResultStatus =
+    parsed.status === 'completed' || parsed.status === 'success' ? 'completed' : 'failed';
+
+  return {
+    taskId: meta.taskId || parsed.taskId,
+    agentId: meta.agentId || parsed.agentId,
+    agentName: meta.agentName,
+    status,
+    summary: String(parsed.summary || parsed.finalOutput || '').trim() || 'No summary.',
+    findings: [...(Array.isArray(parsed.workDone) ? parsed.workDone : [])],
+    evidence: [...(Array.isArray(parsed.evidence) ? parsed.evidence : [])],
+    artifacts: Array.isArray(parsed.filesChanged)
+      ? (parsed.filesChanged as unknown[]).filter((f): f is string => typeof f === 'string')
+          .map((f: string) => ({ name: f }))
+      : [],
+    recommendations: [...(Array.isArray(parsed.nextSteps) ? parsed.nextSteps : [])],
+    unresolvedQuestions: [...(Array.isArray(parsed.risks) ? parsed.risks : [])],
+    errorSummary: parsed.errorSummary,
+    attempts: parsed.attempts
+  };
+}

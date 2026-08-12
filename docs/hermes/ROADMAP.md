@@ -443,9 +443,24 @@ execution-authority audit.
       authority until Step 3 wires it onto TaskEngine. Verified by
       `npm run smoke:agent-engine` (adapters, registry, selection,
       result round-trip, guard, lifecycle) + `tsc --noEmit` clean.
-- [ ] Step 3 — `AgentEngine` (`agent-engine.ts`): registerAgent /
+- [~] Step 3 — `AgentEngine` (`agent-engine.ts`): registerAgent /
       getAgent / selectAgent / assignTask / executeTask / releaseAgent,
       execution delegated to TaskEngine
+      - [x] Sub-step 1 — runChildLoop responsibility map
+        (`docs/hermes/CHILD_LOOP_MIGRATION_MAP.md`)
+      - [x] Sub-step 2 — `executeTask` wired onto TaskEngine as a thin
+        orchestration adapter: child Tasks (`kind: 'delegation'`) under
+        the parent, driven via `runMission` iterate (one model+tool batch
+        per turn), model from `modelPolicy`, tool calls through ToolEngine
+        with `ctx.taskId` + `ctx.agentPermissions` (agent-permissions
+        policy rule now live), outcomes mapped to canonical AgentResult;
+        retries are fresh child Tasks, never a second loop. Verified by
+        `npm run smoke:agent-execution` (acceptance gate:
+        COMPLETED+SUCCESS, turns>0, ToolExecution recorded, policy DENY
+        recorded FAILED, parent subtask link, runChildLoop never
+        involved) + `tsc --noEmit` clean. `runChildLoop` stays in place
+        until DelegateAgentSkill rewires onto this path (sub-step 3 /
+        Step 5).
 - [ ] Step 4 — Agent selection: capability matching against TaskProfile,
       performance-ranked later
 - [ ] Step 5 — Kill `runChildLoop`; route delegation through canonical
