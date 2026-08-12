@@ -173,6 +173,9 @@ export class DelegateAgentSkill implements Skill {
     const workspacePath = this.normalizeString(params?.__workspacePath) || undefined;
     const projectId = this.normalizeString(params?.__projectId) || undefined;
     const parentTaskId = this.normalizeString(params?.__taskId) || undefined;
+    // Internal-only: hosts (swarm, background) label the child task kind.
+    // The model-facing schema never advertises this field.
+    const kind = this.normalizeString(params?.__kind) || 'delegation';
 
     const run = agentRunManager.createRun({
       sessionId,
@@ -199,7 +202,8 @@ export class DelegateAgentSkill implements Skill {
       parentTaskId,
       sessionId,
       workspacePath,
-      projectId
+      projectId,
+      kind: kind as any
     });
 
     for (const childTaskId of exec.taskIds) {

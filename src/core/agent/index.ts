@@ -18,3 +18,4 @@ export * from './agent-capabilities';
 export * from './agent-registry';
 export * from './agent-engine';
 export * from './agent-result';
+export * from './task-profile';

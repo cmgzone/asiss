@@ -17,6 +17,11 @@
  *   5. AgentEngine returns a canonical AgentResult (evidence, not "Done").
  *   6. The child Task is a subtask of the parent (parent.subtasks includes it).
  *   7. The agent lifecycle moved ASSIGNED -> AVAILABLE across the run.
+ *   8. (Step 8) The canonical AgentResult is registered as a task artifact.
+ *   9. (Step 7) modelPolicy.fallbackModelIds is honored: a pinned model that
+ *      fails falls through to the declared fallback and the mission completes.
+ *   10. (Step 9) Hosts can label the child Task kind — swarm jobs run as
+ *      canonical kind-'swarm' Tasks on the same engine path.
  *
  * Run: npm run smoke:agent-execution
  */
@@ -31,6 +36,22 @@ interface StubModelOptions {
   toolArguments: Record<string, unknown>;
   /** Final report JSON the model returns on its second turn. */
   reportJson: string;
+}
+
+/** Model that always throws (network-style) — proves Step 7 fallback. */
+class FailingModel {
+  calls = 0;
+  readonly id: string;
+  readonly name: string;
+  constructor() {
+    this.id = 'stub-fail';
+    this.name = 'StubFail';
+  }
+
+  async generate() {
+    this.calls += 1;
+    throw new Error('Network error from stub model');
+  }
 }
 
 /** Scripted model: turn 1 = one tool call, turn 2 = final JSON report. */
@@ -136,10 +157,12 @@ async function main() {
       nextSteps: []
     })
   });
+  const failModel = new FailingModel();
 
   const models = new Map<string, any>([
     ['stub-math', mathModel],
-    ['stub-denial', denialModel]
+    ['stub-denial', denialModel],
+    ['stub-fail', failModel]
   ]);
 
   // ------------------------------------------------------------ wiring
@@ -173,6 +196,14 @@ async function main() {
     capabilities: ['math', 'analysis'],
     tools: ['math_eval'],
     modelPolicy: { modelId: 'stub-denial' }
+  });
+  agentRegistry.register({
+    name: 'FallbackBot',
+    role: 'analyst',
+    description: 'Agent whose pinned model fails and must fall back to the declared fallback',
+    capabilities: ['math', 'analysis'],
+    tools: ['math_eval'],
+    modelPolicy: { modelId: 'stub-fail', fallbackModelIds: ['stub-math'] }
   });
 
   // ------------------------------------------------------------ 1. happy path
@@ -224,6 +255,11 @@ async function main() {
   const after = agentRegistry.get('MathBot')!;
   assert.strictEqual(after.status, 'AVAILABLE', 'agent released after run');
 
+  // 1g. Step 8: the canonical AgentResult is registered as a task artifact
+  const resultArtifacts = child.artifacts.filter((a) => a.kind === 'agent-result');
+  assert.ok(resultArtifacts.length >= 1, 'agent-result artifact recorded on child task');
+  assert.ok(String(resultArtifacts[0].summary || '').includes('4'), 'artifact carries the result summary');
+
   // ------------------------------------------------------------ 2. policy denial
   // The model requests dangerous_op, which is NOT in LockedBot's grants.
   // PolicyEngine's agent-permissions rule (previously dead plumbing) denies it;
@@ -250,6 +286,57 @@ async function main() {
   // runChildLoop() (delegate-agent.ts) is never imported or invoked in this
   // process. The delegated agent completed its task through TaskEngine +
   // ToolEngine + PolicyEngine alone.
+
+  // ------------------------------------------------------------ 4. Step 7 — model fallback
+  // FallbackBot pins a model that throws on every call but declares stub-math
+  // as a fallback; the child mission must complete through the fallback
+  // provider instead of failing the attempt.
+  const fallbackParent = await taskEngine.create({ goal: 'Fallback math.', kind: 'mission' });
+  const fallbackExec = await engine.executeTask({
+    agentId: 'FallbackBot',
+    task: 'Evaluate 2+2 and report via the fallback model.',
+    maxTurns: 2,
+    parentTaskId: fallbackParent.id
+  });
+  assert.strictEqual(fallbackExec.success, true, `fallback model completes the mission (${fallbackExec.error || ''})`);
+  assert.ok(failModel.calls > 0, 'pinned model was attempted before falling back');
+  const fallbackChild = taskEngine.get(fallbackExec.taskId!)!;
+  assert.strictEqual(fallbackChild.outcome?.status, 'SUCCESS', 'fallback mission SUCCESS');
+
+  // ------------------------------------------------------------ 5. Step 9 — swarm kind
+  // Hosts label the child Task kind; swarm jobs run as canonical kind-'swarm'
+  // Tasks on the same engine path (the runner's swarm executor passes __kind).
+  const swarmParent = await taskEngine.create({ goal: 'Swarm math.', kind: 'mission' });
+  const swarmExec = await engine.executeTask({
+    agentId: 'MathBot',
+    task: 'Evaluate 2+2 for the swarm.',
+    kind: 'swarm',
+    maxTurns: 2,
+    parentTaskId: swarmParent.id
+  });
+  assert.strictEqual(swarmExec.success, true, `swarm-kind delegation succeeded (${swarmExec.error || ''})`);
+  const swarmChild = taskEngine.get(swarmExec.taskId!)!;
+  assert.strictEqual(swarmChild.kind, 'swarm', 'child task kind is swarm');
+
+  // ------------------------------------------------------------ 6. Step 9 — background kind
+  // Background goals run as canonical kind-'background' Tasks; host linkage
+  // metadata (backgroundGoalId) rides on the child Task so the canonical
+  // record points back to background_goals.json.
+  const bgParent = await taskEngine.create({ goal: 'Background math.', kind: 'mission' });
+  const bgExec = await engine.executeTask({
+    agentId: 'MathBot',
+    task: 'Evaluate 2+2 for the background goal.',
+    kind: 'background',
+    metadata: { backgroundGoalId: 'bg-test-1', backgroundGoalTitle: 'Math check' },
+    maxTurns: 2,
+    parentTaskId: bgParent.id
+  });
+  assert.strictEqual(bgExec.success, true, `background-kind delegation succeeded (${bgExec.error || ''})`);
+  const bgChild = taskEngine.get(bgExec.taskId!)!;
+  assert.strictEqual(bgChild.kind, 'background', 'child task kind is background');
+  assert.strictEqual(bgChild.metadata?.backgroundGoalId, 'bg-test-1', 'background goal id linked on the task');
+  assert.strictEqual(bgChild.metadata?.backgroundGoalTitle, 'Math check', 'background goal title linked on the task');
+
   console.log('\n{"success":true,"turns":' + (child.timing.turns || 0) + '}');
 }
 

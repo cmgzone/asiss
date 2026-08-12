@@ -37,10 +37,18 @@ import {
   type AgentResult
 } from './agent-result';
 import type { Agent, AgentInput } from './agent-types';
+import { profileFromTask, type TaskProfile } from './task-profile';
+import type { Task, TaskKind } from '../task';
 import { SkillRegistry } from '../skills';
 import { ToolEngine } from '../tools';
 import { TaskEngine, taskEngine as defaultTaskEngine } from '../task';
-import type { ModelProvider, Tool } from '../models';
+import type {
+  ModelAttachment,
+  ModelProvider,
+  ModelResponse,
+  StreamCallback,
+  Tool
+} from '../models';
 
 export interface SelectAgentOptions {
   /** Explicit required capabilities (normalized against the catalog). */
@@ -63,10 +71,18 @@ export interface SelectResult {
   missing: string[];
 }
 
+/** Eligibility selection options (Step 4). */
+export interface SelectForProfileOptions {
+  /** Candidate names/ids to exclude. */
+  exclude?: string[];
+}
+
 export interface ExecuteTaskOptions {  /** Canonical agent id or name. */
   agentId: string;
   /** The delegated task goal. */
   task: string;
+  /** Canonical Task kind for the child task. Default 'delegation' ('swarm', 'background', ...). */
+  kind?: TaskKind;
   expectedOutput?: string;
   reviewCriteria?: string[];
   /** Request-level tool allowlist (intersected with the agent's tools). */
@@ -80,6 +96,8 @@ export interface ExecuteTaskOptions {  /** Canonical agent id or name. */
   sessionId?: string;
   workspacePath?: string;
   projectId?: string;
+  /** Host linkage metadata merged onto the child Task (e.g. backgroundGoalId). */
+  metadata?: Record<string, unknown>;
 }
 
 export interface ExecuteTaskResult {
@@ -163,6 +181,77 @@ export class AgentEngine {
   selectAgent(options: SelectAgentOptions = {}): SelectResult | null {
     const first = this.candidates(options).find(r => r.selected);
     return first || null;
+  }
+
+  // ----------------------------------------------------- TaskProfile (Step 4)
+  // Eligibility, not performance: "who CAN do this job?" Capability + role +
+  // task-scope + tool grants + permission/workspace filters. NO performance
+  // ranking — "who is BEST" is a later phase with measurement infrastructure.
+
+  /** Profile-driven eligibility: every candidate passing the filters. */
+  candidatesForProfile(profile: TaskProfile, options: SelectForProfileOptions = {}): SelectResult[] {
+    const required = profile.requiredCapabilities?.length
+      ? profile.requiredCapabilities
+      : capabilityHintsFromText(profile.goal || '');
+
+    const excludeSet = new Set((options.exclude || []).map(s => s.toLowerCase()));
+    const requiredTools = (profile.requiredTools || []).filter(Boolean);
+    const requiredToolNames = new Set(requiredTools.map(t => t.toLowerCase()));
+
+    const scopeMatches = (agent: Agent): boolean => {
+      if (!profile.kind || profile.kind === 'any') return true;
+      if (agent.taskScope === 'any') return true;
+      return agent.taskScope === profile.kind;
+    };
+    const roleMatches = (agent: Agent): boolean =>
+      !profile.preferredRole || agent.role === profile.preferredRole;
+    const toolsAndPermissionsMatch = (agent: Agent): boolean => {
+      if (!requiredToolNames.size) return true;
+      const denied = new Set((agent.permissions?.deniedTools || []).map(t => t.toLowerCase()));
+      if (requiredTools.some(t => denied.has(t.toLowerCase()))) return false;
+      const allowed = new Set((agent.permissions?.allowedTools || []).map(t => t.toLowerCase()));
+      if (allowed.size && requiredTools.some(t => !allowed.has(t.toLowerCase()))) return false;
+      const granted = new Set(agent.tools.map(t => t.toLowerCase()));
+      return requiredTools.every(t => granted.has(t.toLowerCase()));
+    };
+    const workspaceMatches = (agent: Agent): boolean => {
+      if (!profile.workspace) return true;
+      const grants = (agent.permissions?.allowedWorkspacePaths || [])
+        .map(p => p.replace(/\\/g, '/').toLowerCase());
+      if (!grants.length) return true;
+      const target = profile.workspace.replace(/\\/g, '/').toLowerCase();
+      return grants.some(grant => target.startsWith(grant));
+    };
+
+    return this.registry
+      .list()
+      .filter(a => a.status !== 'RELEASED')
+      .filter(a => !excludeSet.has(a.id.toLowerCase()) && !excludeSet.has(a.name.toLowerCase()))
+      .filter(a => scopeMatches(a) && roleMatches(a) && toolsAndPermissionsMatch(a) && workspaceMatches(a))
+      .map(a => this.eligible(a, required))
+      .sort((x, y) => {
+        const coverageA = x.agent.capabilities.length;
+        const coverageB = y.agent.capabilities.length;
+        if (coverageB !== coverageA) return coverageB - coverageA;
+        return x.agent.name.localeCompare(y.agent.name);
+      });
+  }
+
+  /** Best eligible agent for a TaskProfile (null when nobody can do it). */
+  selectForProfile(profile: TaskProfile, options: SelectForProfileOptions = {}): SelectResult | null {
+    return this.candidatesForProfile(profile, options).find(r => r.selected) || null;
+  }
+
+  /** Adapt + select for an existing canonical Task. */
+  selectForTask(task: Task, options: SelectForProfileOptions = {}): SelectResult | null {
+    return this.selectForProfile(profileFromTask(task), options);
+  }
+
+  /** Convenience over taskEngine.get(taskId); null when the task is unknown. */
+  selectForTaskId(taskId: string, options: SelectForProfileOptions = {}): SelectResult | null {
+    const task = this.runtime?.taskEngine?.get(taskId);
+    if (!task) return null;
+    return this.selectForTask(task, options);
   }
 
   /** Assign a task to an agent — lifecycle state only, no execution. */
@@ -256,7 +345,7 @@ export class AgentEngine {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const childTask = await taskEngine.create({
         goal: options.task,
-        kind: 'delegation',
+        kind: options.kind || 'delegation',
         parentId: options.parentTaskId,
         constraints: {
           maxTurns,
@@ -271,6 +360,7 @@ export class AgentEngine {
         model: agent.modelPolicy?.modelId,
         sessionId: options.sessionId,
         metadata: {
+          ...(options.metadata || {}),
           delegatedAgentId: agent.id,
           delegatedAgentName: agent.name,
           expectedOutput: options.expectedOutput,
@@ -455,10 +545,10 @@ export class AgentEngine {
       { role: 'user', content: initialUser }
     ];
 
-    const runtimeModel = agent.modelPolicy?.modelId
-      ? runtime.getModelById(agent.modelPolicy.modelId)
-      : runtime.getDefaultModel();
-    const model = runtimeModel;
+    // Step 7 — agent-width ModelPolicy: the pinned model plus declared
+    // fallbackModelIds (in order) drive the child mission; the pin overrides
+    // any default routing for this agent's width of work.
+    const model = this.resolveMissionModel(runtime, agent);
 
     const missionResult = await taskEngine.runMission(childTaskId, {
       budget: { maxTurns: params.maxTurns },
@@ -547,6 +637,7 @@ export class AgentEngine {
             unresolvedQuestions: [],
             startedAt: params.startedAt
           };
+      await this.recordResultArtifact(taskEngine, childTaskId, result);
       return { success: true, result };
     }
 
@@ -584,7 +675,108 @@ export class AgentEngine {
           errorSummary: missionResult.reason || String(missionResult.error || ''),
           startedAt: params.startedAt
         };
+    await this.recordResultArtifact(taskEngine, childTaskId, result);
     return { success: false, result };
+  }
+
+  // ------------------------------------------------------------ internals
+
+  /**
+   * Step 7 — resolve the model for a child mission from the agent's
+   * ModelPolicy: the pinned modelId first, then the declared fallbackModelIds
+   * in order, then the runtime default. Unknown ids are skipped (the runtime
+   * getModelById may already fall back host-side); the returned provider is
+   * the pin when no fallbacks are declared.
+   */
+  private resolveMissionModel(runtime: AgentEngineRuntime, agent: Agent): ModelProvider {
+    const policy = agent.modelPolicy || {};
+    let primary: ModelProvider;
+    try {
+      primary = policy.modelId ? runtime.getModelById(policy.modelId) : runtime.getDefaultModel();
+    } catch {
+      primary = runtime.getDefaultModel();
+    }
+    const fallbacks: ModelProvider[] = [];
+    for (const id of policy.fallbackModelIds || []) {
+      if (id === policy.modelId) continue;
+      try {
+        const provider = runtime.getModelById(id);
+        if (provider && provider.id !== primary.id && !fallbacks.some(f => f.id === provider.id)) {
+          fallbacks.push(provider);
+        }
+      } catch {
+        // Unknown fallback id: skip it.
+      }
+    }
+    return fallbacks.length > 0 ? new AgentModelFallback(primary, fallbacks) : primary;
+  }
+
+  /** Step 8 — the canonical AgentResult is registered as a task artifact. */
+  private async recordResultArtifact(taskEngine: TaskEngine, taskId: string, result: AgentResult): Promise<void> {
+    try {
+      await taskEngine.recordArtifact(taskId, {
+        name: 'agent-result',
+        kind: 'agent-result',
+        summary: result.summary,
+        data: result
+      });
+    } catch (err: any) {
+      console.warn('[AgentEngine] record agent-result artifact failed:', err?.message || err);
+    }
+  }
+}
+
+/**
+ * Step 7 — agent-width model fallback chain. Tries the pinned model, then the
+ * declared fallbackModelIds in order; any provider error falls through to the
+ * next candidate. Minimal by design: cooldowns/health live in
+ * ResilientModelProvider (main mission path); this only honors the
+ * AgentModelPolicy contract for child missions without creating a new
+ * authority.
+ */
+class AgentModelFallback implements ModelProvider {
+  readonly id: string;
+  readonly name: string;
+
+  constructor(private readonly primary: ModelProvider, private readonly fallbacks: ModelProvider[]) {
+    this.id = primary.id;
+    this.name = `${primary.name} with agent-model fallback`;
+  }
+
+  async generate(prompt: string, systemPrompt?: string, tools?: Tool[], attachments?: ModelAttachment[]): Promise<ModelResponse> {
+    const chain = [this.primary, ...this.fallbacks];
+    const failures: string[] = [];
+    for (const provider of chain) {
+      try {
+        return await provider.generate(prompt, systemPrompt, tools, attachments);
+      } catch (error: any) {
+        failures.push(`${provider.name}: ${String(error?.message || error).slice(0, 300)}`);
+      }
+    }
+    throw new Error(`All agent models failed for the child mission. ${failures.join(' | ')}`);
+  }
+
+  async generateStream(prompt: string, systemPrompt?: string, tools?: Tool[], onChunk?: StreamCallback, attachments?: ModelAttachment[]): Promise<ModelResponse> {
+    const chain = [this.primary, ...this.fallbacks];
+    const failures: string[] = [];
+    for (const provider of chain) {
+      try {
+        if (provider.generateStream) {
+          return await provider.generateStream(prompt, systemPrompt, tools, onChunk, attachments);
+        }
+        const buffered: string[] = [];
+        const result = await provider.generate(prompt, systemPrompt, tools, attachments);
+        if (onChunk && result.content) {
+          for (let offset = 0; offset < result.content.length; offset += 160) {
+            onChunk(result.content.slice(offset, offset + 160));
+          }
+        }
+        return result;
+      } catch (error: any) {
+        failures.push(`${provider.name}: ${String(error?.message || error).slice(0, 300)}`);
+      }
+    }
+    throw new Error(`All agent models failed for the child mission. ${failures.join(' | ')}`);
   }
 }
 

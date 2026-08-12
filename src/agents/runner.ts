@@ -24,8 +24,9 @@ import { AgentsMdSkill } from '../skills/agents-md';
 import { thinkingManager } from '../core/thinking';
 import { scratchpad } from '../core/scratchpad';
 import { agentSwarm } from '../core/agent-swarm';
+import { agentEngine, agentRegistry, type SelectResult, type TaskProfile } from '../core/agent';
 import { TaskMemorySkill } from '../skills/task-memory';
-import { backgroundWorker } from '../core/background-worker';
+import { backgroundWorker, type BackgroundGoal } from '../core/background-worker';
 import { dndManager } from '../core/dnd';
 import { BackgroundGoalsSkill, DNDSkill } from '../skills/background';
 import { mainGoalManager } from '../core/main-goal';
@@ -201,6 +202,17 @@ export class AgentRunner {
       policyEngine: this.policyEngine
     });
 
+    // Step 9 sub-step 2: background goals run as canonical kind-'background'
+    // Tasks through AgentEngine.executeTask (worker selection + engine-owned
+    // loop); background_goals.json stays authoritative for goal statuses.
+    agentEngine.configure({
+      getModelById: (id?: string) => this.getModelById(id),
+      getDefaultModel: () => this.getModel(),
+      listMcpTools: () => this.mcpManager.listTools(),
+      toolEngine: this.toolEngine,
+      taskEngine
+    });
+
     this.scheduler = new SchedulerManager(async (job) => {
       const scheduledMsg: Message = {
         id: uuidv4(),
@@ -328,7 +340,9 @@ export class AgentRunner {
         expectedOutput: 'Complete the assigned swarm-agent task and return a concise, evidence-backed result.',
         maxTurns: 6,
         retries: 1,
-        reviewCriteria: ['task completed', 'evidence included', 'risks called out']
+        reviewCriteria: ['task completed', 'evidence included', 'risks called out'],
+        // Step 9: swarm jobs execute as canonical kind-'swarm' child Tasks.
+        __kind: 'swarm'
       });
       const report = result?.report;
       return report?.finalOutput || report?.summary || JSON.stringify(result);
@@ -411,6 +425,82 @@ export class AgentRunner {
     }
 
     this.scheduler.start();
+  }
+
+  /**
+   * Step 9 sub-step 2 — run a background goal as a canonical kind-
+   * 'background' Task through AgentEngine.executeTask. Selects a worker via
+   * the canonical registry (capability + task-scope 'background'), falls back
+   * to an ephemeral Background Worker agent when no store agent qualifies,
+   * and links the canonical Task id onto the goal record (background_goals.json
+   * stays authoritative for statuses; this is a linkage field only). Returns
+   * { ok: false } on any failure so the caller falls back to the legacy
+   * mission-loop path.
+   */
+  private async runBackgroundGoalViaEngine(
+    goal: BackgroundGoal,
+    task: string,
+    progressCallback: (percent: number, note: string) => void
+  ): Promise<{ ok: boolean; output?: string }> {
+    try {
+      agentRegistry.refresh();
+      const profile: TaskProfile = {
+        goal: `${goal.title}. ${goal.description || ''}`,
+        kind: 'background'
+      };
+      let selected = agentEngine.selectForProfile(profile);
+      if (!selected) {
+        selected = this.ensureBackgroundWorkerAgent();
+      }
+      progressCallback(20, `Selected worker ${selected.agent.name} for the background goal`);
+
+      const exec = await agentEngine.executeTask({
+        agentId: selected.agent.id,
+        task,
+        kind: 'background',
+        sessionId: goal.sessionId,
+        maxTurns: 10,
+        retries: 0,
+        metadata: {
+          backgroundGoalId: goal.id,
+          backgroundGoalTitle: goal.title,
+          source: 'background-worker'
+        }
+      });
+
+      if (exec.taskId) {
+        goal.metadata = { ...(goal.metadata || {}), canonicalTaskId: exec.taskId };
+      }
+      // A failed child mission must NOT look like a completed goal — fall back
+      // so the worker's own status/retry authority decides the outcome.
+      if (!exec.success) return { ok: false };
+      const result = exec.result;
+      const output = result.finalOutput || result.summary
+        || 'Background goal completed through the canonical background task.';
+      return { ok: true, output };
+    } catch (err: any) {
+      console.warn('[AgentRunner] Background goal via AgentEngine failed; falling back to the mission loop:', err?.message || err);
+      return { ok: false };
+    }
+  }
+
+  /** Register (once) an ephemeral Background Worker agent with the full native tool surface. */
+  private ensureBackgroundWorkerAgent(): SelectResult {
+    const existing = agentRegistry.get('Background Worker');
+    if (existing) return { agent: existing, selected: true, missing: [] };
+    const tools = SkillRegistry.getAll()
+      .filter(s => Boolean(s.inputSchema) && s.name !== 'delegate_agent')
+      .map(s => s.name);
+    const agent = agentRegistry.register({
+      name: 'Background Worker',
+      description: 'Default autonomous background worker.',
+      persona: 'You are an autonomous background worker. Complete the goal using tools, verify evidence, and return a concise structured report.',
+      capabilities: ['planning', 'coding', 'web-research', 'data-analysis', 'testing', 'reviewing', 'writing'],
+      tools,
+      taskScope: 'any',
+      role: 'general'
+    });
+    return { agent, selected: true, missing: [] };
   }
 
   // Connect each configured MCP server, awaiting every result so connection
@@ -1363,11 +1453,7 @@ export class AgentRunner {
           project.memory.decisions.length > 0 ? `Project decisions: ${project.memory.decisions.slice(-5).join(' | ')}` : ''
         ].filter(Boolean)
         : [];
-      const backgroundMsg: Message = {
-        id: uuidv4(),
-        channel: 'background',
-        senderId: 'background-worker',
-        content: [
+      const content = [
           'Background goal execution request.',
           '',
           `Goal: ${goal.title}`,
@@ -1387,13 +1473,29 @@ export class AgentRunner {
           `Tags: ${goal.tags.join(', ') || 'none'}`,
           '',
           'Use available tools when needed. If you change files or make project decisions, record them with the background_goals goal_memory or project_memory action. If this is a retry, use the previous error and checkpoint to recover instead of repeating the same failed approach. Finish with a concise summary of what was accomplished.'
-        ].filter(Boolean).join('\n'),
+        ].filter(Boolean).join('\n');
+      const backgroundMsg: Message = {
+        id: uuidv4(),
+        channel: 'background',
+        senderId: 'background-worker',
+        content,
         timestamp: Date.now(),
         metadata: {
           backgroundGoalId: goal.id,
           backgroundGoalTitle: goal.title
         }
       };
+
+      // Step 9 sub-step 2: the goal runs as a canonical kind-'background' Task
+      // through AgentEngine.executeTask; background_goals.json stays the
+      // authority for statuses (the worker drives every transition). On any
+      // failure the legacy tool-capable mission loop takes over so background
+      // work never silently drops.
+      const canonical = await this.runBackgroundGoalViaEngine(goal, content, progressCallback);
+      if (canonical.ok) {
+        progressCallback(100, 'Goal completed through canonical background task');
+        return canonical.output || '';
+      }
 
       progressCallback(25, 'Dispatching goal through the tool-capable agent loop...');
       await this.processMessage(backgroundSessionId, backgroundMsg);

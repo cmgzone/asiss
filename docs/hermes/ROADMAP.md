@@ -476,19 +476,71 @@ execution-authority audit.
         and green (single + parallel, overlap preserved, reviewPrompt
         keeps finalOutput). Parenthesis note: Step 5's "kill
         runChildLoop" is now the deletion itself — completed here.
-- [ ] Step 4 — Agent selection: capability matching against TaskProfile,
+- [x] Step 4 — Agent selection: capability matching against TaskProfile,
       performance-ranked later
-- [ ] Step 5 — Kill `runChildLoop`; route delegation through canonical
+- [x] Step 5 — Kill `runChildLoop`; route delegation through canonical
       Tasks (`kind: 'delegation'`) with agent policy injected via
       iterate-style handlers
-- [ ] Step 6 — Agent permissions: feed `agentPermissions` into the
+- [x] Step 6 — Agent permissions: feed `agentPermissions` into the
       existing dead rule (`policy-rules.ts:152-165`); PolicyEngine stays
       the single ALLOW/ASK/DENY authority
-- [ ] Step 7 — ModelPolicy: agent-width pin over ModelEngine's
+- [x] Step 7 — ModelPolicy: agent-width pin over ModelEngine's
       task-shaped scoring
-- [ ] Step 8 — Canonical `AgentResult` (status, findings, evidence,
+- [x] Step 8 — Canonical `AgentResult` (status, findings, evidence,
       artifacts, recommendations, confidence, unresolvedQuestions) mapped
       to/from `AgentTaskReport`, registered as task artifacts
-- [ ] Step 9 — Rebuild swarm on AgentEngine (assigned child Tasks,
+- [x] Step 9 — Rebuild swarm on AgentEngine (assigned child Tasks,
       selected workers); background goals adopt canonical Tasks
       (`kind: 'background'`)
+
+**Phase 13, Steps 4-8 done.** Step 4: TaskProfile-based eligibility selection
+(`src/core/agent/task-profile.ts` + AgentEngine's `candidatesForProfile` /
+`selectForProfile` / `selectForTask` / `selectForTaskId`). Selection answers
+"WHO CAN do this job?" through capability + role + task-scope + tool-grant +
+permission + workspace filters with a deterministic coverage/name tie-break and
+NO performance ranking. `profileFromTask` adapts a canonical Task (goal, kind,
+workspace, allowed tools, model pin, constraints); the `exclude` filter lives in
+the options argument (`SelectForProfileOptions`), never as a positional
+parameter. Verified by `npm run smoke:agent-task-profile` (9 sections: goal
+hints, role, scope, required tools + deny/allow lists, workspace grants,
+selectForTask/TaskId, coverage tie-break, exclude + no-match) and `tsc --noEmit`.
+Step 5 (delegation on canonical Tasks, `runChildLoop` deleted) and Step 6
+(agent-permissions rule live through ToolEngine -> PolicyEngine, denied calls
+recorded FAILED) were completed inside Step 3's sub-steps and are now marked
+done. Step 7 gap-fill: AgentEngine's child mission now honors the full
+`AgentModelPolicy` — the pinned `modelId` first, then `fallbackModelIds` in
+order via a minimal `AgentModelFallback` chain (no second authority; cooldowns
+stay in ResilientModelProvider on the main mission path). Step 8 gap-fill: the
+canonical AgentResult is registered on each child Task as a task artifact
+(`recordArtifact`, kind `agent-result`, summary + full data). Both verified by
+new smoke:agent-execution sections (fallback completion via a failing pinned
+model, artifact presence) plus all prior smokes unchanged.
+
+**Step 9, sub-step 1 — swarm jobs are canonical Tasks (done).** Swarm execution
+already routed through `delegate_agent` -> AgentEngine.executeTask; the runner's
+swarm executor now passes `__kind: 'swarm'`, the skill threads it through the new
+`ExecuteTaskOptions.kind` (default `delegation`), so every swarm job runs as a
+canonical kind-'swarm' child Task under the parent mission — engine-owned turn
+loop, verdicts, policy, checkpoints, telemetry — while `swarm_data.json` stays
+authoritative for swarm-level statuses/results. Verified by smoke:agent-execution
+(kind-'swarm' child Task, COMPLETED + SUCCESS) and all prior smokes unchanged.
+
+**Step 9, sub-step 2 — background goals are canonical Tasks (done).** The
+runner's background goal executor now routes every goal through
+`AgentEngine.executeTask` as a canonical kind-'background' Task: it selects a
+worker via `selectForProfile` (capability hints from the goal + task-scope
+'background', falling back to a registered ephemeral Background Worker agent
+with the full native tool surface), runs the goal prompt through the
+engine-owned child mission (turn loop, policy, checkpoints, telemetry), and
+links the canonical Task id back onto the goal record
+(`metadata.canonicalTaskId`) so background_goals.json consumers can trace
+statuses to the canonical Task — background_goals.json stays authoritative for
+statuses (the worker still owns in-progress/completed/failed/retry
+transitions). `ExecuteTaskOptions.metadata` carries host linkage
+(`backgroundGoalId`) onto the child Task. On any failure the executor falls
+back to the legacy mission-loop path so background work never drops; the
+learned-skill-creation path is unchanged. Verified by smoke:agent-execution
+section 6 (kind-'background' child Task + linkage metadata),
+smoke:agent-task-profile (background task-scope selection), and all prior
+smokes unchanged.
+via `selectForProfile` for swarm/background assignments.
