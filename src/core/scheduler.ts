@@ -22,6 +22,11 @@ export type ScheduledJob = {
   /** Overlap-guard bookkeeping: how many ticks were skipped because the previous run was still in flight. */
   skippedRuns?: number;
   lastSkippedAt?: number;
+  /** Failure bookkeeping (Phase 15 Move 2): last error, count, and when — a
+   *  scheduled job that fails is visible and auditable, not swallowed. */
+  lastError?: string;
+  failureCount?: number;
+  lastFailedAt?: number;
 };
 
 export class SchedulerManager {
@@ -158,7 +163,16 @@ export class SchedulerManager {
 
       try {
         await this.onRun(job);
-      } catch {
+      } catch (err: any) {
+        // Phase 15 Move 2: record failures instead of swallowing them — the
+        // canonical Task carries the execution evidence; the job record makes
+        // the failure visible and auditable.
+        job.lastError = err?.message || 'Scheduled job failed';
+        job.failureCount = (job.failureCount || 0) + 1;
+        job.lastFailedAt = Date.now();
+        this.jobs[id] = job;
+        this.save();
+        console.warn(`[Scheduler] Job '${job.id}' failed (failureCount=${job.failureCount}): ${job.lastError}`);
       }
 
       const updated = this.jobs[id];

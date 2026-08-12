@@ -98,6 +98,22 @@ async function main() {
   assert.ok(listedJob.lastSkippedAtLabel, 'lastSkippedAtLabel surfaced in skill list');
   assert.ok(String(listedJob.overlap).includes('Skipped 1 run'), 'overlap summary surfaced in skill list');
 
+  // ------------------------------------------------------------ 6. failure recording
+  // Phase 15 Move 2: a throwing onRun is recorded on the job (failureCount /
+  // lastError / lastFailedAt) instead of being swallowed — scheduled failures
+  // are visible and auditable, and one-shots still disable themselves.
+  const failing = new SchedulerManager(async () => {
+    throw new Error('boom: scheduled job failed');
+  });
+  const flaky = failing.create({ sessionId: 's1', prompt: 'flaky', delayMs: 60000 });
+  await (failing as any).runJob(flaky.id);
+  assert.strictEqual(flaky.failureCount, 1, 'job failure counted');
+  assert.ok(String(flaky.lastError).includes('boom'), 'job failure error recorded');
+  assert.ok(typeof flaky.lastFailedAt === 'number', 'job failure timestamp recorded');
+  assert.strictEqual(flaky.enabled, false, 'failed one-shot disables itself');
+  const flakyRaw = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'scheduler.json'), 'utf-8'));
+  assert.strictEqual(flakyRaw[flaky.id].failureCount, 1, 'job failure persisted');
+
   console.log('\n{"success":true}');
 }
 

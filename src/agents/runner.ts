@@ -169,7 +169,9 @@ export class AgentRunner {
     this.learning = new LearningManager(
       () => this.getModel(),
       this.memory,
-      async (sessionId, message) => this.gateway.sendResponse(sessionId, message)
+      async (sessionId, message) => this.gateway.sendResponse(sessionId, message),
+      // Phase 15 Move 2: external research runs inside canonical Tasks.
+      taskEngine
     );
     this.marketplace = new SkillMarketplaceManager();
     this.mcpManager = new McpManager();
@@ -248,7 +250,9 @@ export class AgentRunner {
       // Step 9.3 — scheduled jobs run as canonical kind-'scheduled' Tasks
       // through AgentEngine.executeTask (AgentEngine owns WHO, TaskEngine owns
       // HOW); the scheduler keeps owning WHEN (timers, persistence, cancel).
-      // On any failure the legacy mission path takes over.
+      // Phase 15 Move 2: there is no second execution path — on failure the
+      // session is notified, the error is rethrown so the scheduler records
+      // it on the job, and the failed canonical Task is the evidence.
       const canonical = await this.runScheduledJobViaEngine(job);
       if (canonical.ok) {
         if (canonical.output) {
@@ -257,14 +261,8 @@ export class AgentRunner {
         return;
       }
 
-      const scheduledMsg: Message = {
-        id: uuidv4(),
-        channel: 'scheduler',
-        senderId: 'scheduler',
-        content: job.prompt,
-        timestamp: Date.now()
-      };
-      await this.processMessage(job.sessionId, scheduledMsg);
+      await this.deliverScheduledResult(job, `⚠️ Scheduled job failed: ${canonical.error || 'the canonical task did not complete'}`);
+      throw new Error(canonical.error || 'Scheduled job failed through the canonical task');
     });
 
     // Initialize default components
@@ -503,7 +501,7 @@ export class AgentRunner {
     goal: BackgroundGoal,
     task: string,
     progressCallback: (percent: number, note: string) => void
-  ): Promise<{ ok: boolean; output?: string }> {
+  ): Promise<{ ok: boolean; output?: string; error?: string }> {
     try {
       agentRegistry.refresh();
       const profile: TaskProfile = {
@@ -537,16 +535,80 @@ export class AgentRunner {
       if (exec.taskId) {
         goal.metadata = { ...(goal.metadata || {}), canonicalTaskId: exec.taskId };
       }
-      // A failed child mission must NOT look like a completed goal — fall back
-      // so the worker's own status/retry authority decides the outcome.
-      if (!exec.success) return { ok: false };
+      // A failed child mission must NOT look like a completed goal — ensure
+      // terminal canonical evidence, then let the worker's own status/retry
+      // authority decide the outcome. There is no second execution path.
+      if (!exec.success) {
+        const error = exec.error || exec.result?.errorSummary || exec.result?.summary
+          || 'Background goal failed through the canonical task';
+        await this.failCanonicalTasks(exec.taskIds, error);
+        return { ok: false, error };
+      }
       const result = exec.result;
       const output = result.finalOutput || result.summary
         || 'Background goal completed through the canonical background task.';
       return { ok: true, output };
     } catch (err: any) {
-      console.warn('[AgentRunner] Background goal via AgentEngine failed; falling back to the mission loop:', err?.message || err);
-      return { ok: false };
+      console.warn('[AgentRunner] Background goal via AgentEngine failed; worker authority decides the outcome:', err?.message || err);
+      return { ok: false, error: err?.message || 'Background goal failed through the canonical task' };
+    }
+  }
+
+  /**
+   * Phase 15 Move 2 — ensure a failed engine execution leaves terminal
+   * canonical evidence: fail any child Task the engine left non-terminal
+   * (the exception path can abort mid-mission). Best-effort.
+   */
+  private async failCanonicalTasks(taskIds: string[] | undefined, error: string): Promise<void> {
+    for (const taskId of taskIds || []) {
+      try {
+        const task = taskEngine.get(taskId);
+        if (!task) continue;
+        const status = task.status;
+        if (status === 'COMPLETED' || status === 'FAILED' || status === 'CANCELLED') continue;
+        await taskEngine.failTask(taskId, error);
+      } catch {
+        /* evidence is best-effort */
+      }
+    }
+  }
+
+  /**
+   * Phase 15 S1 — run a learned-skill-creation goal as a canonical kind-
+   * 'background' Task. The deterministic workflow
+   * (LearningManager.executeSkillCreationGoal) executes AS the Task:
+   * TaskEngine owns the lifecycle + evidence, the goal record links via
+   * canonicalTaskId, and background_goals.json stays authoritative for goal
+   * statuses. Returns { ok: false } (having failed the Task for evidence) so
+   * the caller can rethrow and let the worker's retry/status authority decide.
+   */
+  private async runSkillCreationGoalViaEngine(goal: BackgroundGoal): Promise<{ ok: boolean; output?: string; error?: string }> {
+    let taskId: string | undefined;
+    try {
+      const task = await taskEngine.create({
+        goal: `Create learned skill: ${goal.title}`,
+        kind: 'background',
+        sessionId: goal.sessionId,
+        metadata: { source: 'skill-creation', backgroundGoalId: goal.id }
+      });
+      taskId = task.id;
+      goal.metadata = { ...(goal.metadata || {}), canonicalTaskId: task.id };
+      await taskEngine.analyze(task.id);
+      await taskEngine.plan(task.id);
+      await taskEngine.start(task.id);
+      const result = await this.learning.executeSkillCreationGoal(goal);
+      await taskEngine.complete(task.id, {
+        status: 'SUCCESS',
+        summary: result,
+        result: { summary: result, status: 'completed', finalOutput: result }
+      });
+      return { ok: true, output: result };
+    } catch (err: any) {
+      const message = err?.message || 'Skill creation failed';
+      if (taskId) {
+        try { await taskEngine.failTask(taskId, message); } catch { /* evidence is best-effort */ }
+      }
+      return { ok: false, error: message };
     }
   }
 
@@ -578,7 +640,7 @@ export class AgentRunner {
    * Returns { ok: false } on any failure so the caller falls back to the
    * legacy mission-loop path.
    */
-  private async runScheduledJobViaEngine(job: ScheduledJob): Promise<{ ok: boolean; output?: string }> {
+  private async runScheduledJobViaEngine(job: ScheduledJob): Promise<{ ok: boolean; output?: string; error?: string }> {
     try {
       agentRegistry.refresh();
       const profile: TaskProfile = { goal: job.prompt, kind: 'scheduled' };
@@ -605,16 +667,21 @@ export class AgentRunner {
         }
       });
 
-      // A failed child mission must NOT be delivered as success — fall back so
-      // the legacy mission path decides the outcome.
-      if (!exec.success) return { ok: false };
+      // A failed child mission must NOT be delivered as success — ensure
+      // terminal canonical evidence and let the scheduler record the failure.
+      if (!exec.success) {
+        const error = exec.error || exec.result?.errorSummary || exec.result?.summary
+          || 'Scheduled job failed through the canonical task';
+        await this.failCanonicalTasks(exec.taskIds, error);
+        return { ok: false, error };
+      }
       const result = exec.result;
       const output = result.finalOutput || result.summary || '';
-      if (!output) return { ok: false };
+      if (!output) return { ok: false, error: 'Scheduled job produced no output' };
       return { ok: true, output };
     } catch (err: any) {
-      console.warn('[AgentRunner] Scheduled job via AgentEngine failed; falling back to the mission loop:', err?.message || err);
-      return { ok: false };
+      console.warn('[AgentRunner] Scheduled job via AgentEngine failed; scheduler records the failure:', err?.message || err);
+      return { ok: false, error: err?.message || 'Scheduled job failed through the canonical task' };
     }
   }
 
@@ -1598,13 +1665,19 @@ export class AgentRunner {
 
       if (goal.metadata?.kind === 'learned-skill-creation') {
         progressCallback(35, 'Validating the learned workflow...');
-        const result = await this.learning.executeSkillCreationGoal(goal);
-        progressCallback(100, 'Learned skill created and activated');
-        return result;
+        // Phase 15 S1: the skill-creation workflow runs as a canonical
+        // kind-'background' Task (TaskEngine owns lifecycle + evidence, the
+        // goal record links via canonicalTaskId). On failure the Task is
+        // failed for evidence and the error rethrown so the worker's own
+        // status/retry authority decides the goal outcome.
+        const canonical = await this.runSkillCreationGoalViaEngine(goal);
+        if (canonical.ok) {
+          progressCallback(100, 'Learned skill created and activated');
+          return canonical.output || '';
+        }
+        throw new Error(canonical.error || 'Skill creation failed');
       }
 
-      const backgroundSessionId = `${goal.sessionId}:background:${goal.id}`;
-      const before = this.memory.getAll(backgroundSessionId).length;
       const project = goal.projectId ? backgroundWorker.getProject(goal.projectId) : undefined;
       const dependencyLines = goal.dependencies.length > 0
         ? goal.dependencies.map(depId => {
@@ -1640,36 +1713,19 @@ export class AgentRunner {
           '',
           'Use available tools when needed. If you change files or make project decisions, record them with the background_goals goal_memory or project_memory action. If this is a retry, use the previous error and checkpoint to recover instead of repeating the same failed approach. Finish with a concise summary of what was accomplished.'
         ].filter(Boolean).join('\n');
-      const backgroundMsg: Message = {
-        id: uuidv4(),
-        channel: 'background',
-        senderId: 'background-worker',
-        content,
-        timestamp: Date.now(),
-        metadata: {
-          backgroundGoalId: goal.id,
-          backgroundGoalTitle: goal.title
-        }
-      };
-
-      // Step 9 sub-step 2: the goal runs as a canonical kind-'background' Task
-      // through AgentEngine.executeTask; background_goals.json stays the
-      // authority for statuses (the worker drives every transition). On any
-      // failure the legacy tool-capable mission loop takes over so background
-      // work never silently drops.
+      // Step 9 sub-step 2 + Phase 15 Move 2: the goal runs as a canonical
+      // kind-'background' Task through AgentEngine.executeTask;
+      // background_goals.json stays the authority for statuses (the worker
+      // drives every transition). Failures are NOT re-dispatched through a
+      // second loop — the failed canonical Task is the evidence and the
+      // worker's own retry/status authority decides the outcome.
       const canonical = await this.runBackgroundGoalViaEngine(goal, content, progressCallback);
       if (canonical.ok) {
         progressCallback(100, 'Goal completed through canonical background task');
         return canonical.output || '';
       }
 
-      progressCallback(25, 'Dispatching goal through the tool-capable agent loop...');
-      await this.processMessage(backgroundSessionId, backgroundMsg);
-
-      const newMemories = this.memory.getAll(backgroundSessionId).slice(before);
-      const lastAssistant = [...newMemories].reverse().find(m => m.role === 'assistant');
-      progressCallback(100, 'Goal completed through agent loop');
-      return lastAssistant?.content || 'Background goal completed through the tool-capable agent loop.';
+      throw new Error(canonical.error || 'Background goal failed through the canonical task');
     });
 
 // Wire analytics for background goals

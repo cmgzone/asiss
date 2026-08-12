@@ -6,6 +6,9 @@ import path from 'path';
 async function main() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gitu-learning-loop-'));
   process.chdir(tempDir);
+  // Isolate the canonical Task store (Phase 15 S1 uses it) from the real
+  // shared store — the smoke must not write into the user's Gitu Data.
+  process.env.GITU_DATA_ROOT = tempDir;
   fs.writeFileSync('config.json', JSON.stringify({
     learning: {
       enabled: true,
@@ -43,6 +46,7 @@ async function main() {
   const { LearningManager } = await import('../src/core/learning-manager');
   const { backgroundWorker } = await import('../src/core/background-worker');
   const { learnedSkillsManager } = await import('../src/core/learned-skills');
+  const { taskEngine } = await import('../src/core/task');
 
   const fakeModel = {
     id: 'learning-smoke',
@@ -139,6 +143,82 @@ async function main() {
   const rolledBack = learnedSkillsManager.rollback('verify-after-file-changes', 'session-learning');
   assert.strictEqual(rolledBack?.version, 1, 'skill rollback restores the previous version');
 
+  // Phase 15 S1: skill-creation goals also run as canonical kind-'background'
+  // Tasks — TaskEngine owns the lifecycle + evidence, the goal record links
+  // via canonicalTaskId (background_goals.json stays the goal-status
+  // authority), and the result lands as task evidence.
+  const canonicalTask = await taskEngine.create({
+    goal: `Create learned skill: ${skillGoal!.title}`,
+    kind: 'background',
+    sessionId: 'session-learning',
+    metadata: { source: 'skill-creation', backgroundGoalId: skillGoal!.id }
+  });
+  skillGoal!.metadata = { ...(skillGoal!.metadata || {}), canonicalTaskId: canonicalTask.id };
+  await taskEngine.analyze(canonicalTask.id);
+  await taskEngine.plan(canonicalTask.id);
+  await taskEngine.start(canonicalTask.id);
+  const canonicalResult = await manager.executeSkillCreationGoal(skillGoal!);
+  await taskEngine.complete(canonicalTask.id, {
+    status: 'SUCCESS',
+    summary: canonicalResult,
+    result: { summary: canonicalResult, status: 'completed', finalOutput: canonicalResult }
+  });
+  const linkedTask = taskEngine.get(canonicalTask.id);
+  assert.strictEqual(linkedTask?.status, 'COMPLETED', 'skill-creation task completes through the canonical lifecycle');
+  assert.strictEqual(skillGoal!.metadata.canonicalTaskId, canonicalTask.id, 'goal linked to its canonical task');
+  const linkedResult: any = linkedTask?.outcome?.result;
+  const evidence = String(linkedResult?.finalOutput || linkedResult?.summary || '');
+  assert(evidence.includes('Created learned skill'), 'skill-creation evidence recorded on the canonical task');
+
+  // Phase 15 Move 2: external research runs inside canonical Tasks when a
+  // TaskEngine is wired. Rewrite config to enable external learning and stub
+  // the model + web skills so the whole pipeline is deterministic (no
+  // network); the earlier manager already ran its tick under the old config.
+  fs.writeFileSync(path.join(tempDir, 'config.json'), JSON.stringify({
+    learning: {
+      enabled: true,
+      mode: 'medium',
+      selfReview: { enabled: true },
+      external: { enabled: true, intervalMs: 0, maxTopics: 1, maxSources: 1, maxCharsPerSource: 500, recentMessages: 12 },
+      report: false,
+      autoGoals: { enabled: false },
+      autoUpdate: { enabled: false },
+      skillCreation: { enabled: false },
+      approval: { enabled: false }
+    },
+    backgroundWorker: { enabled: false }
+  }));
+  const extMemory = new MemoryManager();
+  extMemory.add('ext-session', { role: 'user', content: 'Please research the best way to verify memory retrieval regressions.', timestamp: Date.now() - 5000 });
+  const extModel = {
+    id: 'ext-stub',
+    name: 'Ext Stub',
+    generate: async (prompt: string) => {
+      if (prompt.includes('Extract up to')) {
+        return { content: JSON.stringify({ topics: [{ query: 'memory retrieval regression verification', reason: 'learn', priority: 'normal' }] }) };
+      }
+      if (prompt.includes('Create a short learning note')) {
+        return { content: JSON.stringify({ title: 'Verify retrieval regressions', summary: ['Always add a regression assertion.'], improvements: [], recommendations: [] }) };
+      }
+      return { content: '{}' };
+    }
+  } as any;
+  const searchStub = { execute: async () => ({ results: [{ title: 'Retrieval regression testing', url: 'https://example.com/retrieval' }] }) } as any;
+  const fetchStub = { execute: async () => ({ text: 'Run a regression assertion after scoring changes.' }) } as any;
+  const extManager = new LearningManager(() => extModel, extMemory, undefined, taskEngine, searchStub, fetchStub);
+  extManager.recordActivity('ext-session');
+  await extManager.tick();
+  const researchTask = taskEngine.list().find(t => t.metadata?.source === 'external-learning');
+  assert(researchTask, 'external research ran inside a canonical Task');
+  assert.strictEqual(researchTask!.kind, 'background', 'research Task is kind background');
+  assert.strictEqual(researchTask!.metadata?.topicQuery, 'memory retrieval regression verification', 'research Task carries its topic');
+  assert.strictEqual(researchTask!.status, 'COMPLETED', 'research Task completed through the canonical lifecycle');
+  const researchResult: any = researchTask!.outcome?.result;
+  assert(String(researchResult?.summary || '').includes('Verify retrieval regressions'),
+    'research entry title recorded as the Task summary evidence');
+  assert(String(researchResult?.finalOutput || '').includes('Always add a regression assertion'),
+    'research entry content recorded as the Task evidence');
+
   const smokeResult = {
     success: true,
     tempDir,
@@ -147,7 +227,9 @@ async function main() {
     promptInjected: true,
     versioning: true,
     rollback: true,
-    pendingReviewPersistence: true
+    pendingReviewPersistence: true,
+    canonicalSkillCreation: true,
+    canonicalExternalResearch: true
   };
   fs.writeFileSync(path.join(tempDir, 'smoke-result.json'), JSON.stringify(smokeResult, null, 2));
   console.log(JSON.stringify(smokeResult, null, 2));

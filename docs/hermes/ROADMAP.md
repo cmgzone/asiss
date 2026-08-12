@@ -29,7 +29,7 @@
 | 12 | Execution authority | Mission loop adopts taskEngine.run() (see docs/hermes/AUDIT_2.md) | [x] |
 | 13 | Canonical scheduler -> Tasks | Delegation/swarm/background/scheduled all execute as canonical Tasks (Phase 13, done) | [x] |
 | 14 | Unified memory | Model + catalog, episodic capture, consolidation/lifecycle, MemorySkill retrieve, learning loop — restart-recall proven (docs/hermes/MEMORY_AUDIT.md) | [x] |
-| 15 | All autonomous work -> Tasks | Heartbeats, recurring work, autonomous goals, retry/resume on the canonical Task lifecycle | [ ] |
+| 15 | All autonomous work -> Tasks | Every origin funnels through canonical Tasks; skill creation + external research wrapped, legacy fallbacks retired (docs/hermes/AUDIT_6.md) | [x] |
 | 16 | Unified AgentEngine | One engine; agents are configurations (profiles, roles, model/tool/memory policies, handoffs) | [ ] |
 | 17 | Self-repair coding loop | code -> test -> diagnose -> repair -> verify with failure memory | [ ] |
 | 18 | Repository intelligence | Index/symbol/dependency graphs, change-impact analysis, minimal context | [ ] |
@@ -732,5 +732,50 @@ post-Phase-14 improvements; the next phase on the roadmap is **Phase 15 —
 all autonomous work flows through canonical Tasks** (heartbeats, recurring
 work, autonomous goals, retry/resume on the canonical Task lifecycle,
 removing duplicate autonomous-work managers).
+
+**Phase 15, Move 1 — audit + consolidate the last straggler (done,
+docs/hermes/AUDIT_6.md).** The audit mapped every autonomous work origin
+against the canonical Task lifecycle: mission/delegation/swarm/background/
+scheduled all funnel into TaskEngine (via `AgentEngine.executeTask` or the
+mission loop, which creates canonical `kind: 'mission'` Tasks); the heartbeat
+and proactive engine are WHEN/advisory-only; retry/resume is engine-owned
+(`TaskEngine.diagnose`/`retry`/`resume`); store statuses remain authoritative
+with canonical linkage (by design, Audit 4 S2). One straggler remained:
+learned-skill-creation goals executed through
+`LearningManager.executeSkillCreationGoal` OUTSIDE the lifecycle — no Task,
+no events, no evidence. Consolidated: the runner's background executor now
+wraps skill creation in a canonical `kind: 'background'` Task
+(`runSkillCreationGoalViaEngine`: create → analyze → plan → start →
+workflow-as-execution → complete with evidence; on failure `failTask` for
+evidence + rethrow so the goal store's retry/status authority decides).
+`goal.metadata.canonicalTaskId` links the goal record. Verified by
+`smoke:learning` (canonicalSkillCreation: goal linkage → COMPLETED → result
+evidence; smoke isolated via `GITU_DATA_ROOT`) + `tsc --noEmit`; the full
+battery unchanged. **Every work origin now produces a canonical Task.**
+
+**Phase 15, Move 2 — external research wrapped; fallbacks retired (done).**
+`LearningManager` gains an optional `taskEngine` (runner wires it); each
+external-research topic runs inside a canonical `kind: 'background'` Task
+(`source: 'external-learning'` + `topicQuery`) with the entry title/summary as
+evidence, or `failTask` on error (legacy direct path when no engine wired).
+The legacy mission-loop fallbacks are retired from BOTH the background
+executor and the scheduled `onRun`: failed engine executions leave terminal
+canonical evidence (`failCanonicalTasks` fails any non-terminal child Task),
+the background worker's retry/status authority decides goal outcomes, and the
+scheduler now RECORDS failures on the job (`lastError`/`failureCount`/
+`lastFailedAt`, persisted) instead of swallowing them (`catch {}`). These
+were the last two call sites routing autonomous work through the interactive
+loop as a fallback; the loop remains the host-driven interactive driver.
+Verified by `smoke:learning` (canonicalExternalResearch: research Task
+COMPLETED with evidence, stubbed model/web skills — no network) +
+`smoke:scheduler` (new section: a throwing `onRun` records failureCount /
+lastError / lastFailedAt and persists; one-shots still disable) + `tsc
+--noEmit`; the full battery green. **Phase 15 complete: every autonomous work
+origin — mission, delegation, swarm, background, scheduled, skill creation,
+external research — funnels through the canonical Task lifecycle, with one
+WHEN authority per trigger and store statuses authoritative via canonical
+linkage.** Next roadmap phase: **Phase 16 — unified AgentEngine** (agents as
+configurations of one engine: profiles, role instructions, tool/model/memory
+policies, handoffs).
 
 

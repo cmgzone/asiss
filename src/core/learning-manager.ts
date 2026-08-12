@@ -5,6 +5,7 @@ import { MemoryManager } from './memory';
 import { ModelProvider } from './models';
 import { WebFetchSkill, WebSearchSkill } from '../skills/web';
 import { backgroundWorker, BackgroundGoal, GoalPriority } from './background-worker';
+import type { TaskEngine } from './task';
 import { dndManager } from './dnd';
 import { learnedSkillsManager } from './learned-skills';
 import { SkillRegistry } from './skills';
@@ -188,14 +189,23 @@ export class LearningManager {
   private runningExternal = false;
   private lastActivityAt: Map<string, number> = new Map();
 
-  private searchSkill = new WebSearchSkill();
-  private fetchSkill = new WebFetchSkill();
+  private searchSkill: WebSearchSkill;
+  private fetchSkill: WebFetchSkill;
 
   constructor(
     private getModel: () => ModelProvider,
     private memory: MemoryManager,
-    private report?: (sessionId: string, message: string) => Promise<void>
+    private report?: (sessionId: string, message: string) => Promise<void>,
+    /** Phase 15 Move 2: when wired, external research runs inside canonical
+     *  kind-'background' Tasks (TaskEngine owns lifecycle + evidence). When
+     *  absent, the legacy direct path is used. */
+    private taskEngine?: TaskEngine,
+    searchSkill?: WebSearchSkill,
+    fetchSkill?: WebFetchSkill
   ) {
+    // Injectable for deterministic tests; defaults to the real web skills.
+    this.searchSkill = searchSkill || new WebSearchSkill();
+    this.fetchSkill = fetchSkill || new WebFetchSkill();
     this.config = this.getDefaultConfig();
     this.ensureDir(this.dataDir);
     this.loadState();
@@ -1021,7 +1031,9 @@ export class LearningManager {
       }
 
       for (const topic of topics) {
-        const entry = await this.learnFromTopic(sessionId, topic);
+        const entry = this.taskEngine
+          ? await this.learnFromTopicWithTask(sessionId, topic)
+          : await this.learnFromTopic(sessionId, topic);
         if (entry) {
           this.appendEntry(entry);
           if (this.config.report && this.report) {
@@ -1083,6 +1095,46 @@ export class LearningManager {
       });
     }
     return topics.slice(0, profile.externalMaxTopics);
+  }
+
+  /**
+   * Phase 15 Move 2: run one external-research topic inside a canonical
+   * kind-'background' Task — the research executes AS the Task, TaskEngine
+   * owns lifecycle + evidence, and failures are recorded on the Task. The
+   * topic's entry (or null) is returned exactly like learnFromTopic.
+   */
+  private async learnFromTopicWithTask(sessionId: string, topic: AutoTopic): Promise<LearningEntry | null> {
+    const engine = this.taskEngine!;
+    let taskId: string | undefined;
+    try {
+      const task = await engine.create({
+        goal: `External research: ${topic.query}`,
+        kind: 'background',
+        sessionId,
+        metadata: { source: 'external-learning', topicQuery: topic.query }
+      });
+      taskId = task.id;
+      await engine.analyze(task.id);
+      await engine.plan(task.id);
+      await engine.start(task.id);
+      const entry = await this.learnFromTopic(sessionId, topic);
+      const summary = entry ? entry.title : 'No new learning from this topic.';
+      await engine.complete(task.id, {
+        status: 'SUCCESS',
+        summary,
+        result: {
+          status: 'completed',
+          summary,
+          finalOutput: entry?.summary || summary
+        }
+      });
+      return entry;
+    } catch (err: any) {
+      if (taskId) {
+        try { await engine.failTask(taskId, err?.message || 'External research failed'); } catch { /* evidence is best-effort */ }
+      }
+      return null;
+    }
   }
 
   private async learnFromTopic(sessionId: string, topic: AutoTopic): Promise<LearningEntry | null> {
