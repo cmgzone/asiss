@@ -360,7 +360,55 @@ async function main() {
     console.log('14. recordToolKind drives verification-pending    ok');
   }
 
-  console.log(JSON.stringify({ success: true, sections: 14 }));
+  // ---- 15. runMission drives the loop (Move 4a) ----
+  {
+    const { engine, events } = setup();
+    const task = await mission(engine);
+    const iterations: string[] = [];
+    const result = await engine.runMission(task.id, {
+      iterate: async ({ turn }) => {
+        if (turn === 1) {
+          iterations.push(`t${turn}:tools`);
+          return { content: 'applying the patch', tools: [{ name: 'apply_patch', success: true, output: 'ok' }], model: 'gpt-x' };
+        }
+        iterations.push(`t${turn}:draft`);
+        return { content: 'patch applied and verified for real' };
+      },
+      completionVerdict: async ({ evidence }) => ({
+        type: 'complete',
+        summary: (evidence.finalDraft || '').slice(0, 60)
+      }),
+      budget: { maxTurns: 3, maxForcedContinuations: 2 },
+      onTurn: (r, ctx) => { events.push({ name: `turn-${ctx.turn}` as any, action: r.action } as any); }
+    });
+    assert.deepStrictEqual(iterations, ['t1:tools', 't2:draft'], 'engine walks tool batch then final answer');
+    assert.strictEqual(result.action, 'complete', 'mission completed through the driver');
+    assert.strictEqual(result.task.status, 'COMPLETED', 'task COMPLETED');
+    assert.strictEqual(result.task.outcome?.summary, 'patch applied and verified for real', 'summary recorded');
+    assert.strictEqual(result.turns, 2, 'two iterations processed');
+    assert.strictEqual(result.task.toolExecutions.length, 1, 'tool batch recorded on the task');
+    assert.strictEqual(result.task.toolExecutions[0].name, 'apply_patch', 'tool execution recorded');
+    assert.strictEqual(result.stoppedByStepLimit, false, 'completed within budget');
+
+    // step-limit: no terminal answer within budget -> blocked + stoppedByStepLimit
+    const engine2 = setup().engine;
+    const endless = await mission(engine2, 'keep crafting');
+    const limResult = await engine2.runMission(endless.id, {
+      iterate: async ({ turn }) => {
+        if (turn === 1) return { content: 'working...', tools: [{ name: 'apply_patch', success: true }] };
+        return { content: 'still working...' };
+      },
+      completionVerdict: async () => ({ type: 'continue', reason: 'keep going' }),
+      budget: { maxTurns: 2, maxForcedContinuations: 2 }
+    });
+    assert.strictEqual(limResult.action, 'blocked', 'step limit answered blocked');
+    assert.strictEqual(limResult.stoppedByStepLimit, true, 'stoppedByStepLimit surfaced');
+    assert.strictEqual(limResult.task.status, 'FAILED', 'terminal state owned by the engine');
+
+    console.log('15. runMission drives the loop                     ok');
+  }
+
+  console.log(JSON.stringify({ success: true, sections: 15 }));
 }
 
 main().then(() => process.exit(0)).catch((err) => {

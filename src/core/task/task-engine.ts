@@ -248,6 +248,72 @@ export interface TaskTurnRunOptions {
   completionVerdict?: TaskCompletionVerdictHook;
 }
 
+// ------------------------------------------------------------ mission driver
+// Phase 12 Move 4a — the engine owns the mission loop. The host supplies one
+// model+tool batch per iteration through `iterate`; the engine walks the turns,
+// enforces the budgets, and owns every lifecycle transition. AgentRunner stops
+// owning the loop body.
+
+/** Context handed to the host's iterate hook for one mission iteration. */
+export interface TaskMissionIterateContext {
+  /** Next sequential turn number (1-based). */
+  turn: number;
+  /** Current task snapshot as the iteration begins. */
+  task: Task;
+  /** Host-domain completion pressure (number of continue/verify forks so far). */
+  forcedContinuations: number;
+  /** Engine-owned "a mutation has not been verified" state. */
+  verificationPending: boolean;
+}
+
+/** One model+tool batch produced by the host loop body. */
+export interface TaskMissionIteration {
+  /** Model text produced this iteration. */
+  content: string;
+  /** Tools executed this iteration (recorded on the Task). */
+  tools?: TaskTurnToolExecution[];
+  /** Model used this iteration (recorded via assignModel when different). */
+  model?: string;
+  /** 0-100 progress estimate after this iteration. */
+  progress?: number;
+  /** Host judgment inputs the completion hook reads. */
+  lastBatchHadFailure?: boolean;
+  toolRequired?: boolean;
+  verificationRequired?: boolean;
+}
+
+export type TaskMissionIterate =
+  (ctx: TaskMissionIterateContext) => TaskMissionIteration | Promise<TaskMissionIteration>;
+
+/** Loop budgets the engine enforces while driving a mission. */
+export interface TaskMissionBudget {
+  /** Max mission iterations (turns). Default 6. */
+  maxTurns?: number;
+  /** Completion-verdict fork budget (continue/verify). Default 4. */
+  maxForcedContinuations?: number;
+}
+
+export interface TaskMissionRunOptions extends TaskTurnRunOptions {
+  /** Host loop body: one model + tool batch. Required. */
+  iterate: TaskMissionIterate;
+  /** Budgets the engine owns. */
+  budget?: TaskMissionBudget;
+  /** Called after each completed turn so the host can stream progress. */
+  onTurn?: (result: TaskTurnResult, ctx: TaskMissionIterateContext) => void | Promise<void>;
+}
+
+export interface TaskMissionResult {
+  task: Task;
+  action: TaskTurnAction;
+  /** Number of iterations (turns) the engine processed. */
+  turns: number;
+  /** True when the loop halted because the turn budget was exhausted. */
+  stoppedByStepLimit: boolean;
+  reason?: string;
+  error?: string;
+  diagnosis?: TaskDiagnosis;
+}
+
 // --------------------------------------------------------------------- engine
 
 export class TaskEngine {
@@ -569,6 +635,130 @@ export class TaskEngine {
       ...(diagnosis ? { diagnosis } : {}),
       ...(reason ? { reason } : {}),
       ...(error ? { error } : {})
+    };
+  }
+
+  /**
+   * Phase 12 Move 4a — the engine owns the mission loop. The host supplies one
+   * model+tool batch per iteration via `iterate`; the engine walks the turns,
+   * enforces budgets, and owns every lifecycle transition through runTurn.
+   *
+   * Loop semantics (single source of truth for the loop shape):
+   *   - each requested iteration is processed as the next sequential turn;
+   *   - an iteration that used tools keeps the task EXECUTING without a
+   *     completion judgment (the engine decides: a tool batch is not a
+   *     completion point) — the turn records the tool executions;
+   *   - an iteration without tools is a completion candidate: the engine asks
+   *     the completion hook (continue / verify / complete / fail / blocked)
+   *     and owns the resulting transition;
+   *   - continue/verify count as forked continuation points; when
+   *     `maxForcedContinuations` is consumed the engine answers `blocked`;
+   *   - when the iteration budget (`maxTurns`) is exhausted the mission stops
+   *     with `stoppedByStepLimit`, and a blocked verdict surfaces.
+   *
+   * Never leaves the task in a terminal state it did not own: every transition
+   * goes through runTurn's verdict switch.
+   */
+  async runMission(taskId: string, options: TaskMissionRunOptions): Promise<TaskMissionResult> {
+    const record = this.require(taskId);
+    const entity = new TaskEntity(record);
+    if (entity.status === 'READY') {
+      await this.start(taskId);
+    }
+    const budget = options.budget || {};
+    const maxTurns = budget.maxTurns ?? 6;
+    const maxForced = budget.maxForcedContinuations ?? 4;
+    let forcedContinuations = 0;
+    let stoppedByStepLimit = false;
+
+    for (let turn = 1; turn <= maxTurns; turn++) {
+      const snapshot = this.store.require(taskId);
+      const ctx: TaskMissionIterateContext = {
+        turn,
+        task: snapshot,
+        forcedContinuations,
+        verificationPending: this.verificationPending(taskId)
+      };
+      const iteration = await options.iterate(ctx);
+      const usedTools = Array.isArray(iteration.tools) && iteration.tools.length > 0;
+      const evidence: TaskCompletionEvidence = {
+        toolRequired: iteration.toolRequired ?? true,
+        totalToolCalls: snapshot.toolExecutions.length,
+        lastBatchHadFailure: iteration.lastBatchHadFailure ?? false,
+        verificationRequired: iteration.verificationRequired ?? true,
+        lastMutationSequence: -1,
+        lastVerificationSequence: -1,
+        forcedContinuations,
+        maxForcedContinuations: maxForced,
+        finalDraft: iteration.content || ''
+      };
+
+      let verdict: TaskTurnVerdict;
+      if (usedTools) {
+        // A tool batch is not a completion point. The engine owns this: the
+        // iteration keeps working until the model produces a final answer.
+        verdict = { type: 'continue', reason: 'Tool batch executed; continuing the mission.' };
+      } else {
+        verdict = await this.askCompletionVerdict(taskId, { turn, evidence }, options);
+      }
+
+      const result = await this.runTurn(taskId, {
+        turn,
+        verdict,
+        evidence,
+        tools: iteration.tools,
+        model: iteration.model,
+        ...(typeof iteration.progress === 'number' ? { progress: iteration.progress } : {})
+      }, options);
+
+      if (typeof options.onTurn === 'function') {
+        await options.onTurn(result, ctx);
+      }
+
+      if (result.action === 'continue' || result.action === 'verify') {
+        forcedContinuations += 1;
+        continue;
+      }
+
+      return {
+        task: this.store.require(taskId),
+        action: result.action,
+        turns: turn,
+        stoppedByStepLimit: false,
+        ...(result.reason ? { reason: result.reason } : {}),
+        ...(result.error ? { error: result.error } : {}),
+        ...(result.diagnosis ? { diagnosis: result.diagnosis } : {})
+      };
+    }
+
+    // The iteration budget ran out without a terminal verdict.
+    if (this.store.require(taskId).status === 'EXECUTING') {
+      stoppedByStepLimit = true;
+      const evidence: TaskCompletionEvidence = {
+        toolRequired: true,
+        totalToolCalls: this.store.require(taskId).toolExecutions.length,
+        lastBatchHadFailure: false,
+        verificationRequired: true,
+        forcedContinuations,
+        maxForcedContinuations: maxForced,
+        finalDraft: ''
+      };
+      const taskNow = this.store.require(taskId);
+      const verdict: TaskTurnVerdict = { type: 'blocked', error: 'Automation step limit reached.', reason: 'turn budget exhausted' };
+      await this.runTurn(taskId, {
+        turn: (taskNow.timing?.turns || 0) + 1,
+        verdict,
+        evidence
+      }, options);
+    }
+
+    return {
+      task: this.store.require(taskId),
+      action: 'blocked',
+      turns: maxTurns,
+      stoppedByStepLimit,
+      reason: 'Automation step limit reached.',
+      error: 'Automation step limit reached.'
     };
   }
 

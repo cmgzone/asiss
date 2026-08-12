@@ -374,6 +374,21 @@ smoke:turn-contract` (14 sections — 2 new: verify verdict runs the diagnose
 authority, recordToolKind drives verification-pending) and by `npm run
 smoke:runtime` (the 6-turn e2e mission still completes).
 
-**Phase 12, Move 4 (planned) — delegate the loop body.** Turn the mission
-loop's model+tool batch body into the host hook the turn contract drives, so
-AgentRunner stops owning the loop.
+**Phase 12, Move 4a — engine-owned mission driver (done).** `TaskEngine.runMission`
+now owns the mission loop shape. The host supplies one model+tool batch per
+iteration via the `iterate` hook (`TaskMissionIterate`); the engine walks the
+turns sequentially, enforces the budgets (`maxTurns`, `maxForcedContinuations`),
+and owns every lifecycle transition through `runTurn`. The engine decides a tool
+batch is not a completion point (the iteration keeps working), a no-tool draft
+is asked against the completion hook, and terminal states are always produced by
+runTurn's verdict switch — the engine never leaves the task in a state it did
+not own. Step-limit exhaustion surfaces `stoppedByStepLimit`. Verified by
+`npm run smoke:turn-contract` (15 sections — 1 new: runMission walks a tool
+batch then a final answer to COMPLETED, and step-limit answers blocked) plus
+`smoke:runtime` (6-turn e2e) and `smoke:baseline` still green. AgentRunner still
+owns the loop body in production; Move 4b migrates it onto the driver.
+
+**Phase 12, Move 4b (planned) — migrate AgentRunner's loop body.** Replace the
+mission loop's model+tool batch body with the `runMission` iterate hook so
+AgentRunner stops owning the loop, keeping the 6-turn e2e green. Then Move 4c
+removes the runner's now-redundant loop scaffolding.
