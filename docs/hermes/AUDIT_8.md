@@ -98,7 +98,8 @@ executor (see F2).
    Retry-as-loop is the repair authority; `TaskRepairer` stays the
    documented future seam, asserted unwired in the verification gate
    (smoke:phase16 Gate 8).
-3. **Move 4 — verification**: update AUDIT_8 + ROADMAP; full battery.
+3. **Move 4 — verification — DONE (below).** Update AUDIT_8 + ROADMAP;
+   full battery green; Phase 17 complete.
 
 ## 5. Move 2 — terminal verification gate (done)
 
@@ -124,7 +125,7 @@ is pending; that answer now gates on real tests instead of only sequencing.
 The gate failure reason (test output) flows into the completion-check memory
 so the model's repair is targeted.
 
-## 6. Acceptance gate (Moves 1-3)
+## 6. Acceptance gate (Moves 1-4)
 
 Move 1 was documentation only. Move 2 verified by `tsc --noEmit` clean +
 `smoke:turn-contract` section 16 (gate pass -> COMPLETED with a PASSED
@@ -142,6 +143,11 @@ Move 3 verified by `tsc --noEmit` clean + `smoke:phase16` Gate 8
 (phase17_repairSeam: `TaskRepairer` exists only in task-engine.ts, no
 production call site passes the `repair` option, and the hook is invoked
 exactly once — inside the engine's `retry()` resume path) + the full battery.
+
+Move 4 verified below (section 8): docs finalized, the acceptance gate spans
+Moves 1-4, and the full regression battery ran green in one pass — including
+`smoke:turn-contract` §16 and `smoke:phase16` (permanent Phase 16 gates +
+`phase17_gateWired` + `phase17_repairSeam`).
 
 ## 7. Move 3 — repair authority documented (done)
 
@@ -169,5 +175,36 @@ hook is the seam, do not wire it outside `retry()`.
 task-engine.ts; no `repair:` option passes at any production call site;
 the hook is invoked exactly once, via `options.repair(`, inside `retry()`.
 Comments are stripped so the seam's own documentation cannot trip the guard.
-Phase 17 is otherwise verification-complete: F1 (Move 2), F2 (Move 3),
-F3/F4 by design; Move 4 closes with the battery + this doc.
+F1 (Move 2), F2 (Move 3), F3/F4 by design; **Move 4 closes the phase below.**
+
+## 8. Move 4 — finalization + full-battery closeout (done)
+
+Docs finalized: this audit (acceptance gate now spans Moves 1-4) and the
+ROADMAP (Phase 17 entries complete, phase-table row 17 marked [x]). The full
+regression battery ran green in one pass — `tsc --noEmit` clean plus every
+battery smoke: `smoke:runtime` (e2e mission, goalRetryHint +
+goalVerification), `smoke:baseline`, `smoke:terminal-paths`,
+`smoke:delegation`, `smoke:agent-engine`, `smoke:agent-execution`,
+`smoke:agent-task-profile`, `smoke:scheduler`, `smoke:memory-unified`,
+`smoke:repo-index`, `smoke:tools`, `smoke:policy`, `smoke:context`,
+`smoke:config`, `smoke:checkpoints`, `smoke:model-engine`,
+`smoke:executable-skills`, `smoke:execution-backends`, `smoke:turn-contract`
+(section 16: gate pass / repair / budget-exhaust), and `smoke:phase16` (all
+permanent Phase 16 gates + `phase17_gateWired` + `phase17_repairSeam`).
+
+Pre-existing and out of the battery (identical at Phase 16 HEAD, zero diff
+under Phase 17): `smoke:learning` (fails identically at HEAD),
+`smoke:model-resilience` (cooldown-skip assertion), `smoke:execute-workflow`
+(TS18048 in the script), and the interactive `smoke:casual` /
+`smoke:repetition` (need a live model; hang without one). Two transient
+Windows `tmp+rename` EPERM flakes in the atomic save (task-store.ts —
+untouched by Phase 17) appeared on agent-execution and baseline and were
+green on clean re-runs.
+
+**Phase 17 is complete.** The self-repair loop now closes as a single
+authority: **Task → runMission → bounded turns → verification** — PASS →
+complete; FAIL → diagnose → retry/resume → runMission again. There is no
+second repair executor: `TaskRepairer` stays a declared-only future seam and
+no production origin wires it (Gate 8). Next per the roadmap: Phase 19
+deterministic quality gates (lint/typecheck/tests/build/security/diff +
+acceptance criteria + evidence), decided by the next architecture audit.

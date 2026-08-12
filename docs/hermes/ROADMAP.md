@@ -31,7 +31,7 @@
 | 14 | Unified memory | Model + catalog, episodic capture, consolidation/lifecycle, MemorySkill retrieve, learning loop — restart-recall proven (docs/hermes/MEMORY_AUDIT.md) | [x] |
 | 15 | All autonomous work -> Tasks | Every origin funnels through canonical Tasks; skill creation + external research wrapped, legacy fallbacks retired (docs/hermes/AUDIT_6.md) | [x] |
 | 16 | Unified AgentEngine | One engine; agents are configurations (profiles, roles, model/tool/memory policies, handoffs) — one Agent contract, one canonical execution, policies consumed by both paths, handoff enforcement, AgentRun retirement verified, permanent verification gate (docs/hermes/AUDIT_7.md) | [x] |
-| 17 | Self-repair coding loop | code -> test -> diagnose -> repair -> verify with failure memory | [ ] |
+| 17 | Self-repair coding loop | code -> test -> diagnose -> repair -> verify with failure memory (docs/hermes/AUDIT_8.md) | [x] |
 | 18 | Repository intelligence | Index/symbol/dependency graphs, change-impact analysis, minimal context | [ ] |
 | 19 | Verification & quality gates | Deterministic gates: lint/typecheck/tests/build/security/diff + acceptance criteria + evidence | [ ] |
 | 20 | Autonomous operating system | Integration: Goal -> Plan -> Task -> Agent -> Execute -> Verify -> Repair -> Complete -> Learn | [ ] |
@@ -960,7 +960,7 @@ behavior/configuration, AgentEngine = execution authority, TaskEngine = work
 lifecycle authority, ToolEngine = tool execution authority, Unified Memory =
 knowledge authority, TaskEvents = execution history.**
 
-**Phase 17 — Self-repair coding loop (in progress, docs/hermes/AUDIT_8.md).**
+**Phase 17 — Self-repair coding loop (complete, docs/hermes/AUDIT_8.md).**
 
 > code → test → diagnose → repair → verify, with failure memory. The audit
 > found the loop mostly built on the Phase 15/16 foundations (diagnose is
@@ -1021,7 +1021,30 @@ the engine documents the authority statement at all three seam touchpoints
 (type + both option fields + `retry()`). smoke:phase16 gains **Gate 8**
 (phase17_repairSeam): `TaskRepairer` exists only in task-engine.ts, no
 `repair:` option at any production call site, and the hook is invoked exactly
-once via `options.repair(` inside `retry()`. **Next: Move 4** — verification
-(AUDIT_8 + ROADMAP + full battery) closes Phase 17.
+once via `options.repair(` inside `retry()`.
+
+**Phase 17, Move 4 — finalization + full-battery closeout (done).**
+AUDIT_8's acceptance gate now spans Moves 1-4 and the phase-table row 17 is
+[x]. The full regression battery ran green in one pass — `tsc --noEmit` clean
+plus every battery smoke: `smoke:runtime` (e2e mission, goalRetryHint +
+goalVerification), `smoke:baseline`, `smoke:terminal-paths`,
+`smoke:delegation`, `smoke:agent-engine`, `smoke:agent-execution`,
+`smoke:agent-task-profile`, `smoke:scheduler`, `smoke:memory-unified`,
+`smoke:repo-index`, `smoke:tools`, `smoke:policy`, `smoke:context`,
+`smoke:config`, `smoke:checkpoints`, `smoke:model-engine`,
+`smoke:executable-skills`, `smoke:execution-backends`, `smoke:turn-contract`
+(section 16: gate pass / repair / budget-exhaust), and `smoke:phase16`
+(permanent Phase 16 gates + `phase17_gateWired` + `phase17_repairSeam`).
+Pre-existing and out of battery (identical at Phase 16 HEAD, untouched by
+Phase 17): `smoke:learning`, `smoke:model-resilience`,
+`smoke:execute-workflow`, and the interactive `smoke:casual` /
+`smoke:repetition` (need a live model). Two transient Windows `tmp+rename`
+EPERM flakes in the atomic save (task-store.ts, untouched here) were green
+on clean re-runs. **Phase 17 is complete:** the self-repair loop runs as one
+authority — Task → runMission → bounded turns → verification (PASS →
+complete; FAIL → diagnose → retry/resume → runMission again) — with
+`TaskRepairer` reserved as a declared-only future seam no production origin
+wires (Gate 8). Next per the roadmap: Phase 19 deterministic quality gates,
+decided by the next architecture audit.
 
 
