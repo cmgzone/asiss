@@ -1,4 +1,4 @@
-# Audit: the two engine-bypassing mission terminals (Move 4c pre-work)
+# Audit: the two former engine-bypassing mission terminals (Move 4c)
 
 > Focused behavioral audit of the two `AgentRunner.processMessage` loop exits
 > that bypass `taskEngine.runTurn`: the suppressed-tool-budget stop
@@ -198,21 +198,37 @@ current end states instead of unconditionally failing them.
 
 ---
 
-## 4. Regression coverage
+## 4. Move 4c implementation result
+
+The audit's recommendation is implemented through
+`TaskMissionIteration.verdict`. It is an explicit host safety signal, not a
+host lifecycle transition: `TaskEngine.runMission()` passes it to `runTurn()`,
+which records the canonical turn and applies the state-machine transition.
+
+- A substantive suppressed-budget final returns `{ type: 'complete' }`, keeps
+  `COMPLETED`/`SUCCESS`, and emits the final `TaskTurnCompleted` event.
+- A suppressed-budget stop without a substantive candidate returns `{ type:
+  'fail' }`.
+- A repeated failed batch returns `{ type: 'blocked' }`, keeps the existing
+  execution-state blocker, and now records `FAILED`/`PARTIAL` plus the terminal
+  turn event.
+
+## 5. Regression coverage
 
 `scripts/smoke-terminal-paths.ts` (`npm run smoke:terminal-paths`) drives the
 real `AgentRunner` with a stub model and a hermetic temp workspace, and asserts
-the **current** behavior of both terminals:
+the post-migration behavior of both terminals:
 
 1. **Suppressed-tool-budget stop** — the model always returns `notes`
    tool-calls; the per-task cap disables `notes` and sets `forceFinalAnswer`,
    then two suppressed requests fire the terminal. Asserts: assistant-final
    memory `{ final, completed, toolBudgetStopped }`, delivered `assistant_done`
-   with the candidate text, task `COMPLETED`/`SUCCESS`, and **no** engine turn
-   was recorded (`turns === 0`).
+   with the candidate text, task `COMPLETED`/`SUCCESS`, one canonical turn per
+   host iteration, and a final `complete` turn verdict.
 2. **Repeated-tool-batch stop** — the model always returns the same failing
    `shell` batch; the batch-count guard spends its one recovery then fires the
    blocked terminal. Asserts: assistant-final memory `{ final, completed:
    false, blocked: true }`, `markBlocked` recorded a `lastBlockingReason`,
    delivered `assistant_done` with `ok: false` and the blocked text, task
-   `FAILED`, and no engine turn recorded.
+   `FAILED`/`PARTIAL`, one canonical turn per host iteration, and a final
+   `blocked` turn verdict.

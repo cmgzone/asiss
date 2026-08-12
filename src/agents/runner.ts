@@ -79,7 +79,7 @@ import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { installTaskEventProjections, taskEngine, taskEventBus, taskMemory } from '../core/task';
-import type { TaskCompletionContext, TaskCompletionEvidence, TaskDiagnosis, TaskDiagnoser, TaskToolKind, TaskTurnAction, TaskTurnResult, TaskTurnVerdict } from '../core/task';
+import type { TaskCompletionContext, TaskCompletionEvidence, TaskDiagnoser, TaskMissionIteration, TaskToolKind, TaskTurnVerdict } from '../core/task';
 import { loadHermesConfig } from '../core/config';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
 import { ContextEngine, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
@@ -735,17 +735,6 @@ export class AgentRunner {
   /** Bound form the engine's completion-verdict hook expects (Phase 12 Move 2/3). */
   private readonly completionVerdictHook = async (context: TaskCompletionContext): Promise<TaskTurnVerdict> =>
     this.completionVerdict(context.evidence, context.pendingVerification);
-
-  private verdictAction(verdict: TaskTurnVerdict): TaskTurnAction {
-    switch (verdict.type) {
-      case 'continue': return 'continue';
-      case 'verify': return 'verify';
-      case 'complete': return 'complete';
-      case 'fail': return 'failed';
-      case 'blocked': return 'blocked';
-      default: return 'complete';
-    }
-  }
 
   private isMutationToolCall(call: any): boolean {
     const name = String(call?.name || '').toLowerCase();
@@ -1630,22 +1619,6 @@ export class AgentRunner {
     }
   }
 
-  // Finalize the mission Task on every loop exit. Never throws.
-  private async finalizeMissionTask(taskId: string, completed: boolean, summary: string, error?: string): Promise<void> {
-    try {
-      if (completed) {
-        await taskEngine.complete(taskId, {
-          status: 'SUCCESS',
-          summary: String(summary || '').slice(0, 1_000)
-        });
-      } else {
-        await taskEngine.failTask(taskId, error || 'Mission did not complete.', 'EXECUTING');
-      }
-    } catch (taskError: any) {
-      console.warn('[TaskEngine] finalize mission task failed:', taskError?.message || taskError);
-    }
-  }
-
   async processMessage(sessionId: string, msg: Message) {
     // Phase 5 ASK path: a user (or another client) answered a pending approval.
     // Resolve it and unblock the waiting tool call without entering the loop.
@@ -1784,9 +1757,18 @@ export class AgentRunner {
       config,
       background: isBackgroundMessage
     });
-    let missionCompleted = false;
-    let missionSummary = '';
-    let missionError = '';
+    // Phase 12 Move 4c: never fall back to a runner-owned mission loop. If a
+    // canonical Task cannot be created, surface the infrastructure failure
+    // instead of executing an untracked mission independently.
+    if (!missionTaskId) {
+      const failureText = 'I could not start the canonical task for this request, so no autonomous work was run.';
+      this.memory.add(sessionId, {
+        role: 'assistant', content: failureText, timestamp: Date.now(),
+        metadata: { final: true, completed: false, taskInitializationFailed: true }
+      });
+      await this.deliverFinalResponse(sessionId, failureText, uuidv4(), uuidv4(), false);
+      return;
+    }
 
     // 2. Fetch Tools (MCP + Native Skills), capped and deduplicated so the
     //    advertised list stays bounded and name conflicts resolve predictably
@@ -1868,32 +1850,40 @@ export class AgentRunner {
       : (typeof agentConfig.maxPrematureCompletions === 'number'
         ? Math.max(1, Math.floor(agentConfig.maxPrematureCompletions))
         : 3);
-    let forcedContinuations = 0;
-    let missionTurn = 0;
     let totalToolCalls = 0;
     let lastBatchHadFailure = false;
     let lastToolError = '';
     let repeatedFailureRecoveries = 0;
     let explorationBatches = 0;
-    let toolSequence = 0;
     // Phase 12 Move 3 — verification-pending state is engine-owned
-    // (TaskEngine.verificationPending). `lastMutationSequence` /
-    // `lastVerificationSequence` are kept only as a degraded, task-less
-    // fallback when beginMissionTask failed and there is no canonical Task.
-    let lastMutationSequence = -1;
-    let lastVerificationSequence = -1;
     let missionVerificationPending = false;
 
     const initialMemories = this.memory.getAll(sessionId);
     await this.autoCompactSessionIfNeeded(sessionId, config, initialMemories);
 
-    let stoppedByStepLimit = true;
-    let autoContinueCount = 0;
     let continuationBatch = 0;
+    const missionTurnBudget = unlimitedTools
+      ? Number.MAX_SAFE_INTEGER
+      : Math.min(Number.MAX_SAFE_INTEGER, maxTurns * (1 + (autoContinueEnabled ? autoContinueMax : 0)));
+    let iterationPresentation: {
+      text: string;
+      runId: string;
+      messageId: string;
+      reasoning?: string;
+      metadata?: Record<string, unknown>;
+      completionCandidate?: boolean;
+      markBlockedAlready?: boolean;
+      sanitize?: boolean;
+      recordLearning?: boolean;
+    } | undefined;
     try {
-    for (; ;) {
-      stoppedByStepLimit = true;
-      for (let i = 0; i < maxTurns; i++) {
+      const missionResult = await taskEngine.runMission(missionTaskId, {
+        budget: { maxTurns: missionTurnBudget, maxForcedContinuations },
+        completionVerdict: this.completionVerdictHook,
+        diagnoser: this.buildMissionDiagnoser(msg.content, msg.metadata?.projectWorkspacePath),
+        iterate: async ({ turn }): Promise<TaskMissionIteration> => {
+        const i = turn - 1;
+        iterationPresentation = undefined;
         // Smart Context Construction
         const allMemories = this.applyCompactionFilter(this.memory.getAll(sessionId));
         const totalMemories = allMemories.length;
@@ -2175,16 +2165,22 @@ export class AgentRunner {
               const finalText = candidate && !this.looksLikeProgressOnly(candidate)
                 ? candidate
                 : 'I stopped additional tool calls because the task reached its safety budget. The completed tool results have been preserved, but the model did not provide a reliable final summary.';
-              this.memory.add(sessionId, {
-                role: 'assistant', content: finalText, timestamp: Date.now(),
+              iterationPresentation = {
+                text: finalText,
+                runId: turnRunId,
+                messageId: turnMessageId,
                 metadata: { final: true, completed: Boolean(candidate), toolBudgetStopped: true }
-              });
-              await this.deliverFinalResponse(sessionId, finalText, turnRunId, turnMessageId, Boolean(candidate));
-              missionCompleted = Boolean(candidate);
-              missionSummary = finalText;
-              if (!candidate) missionError = 'Tool budget reached before a reliable final answer.';
-              stoppedByStepLimit = false;
-              break;
+              };
+              return {
+                content: finalText,
+                verdict: candidate
+                  ? { type: 'complete', summary: finalText }
+                  : { type: 'fail', error: 'Tool budget reached before a reliable final answer.' },
+                totalToolCalls,
+                lastBatchHadFailure,
+                toolRequired,
+                verificationRequired
+              };
             }
             this.memory.add(sessionId, {
               role: 'system',
@@ -2192,7 +2188,14 @@ export class AgentRunner {
               timestamp: Date.now(),
               metadata: { type: 'mission_tool_budget' }
             });
-            continue;
+            return {
+              content: String(response.content || ''),
+              verdict: { type: 'continue', reason: 'Tool call suppressed by the mission safety budget.' },
+              totalToolCalls,
+              lastBatchHadFailure,
+              toolRequired,
+              verificationRequired
+            };
           }
           if (!unlimitedTools) {
             const defaultToolCaps: Record<string, number> = {
@@ -2226,7 +2229,14 @@ export class AgentRunner {
                 timestamp: Date.now(),
                 metadata: { type: 'mission_tool_budget' }
               });
-              continue;
+              return {
+                content: String(response.content || ''),
+                verdict: { type: 'continue', reason: `Tool '${exceededTool}' reached its per-task limit.` },
+                totalToolCalls,
+                lastBatchHadFailure,
+                toolRequired,
+                verificationRequired
+              };
             }
           }
           for (const call of response.toolCalls) {
@@ -2252,7 +2262,14 @@ export class AgentRunner {
                 timestamp: Date.now(),
                 metadata: { type: 'repetition_recovery' }
               });
-              continue;
+              return {
+                content: String(response.content || ''),
+                verdict: { type: 'continue', reason },
+                totalToolCalls,
+                lastBatchHadFailure,
+                toolRequired,
+                verificationRequired
+              };
             }
             if (!lastBatchHadFailure) {
               forceFinalAnswer = true;
@@ -2263,26 +2280,36 @@ export class AgentRunner {
                 timestamp: Date.now(),
                 metadata: { type: 'repetition_recovery' }
               });
-              continue;
+              return {
+                content: String(response.content || ''),
+                verdict: { type: 'continue', reason },
+                totalToolCalls,
+                lastBatchHadFailure,
+                toolRequired,
+                verificationRequired
+              };
             }
             executionStateManager.markBlocked(sessionId, reason);
-            stoppedByStepLimit = false;
             const blockedText = [
               `I stopped the task because the same failed tool action was repeated ${repeatedBatchCount} times.`,
               lastToolError ? `Last error: ${lastToolError}` : '',
               'The loop was stopped instead of showing or executing the same action again.'
             ].filter(Boolean).join('\n\n');
-            this.memory.add(sessionId, {
-              role: 'assistant',
+            iterationPresentation = {
+              text: blockedText,
+              runId: turnRunId,
+              messageId: turnMessageId,
+              metadata: { final: true, completed: false, blocked: true },
+              markBlockedAlready: true
+            };
+            return {
               content: blockedText,
-              timestamp: Date.now(),
-              metadata: { final: true, completed: false, blocked: true }
-            });
-            await this.deliverFinalResponse(sessionId, blockedText, turnRunId, turnMessageId, false);
-            missionCompleted = false;
-            missionSummary = blockedText;
-            missionError = reason;
-            break;
+              verdict: { type: 'blocked', error: reason, reason },
+              totalToolCalls,
+              lastBatchHadFailure,
+              toolRequired,
+              verificationRequired
+            };
           }
 
           const batchMutates = response.toolCalls.some(call => MUTATING_TOOL_NAMES.has(String(call?.name || '')));
@@ -2305,7 +2332,14 @@ export class AgentRunner {
                   timestamp: Date.now(),
                   metadata: { type: 'repetition_recovery' }
                 });
-                continue;
+                return {
+                  content: String(response.content || ''),
+                  verdict: { type: 'continue', reason: explorationReason },
+                  totalToolCalls,
+                  lastBatchHadFailure,
+                  toolRequired,
+                  verificationRequired
+                };
               }
               forceFinalAnswer = true;
               for (const call of response.toolCalls) missionDisabledTools.add(String(call.name || ''));
@@ -2315,7 +2349,14 @@ export class AgentRunner {
                 timestamp: Date.now(),
                 metadata: { type: 'repetition_recovery' }
               });
-              continue;
+              return {
+                content: String(response.content || ''),
+                verdict: { type: 'continue', reason: explorationReason },
+                totalToolCalls,
+                lastBatchHadFailure,
+                toolRequired,
+                verificationRequired
+              };
             }
           }
 
@@ -2451,7 +2492,6 @@ export class AgentRunner {
             .map(result => `${result.call?.name || 'tool'}: ${String(result.error || 'Unknown error')}`)
             .join(' | ');
           for (const result of results) {
-            toolSequence += 1;
             // Phase 12 Move 3 — annotate the recorded execution with the tool's
             // role so the engine owns mutation/verification state. The
             // per-turn sequence counters survive only as a task-less fallback.
@@ -2460,26 +2500,18 @@ export class AgentRunner {
               : result.success && this.isVerificationToolCall(result.call)
                 ? 'verification'
                 : 'inspection';
-            if (kind !== 'inspection' && missionTaskId && result.executionId) {
+            if (kind !== 'inspection' && result.executionId) {
               try {
                 await taskEngine.recordToolKind(missionTaskId, result.executionId, kind);
               } catch { /* tool annotation is advisory; engine state stays authoritative */ }
             }
-            if (!missionTaskId) {
-              if (kind === 'mutation') lastMutationSequence = toolSequence;
-              if (kind === 'verification') lastVerificationSequence = toolSequence;
-            }
           }
           // Phase 12 Move 3 — the engine-owned pending state.
-          missionVerificationPending = missionTaskId
-            ? taskEngine.verificationPending(missionTaskId)
-            : (lastMutationSequence > lastVerificationSequence);
-          if (missionTaskId) {
-            try {
-              const batchPct = Math.min(90, 10 + Math.round((totalToolCalls / Math.max(1, maxToolCalls)) * 80));
-              await taskEngine.recordProgress(missionTaskId, batchPct, `Tool batch complete (${results.length} tool${results.length === 1 ? '' : 's'})`);
-            } catch { /* ignore task progress errors */ }
-          }
+          missionVerificationPending = taskEngine.verificationPending(missionTaskId);
+          try {
+            const batchPct = Math.min(90, 10 + Math.round((totalToolCalls / Math.max(1, maxToolCalls)) * 80));
+            await taskEngine.recordProgress(missionTaskId, batchPct, `Tool batch complete (${results.length} tool${results.length === 1 ? '' : 's'})`);
+          } catch { /* ignore task progress errors */ }
 
           for (const result of results) {
             const isSingleUseWrite = singleUseTools.has(String(result.call?.name || ''))
@@ -2815,7 +2847,16 @@ export class AgentRunner {
           }
 
 
-          // Continue loop to let model interpret results
+          // A host-recorded tool batch advances through the engine as a
+          // non-completion turn; TaskEngine owns the continuation decision.
+          return {
+            content: String(response.content || ''),
+            usedTools: true,
+            totalToolCalls,
+            lastBatchHadFailure,
+            toolRequired,
+            verificationRequired
+          };
         } else {
           const text = (response.content || "").trim();
 
@@ -2824,56 +2865,39 @@ export class AgentRunner {
           // completion-verdict hook "is completion allowed?" and owns the
           // resulting lifecycle transition (continue / verify / complete /
           // fail / blocked). The runner no longer computes completionBlocked.
-          missionTurn += 1;
-          const evidence: TaskCompletionEvidence = {
-            toolRequired,
+          iterationPresentation = {
+            text,
+            runId: turnRunId,
+            messageId: turnMessageId,
+            reasoning: turnReasoning,
+            completionCandidate: true,
+            sanitize: true,
+            recordLearning: true
+          };
+          return {
+            content: text,
             totalToolCalls,
             lastBatchHadFailure,
-            verificationRequired,
-            lastMutationSequence,
-            lastVerificationSequence,
-            forcedContinuations,
-            maxForcedContinuations,
-            finalDraft: text
+            toolRequired,
+            verificationRequired
           };
-          let action: TaskTurnAction;
-          let reason: string | undefined;
-          let verifyDiagnosis: TaskDiagnosis | undefined;
-          if (missionTaskId) {
-            const turnResult = await taskEngine.runTurn(missionTaskId, { turn: missionTurn, evidence }, {
-              completionVerdict: this.completionVerdictHook,
               // Phase 12 Move 3 — the engine runs its in-loop diagnose authority
-              // (verify verdict) with the host's repository evidence, the same
-              // diagnoser failure recovery uses.
-              diagnoser: this.buildMissionDiagnoser(msg.content, msg.metadata?.projectWorkspacePath)
-            });
-            action = turnResult.action;
-            reason = turnResult.reason;
-            verifyDiagnosis = turnResult.diagnosis;
-          } else {
-            // Degraded path (beginMissionTask failed): the host still answers
-            // the completion question, but there is no canonical Task to
-            // transition. The judgment stays in one place either way.
-            const verdict = this.completionVerdict(evidence);
-            action = this.verdictAction(verdict);
-            reason = 'reason' in verdict ? verdict.reason : ('error' in verdict ? verdict.error : undefined);
-          }
-
-          if (action === 'continue' || action === 'verify') {
-            forcedContinuations += 1;
-            const checkParts = [
-              `Runtime completion check: ${reason || 'The mission is not yet complete.'}`
-            ];
-            if (action === 'verify' && verifyDiagnosis) {
               // Phase 12 Move 3 — render the engine's canonical verification
-              // evidence so the model continues from recorded results.
+        }
+      },
+        onTurn: async (turnResult, turnContext) => {
+          const presentation = iterationPresentation;
+          if ((turnResult.action === 'continue' || turnResult.action === 'verify') && presentation?.completionCandidate) {
+            const checkParts = [
+              `Runtime completion check: ${turnResult.reason || 'The mission is not yet complete.'}`
+            ];
+            if (turnResult.action === 'verify' && turnResult.diagnosis) {
+              const diagnosis = turnResult.diagnosis;
               checkParts.push(`Verification evidence: ${
-                Array.isArray(verifyDiagnosis.matchedFiles) && verifyDiagnosis.matchedFiles.length > 0
-                  ? `goal-matched files: ${verifyDiagnosis.matchedFiles.join(', ')}`
+                Array.isArray(diagnosis.matchedFiles) && diagnosis.matchedFiles.length > 0
+                  ? `goal-matched files: ${diagnosis.matchedFiles.join(', ')}`
                   : 'no goal-matched files'
-              }${
-                verifyDiagnosis.evidence ? `\n${verifyDiagnosis.evidence}` : ''
-              }`);
+              }${diagnosis.evidence ? `\n${diagnosis.evidence}` : ''}`);
             }
             checkParts.push(
               'Continue autonomously now. Use the next required tool, recover from the error, or run verification.',
@@ -2885,80 +2909,79 @@ export class AgentRunner {
               timestamp: Date.now(),
               metadata: { type: 'runtime_completion_check' }
             });
-            continue;
           }
 
-          const completed = action === 'complete';
-          const blocked = !completed;
-          const finalDraft = text || (blocked
-            ? 'I could not complete the task because the required tool work or verification did not succeed.'
-            : 'The task completed, but the model returned no final summary.');
-          if (blocked) {
-            executionStateManager.markBlocked(sessionId, finalDraft);
+          if (turnResult.action !== 'continue' && turnResult.action !== 'verify') {
+            const completed = turnResult.action === 'complete';
+            const finalDraft = presentation?.text || (completed
+              ? 'The task completed, but the model returned no final summary.'
+              : 'I could not complete the task because the required tool work or verification did not succeed.');
+            if (!completed && !presentation?.markBlockedAlready) {
+              executionStateManager.markBlocked(sessionId, finalDraft);
+            }
+            const sanitized = presentation?.sanitize ? guardrailManager.sanitizeOutput(finalDraft) : undefined;
+            const cleanContent = sanitized?.sanitized || finalDraft;
+            this.memory.add(sessionId, {
+              role: 'assistant',
+              content: cleanContent,
+              timestamp: Date.now(),
+              metadata: presentation?.metadata || { final: true, completed, reasoning: presentation?.reasoning }
+            });
+            await this.deliverFinalResponse(
+              sessionId,
+              cleanContent,
+              presentation?.runId || uuidv4(),
+              presentation?.messageId || uuidv4(),
+              completed,
+              presentation?.reasoning
+            );
+            if (presentation?.recordLearning && !isBackgroundMessage) {
+              void this.learning.recordInteraction(sessionId, msg.content, cleanContent);
+            }
+            const currentGoal = mainGoalManager.getCurrent(sessionId);
+            if (completed && currentGoal?.origin === 'auto') {
+              mainGoalManager.completeGoal(sessionId, 'Completed by the autonomous execution loop.');
+            }
+            return;
           }
-          const sanitized = guardrailManager.sanitizeOutput(finalDraft);
-          const cleanContent = sanitized.sanitized || finalDraft;
-          this.memory.add(sessionId, {
-            role: 'assistant',
-            content: cleanContent,
-            timestamp: Date.now(),
-            metadata: { final: true, completed, reasoning: turnReasoning }
-          });
-          await this.deliverFinalResponse(
-            sessionId,
-            cleanContent,
-            turnRunId,
-            turnMessageId,
-            completed,
-            turnReasoning
-          );
-          missionCompleted = completed;
-          missionSummary = cleanContent;
-          if (blocked) {
-            missionError = 'Required tool work or verification did not succeed.';
+
+          if (turnContext.turn < missionTurnBudget && turnContext.turn % maxTurns === 0) {
+            continuationBatch += 1;
+            if (autoContinueNotify) {
+              await this.sendManagedProgressUpdate(sessionId, {
+                fallbackNow: `Auto-continue ${continuationBatch}/${autoContinueMax}.`,
+                fallbackNext: 'Continue executing the next tool batch.'
+              });
+            }
+            await this.autoCompactSessionIfNeeded(sessionId, config, this.memory.getAll(sessionId));
           }
-          if (!isBackgroundMessage) {
-            void this.learning.recordInteraction(sessionId, msg.content, cleanContent);
-          }
-          const currentGoal = mainGoalManager.getCurrent(sessionId);
-          if (completed && currentGoal?.origin === 'auto') {
-            mainGoalManager.completeGoal(sessionId, 'Completed by the autonomous execution loop.');
-          }
-          stoppedByStepLimit = false;
-          break;
         }
-      }
-
-      if (!stoppedByStepLimit) {
-        break;
-      }
-
-      if (autoContinueEnabled && autoContinueCount < autoContinueMax) {
-        autoContinueCount += 1;
-        continuationBatch += 1;
-        if (autoContinueNotify) {
-          // Use concise progress update instead of raw notification
-          await this.sendManagedProgressUpdate(sessionId, {
-            fallbackNow: `Auto-continue ${autoContinueCount}/${autoContinueMax}.`,
-            fallbackNext: 'Continue executing the next tool batch.'
-          });
-        }
-        const updatedMemories = this.memory.getAll(sessionId);
-        await this.autoCompactSessionIfNeeded(sessionId, config, updatedMemories);
-        continue;
-      }
-
-      await this.sendManagedProgressUpdate(sessionId, {
-        fallbackNow: `Automation step limit reached (${maxTurns} turns).`,
-        fallbackNext: 'Send "continue" to keep going, or increase/remove config.agent.maxTurns in config.json.'
       });
-      missionError = `Automation step limit reached (${maxTurns} turns).`;
-      break;
-    }
-    } finally {
-      if (missionTaskId) {
-        await this.finalizeMissionTask(missionTaskId, missionCompleted, missionSummary, missionError);
+
+      if (missionResult.stoppedByStepLimit) {
+        await this.sendManagedProgressUpdate(sessionId, {
+          fallbackNow: `Automation step limit reached (${maxTurns} turns).`,
+          fallbackNext: 'Send "continue" to keep going, or increase/remove config.agent.maxTurns in config.json.'
+        });
       }
+    } catch (error: any) {
+      const errorText = `The mission stopped because the execution driver failed: ${error?.message || String(error)}`;
+      try {
+        const currentTask = taskEngine.get(missionTaskId);
+        if (currentTask?.status === 'EXECUTING') {
+          await taskEngine.runTurn(missionTaskId, {
+            turn: (currentTask.timing.turns || 0) + 1,
+            verdict: { type: 'fail', error: errorText }
+          });
+        }
+      } catch (taskError: any) {
+        console.warn('[TaskEngine] could not record mission-driver failure:', taskError?.message || taskError);
+      }
+      this.memory.add(sessionId, {
+        role: 'assistant', content: errorText, timestamp: Date.now(),
+        metadata: { final: true, completed: false, missionDriverFailed: true }
+      });
+      await this.deliverFinalResponse(sessionId, errorText, uuidv4(), uuidv4(), false);
     }
   }
 

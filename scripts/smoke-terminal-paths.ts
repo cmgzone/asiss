@@ -1,7 +1,7 @@
 /**
  * Phase 12 — terminal-path regression smokes (pre-Move 4c).
  *
- * Locks the CURRENT behavior of the two engine-bypassing mission terminals in
+ * Locks the user-visible behavior of the two former engine-bypassing mission terminals in
  * AgentRunner.processMessage (documented in
  * docs/hermes/TERMINAL_PATHS_AUDIT.md):
  *
@@ -10,9 +10,8 @@
  *
  * Both are driven through the real AgentRunner + global taskEngine with a stub
  * model and a hermetic temp workspace, and assert the same facts the audit
- * records: memory entries, delivered stream events, and final Task state. The
- * assertions intentionally describe the pre-Move 4c baseline; once the loop
- * migrates, this smoke is updated to require engine-owned turns instead.
+ * records: memory entries, delivered stream events, final Task state, and the
+ * engine-owned turn events that now carry the terminal lifecycle transition.
  *
  * Run: npm run smoke:terminal-paths
  */
@@ -74,9 +73,9 @@ async function main() {
     // suppression branch (2170) counts 2 and fires the terminal (~2182).
     writeConfig({ maxToolCalls: 4, maxTurns: 12, maxRepeatedToolBatches: 6, repetitionGuard: { maxRepeatedToolBatches: 6, maxExplorationBatches: 12 } });
     const events: any[] = [];
-    const busEvents: string[] = [];
-    const off1 = taskEventBus.on('TaskTurnStarted', () => { busEvents.push('TaskTurnStarted'); });
-    const off2 = taskEventBus.on('TaskTurnCompleted', () => { busEvents.push('TaskTurnCompleted'); });
+    const busEvents: any[] = [];
+    const off1 = taskEventBus.on('TaskTurnStarted', (event) => { busEvents.push(event); });
+    const off2 = taskEventBus.on('TaskTurnCompleted', (event) => { busEvents.push(event); });
     const finalReport = [
       '# Final report',
       'The workspace state is now fully summarized. This is the complete answer to the request.',
@@ -131,11 +130,15 @@ async function main() {
 
     const task = missionTask(sessionId);
     assert.ok(task, 'mission Task exists');
-    assert.strictEqual(task.status, 'COMPLETED', 'task COMPLETED via finalizeMissionTask');
+    assert.strictEqual(task.status, 'COMPLETED', 'task COMPLETED through runMission');
     assert.strictEqual(task.outcome?.status, 'SUCCESS', 'outcome SUCCESS when candidate exists');
-    assert.strictEqual(task.timing.turns || 0, 0, 'no engine turn recorded (runTurn bypassed)');
+    assert.strictEqual(task.timing.turns, modelTurn, 'every host iteration is an engine-owned turn');
 
-    assert.deepStrictEqual(busEvents, [], 'no TaskTurnStarted/Completed emitted on the terminal path');
+    const started = busEvents.filter(event => event.name === 'TaskTurnStarted');
+    const completedTurns = busEvents.filter(event => event.name === 'TaskTurnCompleted');
+    assert.strictEqual(started.length, modelTurn, 'every mission iteration emits TaskTurnStarted');
+    assert.strictEqual(completedTurns.length, modelTurn, 'every mission iteration emits TaskTurnCompleted');
+    assert.strictEqual(completedTurns[completedTurns.length - 1]?.data?.verdict, 'complete', 'forced final uses the engine complete verdict');
     off1(); off2();
     passed += 1;
     console.log('1. suppressed-tool-budget stop                                ok');
@@ -150,9 +153,9 @@ async function main() {
     // third identical batch fires the blocked terminal (~2268).
     writeConfig({ maxToolCalls: 8, maxTurns: 12, maxRepeatedToolBatches: 2, repetitionGuard: { maxRepeatedToolBatches: 2, maxExplorationBatches: 12 } });
     const events: any[] = [];
-    const busEvents: string[] = [];
-    const off1 = taskEventBus.on('TaskTurnStarted', () => { busEvents.push('TaskTurnStarted'); });
-    const off2 = taskEventBus.on('TaskTurnCompleted', () => { busEvents.push('TaskTurnCompleted'); });
+    const busEvents: any[] = [];
+    const off1 = taskEventBus.on('TaskTurnStarted', (event) => { busEvents.push(event); });
+    const off2 = taskEventBus.on('TaskTurnCompleted', (event) => { busEvents.push(event); });
     let modelTurn = 0;
     const model = {
       id: 'terminal-paths-repeat', name: 'Terminal paths repeat',
@@ -198,14 +201,19 @@ async function main() {
 
     const task = missionTask(sessionId);
     assert.ok(task, 'mission Task exists');
-    assert.strictEqual(task.status, 'FAILED', 'task FAILED via finalizeMissionTask');
-    assert.strictEqual(task.timing.turns || 0, 0, 'no engine turn recorded (runTurn bypassed)');
+    assert.strictEqual(task.status, 'FAILED', 'task FAILED through runMission');
+    assert.strictEqual(task.outcome?.status, 'PARTIAL', 'blocked terminal records the partial outcome');
+    assert.strictEqual(task.timing.turns, modelTurn, 'every host iteration is an engine-owned turn');
 
     const state = executionStateManager.getState(sessionId);
     assert.ok(String(state?.lastBlockingReason || '').includes('Repeated the same tool batch'),
       'markBlocked recorded the repetition reason');
 
-    assert.deepStrictEqual(busEvents, [], 'no TaskTurnStarted/Completed emitted on the terminal path');
+    const started = busEvents.filter(event => event.name === 'TaskTurnStarted');
+    const completedTurns = busEvents.filter(event => event.name === 'TaskTurnCompleted');
+    assert.strictEqual(started.length, modelTurn, 'every mission iteration emits TaskTurnStarted');
+    assert.strictEqual(completedTurns.length, modelTurn, 'every mission iteration emits TaskTurnCompleted');
+    assert.strictEqual(completedTurns[completedTurns.length - 1]?.data?.verdict, 'blocked', 'repeated batch uses the engine blocked verdict');
     off1(); off2();
     passed += 1;
     console.log('2. repeated-tool-batch stop                                  ok');

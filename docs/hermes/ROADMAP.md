@@ -397,22 +397,22 @@ runMission smoke (host-recorded execution is not duplicated; the mutation kind
 survives for verification-pending). `smoke:runtime` (6-turn e2e),
 `smoke:turn-contract` (15), and `smoke:baseline` all green.
 
-**Phase 12, Move 4c (planned) — migrate AgentRunner's loop body.** Replace the
-mission loop's model+tool batch body with the `runMission` iterate hook so
-AgentRunner stops owning the loop. Concretely, the runner's current inner
-body — context construction → model call → tool batch execution → tool-role
-recording — becomes the `iterate` closure returning
-`{ content, usedTools, model, progress, lastBatchHadFailure, toolRequired,
-verificationRequired }`; the outer `for(;;)`/auto-continue/step-limit scaffolding
-maps onto `runMission`'s `budget` + `stoppedByStepLimit`. Two classes of edge
-terminals currently bypass the engine (direct `deliverFinalResponse` + `break`):
-suppressed-tool-budget stops and repeated-tool-batch stops at lines ~2182
-and ~2281 in runner.ts. Move 4c must route those through the engine's `blocked`
-verdict (behavior change — the e2e cannot exercise them; verify manually).
-`onTurn` renders the continue/verify evidence memories; post-driver code renders
-assistant-final memory + `deliverFinalResponse` for complete/blocked. Keep the
-6-turn e2e green. Then Move 4d removes the runner's now-redundant scaffolding.
+**Phase 12, Move 4c — migrate AgentRunner's loop body (done).** The runner's
+context construction → model call → tool batch execution → tool-role recording
+now runs as the `TaskEngine.runMission()` `iterate` hook. The engine owns the
+sequential turn loop, lifecycle transitions, completion-verdict hook,
+verification/diagnosis path, forced-continuation budget, and terminal state.
+The terminal-path audit found that `blocked` is wrong for a successful
+suppressed-budget final, so `TaskMissionIteration.verdict` routes that case to
+engine `complete`, while a repeated failed batch routes to engine `blocked`.
+Both are recorded canonical turns and preserve their user-visible final
+responses. Verified by `smoke:terminal-paths`, `smoke:turn-contract`, and
+`smoke:runtime`.
 
-**Phase 12, Move 4d (planned) — strip dead loop scaffolding.** Remove the
-runner's `for(;;)`/inner-`for` skeleton, `stoppedByStepLimit`, `missionTurn`,
-and per-iteration counters that `runMission` now owns, once 4c proves green.
+**Phase 12, Move 4d — strip dead loop scaffolding (done).** The runner's
+`for(;;)`/inner-`for` loops, `stoppedByStepLimit`, `missionTurn`, runner-owned
+completion counter, degraded task-less mission path, and finalizer are gone.
+`runMission` receives the combined configured turn/auto-continue budget and
+surfaces `stoppedByStepLimit`; the host's `onTurn` renders continuation evidence
+and terminal UI after the engine transition. `AUDIT_3.md` records the final
+execution-authority audit.
