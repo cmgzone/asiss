@@ -1,0 +1,437 @@
+/* =====================================================================
+   Gitu WebUI — conversation presentation (Phase 21)
+   Loaded AFTER chat-progress.css so these rules win on the chat surface.
+   Target feel: a calm AI workspace (Linear/Cursor-like), not a chat clone.
+   ===================================================================== */
+
+/* ---- Conversation surface --------------------------------------- */
+.messages { padding-top: 26px; }
+
+/* Assistant messages are NOT bubbles — role rail + readable prose. */
+.message.assistant,
+.message.exec-card-message {
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 12px;
+  margin-bottom: 26px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.message.assistant .role,
+.message.exec-card-message .role {
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: linear-gradient(145deg, #262d3c, #1b202b);
+  border: 1px solid var(--line);
+  color: var(--accent2);
+  font-size: 12px;
+  margin-top: 1px;
+}
+
+/* Subtle assistant identity — one small line, no oversized headers. */
+.assistant-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+  margin: 1px 0 8px;
+}
+.assistant-name { font-size: 12.5px; font-weight: 650; color: var(--soft); letter-spacing: .01em; }
+.assistant-time { font-size: 11px; color: #596276; }
+
+/* Prose: readable width + deliberate vertical rhythm. */
+.message.assistant > div:last-child,
+.message.exec-card-message > div:last-child {
+  min-width: 0;
+  max-width: 720px;
+}
+
+.message-body {
+  font-size: 15px;
+  line-height: 1.72;
+  color: #e4e8f0;
+}
+.message-body p { margin: 0 0 1.05em; }
+.message-body p:last-child { margin-bottom: 0; }
+
+/* ---- Headings: strong but restrained ---------------------------- */
+.message-body h1,
+.message-body h2,
+.message-body h3,
+.message-body h4 {
+  font-weight: 680;
+  letter-spacing: -.02em;
+  line-height: 1.3;
+  color: var(--text);
+}
+.message-body h1 { font-size: 21px; margin: 1.5em 0 .6em; }
+.message-body h2 { font-size: 18px; margin: 1.5em 0 .55em; color: #f0f3f9; }
+.message-body h3 { font-size: 16px; margin: 1.4em 0 .5em; color: var(--soft); }
+.message-body h4 { font-size: 15px; margin: 1.2em 0 .45em; color: var(--soft); }
+.message-body h1:first-child,
+.message-body h2:first-child,
+.message-body h3:first-child { margin-top: 0; }
+.message-body hr { border: 0; border-top: 1px solid var(--line); margin: 1.4em 0; }
+
+/* ---- Lists: scannable, professional ----------------------------- */
+.message-body ul,
+.message-body ol { margin: 0 0 1.05em; padding-left: 1.45em; }
+.message-body li { margin: .32em 0; line-height: 1.62; }
+.message-body li > ul,
+.message-body li > ol { margin: .32em 0; }
+.message-body ul li::marker { color: #7b86a0; }
+.message-body ol li::marker { color: #8b97b0; font-variant-numeric: tabular-nums; }
+.message-body li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.15em; }
+.message-body input[type="checkbox"] { accent-color: var(--accent2); margin-right: 6px; vertical-align: -1px; }
+
+/* ---- Blockquote / links / tables -------------------------------- */
+.message-body blockquote {
+  margin: 0 0 1.05em;
+  padding: .2em 0 .2em 14px;
+  border-left: 3px solid #333c4f;
+  color: var(--soft);
+}
+.message-body a {
+  color: #a99eff;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(139, 124, 255, .35);
+}
+.message-body a:hover { border-bottom-color: #a99eff; }
+.message-body table { border-collapse: collapse; margin: 0 0 1.1em; font-size: 13.5px; }
+.message-body th,
+.message-body td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; }
+.message-body th { background: var(--panel2); color: var(--soft); font-weight: 650; }
+
+/* ---- Inline code: distinguishable, not loud --------------------- */
+.message-body :not(pre) > code {
+  background: rgba(139, 124, 255, .10);
+  border: 1px solid rgba(139, 124, 255, .16);
+  border-radius: 5px;
+  padding: .12em .38em;
+  color: #c4b9ff;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: .86em;
+}
+
+/* ---- Code blocks: embedded editor artifacts --------------------- */
+.code-block { margin: .9em 0 1.2em; }
+.code-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid #232a38;
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+  background: #0d1017;
+}
+.code-lang {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: #667084;
+}
+.code-bar .code-copy {
+  position: static;
+  margin-left: auto;
+  opacity: 1;
+  background: transparent;
+  border: 1px solid #2a3140;
+  color: #7e8799;
+  border-radius: 6px;
+  padding: 2px 9px;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: color .15s ease, border-color .15s ease, background .15s ease;
+  font-family: inherit;
+}
+.code-bar .code-copy:hover { color: var(--text); border-color: #3a4354; background: #1a1f2a; }
+
+.message-body .code-block > pre {
+  margin: 0;
+  border-radius: 0 0 10px 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 13px 14px;
+  background: #0a0d12;
+  border: 1px solid #232a38;
+  font-size: 12.5px;
+  line-height: 1.62;
+}
+.message-body .code-block > pre code {
+  display: block;
+  min-width: max-content;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: inherit;
+  color: #cdd3df;
+}
+.message-body pre:not(.code-block > pre) { border-radius: 10px; }
+
+/* ---- Message meta + execution footer ---------------------------- */
+.message-meta {
+  color: #4c5568;
+  font-size: 10.5px;
+  letter-spacing: .02em;
+  margin-top: 10px;
+  text-transform: uppercase;
+}
+.message-execution {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(17, 20, 27, .6);
+  color: var(--soft);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+.message-execution.st-completed { color: var(--accent2); }
+.message-execution.st-failed { color: var(--danger); }
+.message-execution.st-stopped { color: var(--warn); }
+
+/* ---- Message-scoped work state (thinking) ----------------------- */
+.work-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  color: #8b97b0;
+  font-size: 12.5px;
+}
+.work-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: work-pulse 1.6s ease-in-out infinite;
+}
+.work-label { color: #8b97b0; }
+
+/* ---- Execution card: calm activity timeline --------------------- */
+.exec-card-message { margin-bottom: 26px; }
+
+.exec-card {
+  border: 1px solid #242b3a;
+  border-radius: 12px;
+  background: rgba(17, 20, 27, .82);
+  overflow: hidden;
+  transition: border-color .3s ease, background .3s ease;
+}
+.exec-card-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 13px;
+  cursor: pointer;
+}
+.exec-card-ico {
+  width: 18px;
+  flex: none;
+  text-align: center;
+  font-size: 12px;
+  transition: color .25s ease, transform .25s ease;
+}
+.exec-card-state {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  transition: color .25s ease;
+}
+.exec-card-line {
+  flex: 1;
+  min-width: 0;
+  color: var(--soft);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.exec-card-meta { flex: none; color: #596276; font-size: 11px; font-variant-numeric: tabular-nums; }
+.exec-card-toggle { flex: none; color: #4a5264; font-size: 10px; }
+
+/* State tints — the active state gets the only emphasis. */
+.exec-card.st-tool,
+.exec-card.st-working { border-color: rgba(139, 124, 255, .35); }
+.exec-card.st-completed { border-color: rgba(67, 211, 180, .20); }
+.exec-card.st-failed { border-color: rgba(255, 107, 122, .38); }
+.exec-card.st-stopped { border-color: rgba(243, 186, 99, .32); }
+
+.exec-card-ico.st-tool,
+.exec-card-ico.st-working { color: var(--accent); animation: work-pulse 1.6s ease-in-out infinite; }
+.exec-card-ico.st-thinking { color: #7a8699; }
+.exec-card-ico.st-completed { color: var
+(--accent2); }
+.exec-card-ico.st-failed { color: var(--danger); }
+.exec-card-ico.st-stopped { color: var(--warn); }
+
+.exec-card-state.st-tool,
+.exec-card-state.st-working { color: var(--accent); }
+.exec-card-state.st-thinking { color: #7a8699; }
+.exec-card-state.st-completed { color: var(--accent2); }
+.exec-card-state.st-failed { color: var(--danger); }
+.exec-card-state.st-stopped { color: var(--warn); }
+
+.exec-card-body {
+  border-top: 1px solid rgba(37, 43, 56, .7);
+  padding: 10px 13px 12px;
+}
+.exec-card-counts {
+  color: #667084;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+  margin-bottom: 7px;
+}
+/* Thin secondary progress line — the work STATE is the primary signal. */
+.exec-progress-line {
+  height: 3px;
+  margin: 0 0 8px;
+  border-radius: 99px;
+  background: #1b202b;
+  overflow: hidden;
+}
+.exec-progress-line span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  transition: width .4s ease;
+}
+
+/* Tool timeline: completed rows recede, the active one stands out. */
+.exec-tools { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+.exec-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .2s ease, border-color .2s ease, opacity .2s ease;
+}
+.exec-tool-row:hover { background: rgba(255, 255, 255, .035); }
+.exec-tool-ico {
+  width: 15px;
+  flex: none;
+  text-align: center;
+  font-size: 10.5px;
+  color: #596276;
+  transition: color .25s ease, transform .25s ease;
+}
+.exec-tool-row.running { border-color: rgba(139, 124, 255, .28); }
+.exec-tool-row.running .exec-tool-ico { color: var(--accent); animation: work-pulse 1.5s ease-in-out infinite; }
+.exec-tool-row.completed { opacity: .72; }
+.exec-tool-row.completed:hover { opacity: 1; }
+.exec-tool-row.completed .exec-tool-ico { color: var(--accent2); }
+.exec-tool-row.failed { border-color: rgba(255, 107, 122, .28); }
+.exec-tool-row.failed .exec-tool-ico { color: var(--danger); }
+.exec-tool-name {
+  flex: none;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 11px;
+  color: var(--soft);
+}
+.exec-tool-label {
+  flex: 1;
+  min-width: 0;
+  color: #7e8799;
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.exec-tool-dur { flex: none; color: #596276; font-size: 10px; font-variant-numeric: tabular-nums; }
+.exec-tool-caret { flex: none; color: #4a5264; font-size: 9px; transition: transform .2s ease; }
+.exec-tool-row.open .exec-tool-caret { transform: rotate(180deg); }
+.exec-tool-detail {
+  grid-column: 1 / -1;
+  max-height: 180px;
+  margin-top: 6px;
+  padding: 9px 10px;
+  overflow: auto;
+  border: 1px solid #1f2533;
+  border-radius: 7px;
+  background: #080a0e;
+  color: #aeb6c6;
+  font: 10.5px/1.6 Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.exec-tool-row.open { flex-wrap: wrap; }
+.exec-card-recovery {
+  font-size: 11.5px;
+  color: var(--warn);
+  border: 1px solid rgba(243, 186, 99, .3);
+  background: rgba(243, 186, 99, .07);
+  border-radius: 8px;
+  padding: 6px 9px;
+  margin: 6px 0;
+}
+.exec-card-error {
+  font-size: 11.5px;
+  color: var(--danger);
+  border: 1px solid rgba(255, 107, 122, .32);
+  background: rgba(255, 107, 122, .07);
+  border-radius: 8px;
+  padding: 6px 9px;
+  margin: 6px 0;
+  word-wrap: break-word;
+}
+.exec-artifacts { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.exec-artifact {
+  font-size: 11.5px;
+  color: var(--accent2);
+  border: 1px solid rgba(67, 211, 180, .22);
+  background: rgba(67, 211, 180, .06);
+  border-radius: 8px;
+  padding: 5px 9px;
+}
+
+/* ---- Motion: subtle, purposeful, state-driven ------------------- */
+@keyframes work-pulse {
+  50% { opacity: .45; transform: scale(.82); }
+}
+/* Cards settle once on mount; inner re-renders keep the article node so
+   the entry animation never replays on every tool event. */
+.message.exec-card-message { animation: rise .3s ease both; }
+
+/* ---- Mobile ----------------------------------------------------- */
+@media (max-width: 800px) {
+  .messages { padding-inline: 14px; }
+  .message.assistant,
+  .message.exec-card-message { grid-template-columns: 24px minmax(0, 1fr); gap: 9px; }
+  .message.assistant .role,
+  .message.exec-card-message .role { width: 24px; height: 24px; border-radius: 8px; font-size: 11px; }
+  .message-body { font-size: 14.5px; line-height: 1.66; }
+  .message-body pre,
+  .message-body .code-block > pre { font-size: 11.5px; padding: 11px 12px; }
+  .code-bar { height: 30px; padding: 0 10px; }
+  .exec-card-summary { padding: 9px 11px; min-height: 40px; }
+  .exec-card-line { font-size: 11.5px; }
+  .exec-card-body { padding: 9px 11px 11px; }
+  /* Long tool names wrap instead of overflowing the phone screen. */
+  .exec-tool-row { flex-wrap: wrap; }
+  .exec-tool-label { white-space: normal; font-size: 11px; }
+  .exec-tool-name { font-size: 10.5px; }
+  .message-body table { font-size: 12.5px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-dot,
+  .exec-card-ico.st-tool,
+  .exec-card-ico.st-working,
+  .exec-tool-row.running .exec-tool-ico { animation: none !important; }
+  .message.exec-card-message { animation: none; }
+}

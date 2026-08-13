@@ -56,6 +56,7 @@
     "smoke:config": "ts-node scripts/smoke-config.ts",
     "smoke:turn-contract": "ts-node scripts/smoke-turn-contract.ts",
     "smoke:execution-store": "ts-node scripts/smoke-execution-store.ts",
+    "smoke:webui-cards": "ts-node scripts/smoke-webui-execution-cards.ts",
     "smoke:phase16": "ts-node scripts/smoke-phase16.ts",
     "battery": "ts-node scripts/run-battery.ts",
     "typecheck": "tsc --noEmit",

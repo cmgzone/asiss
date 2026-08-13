@@ -149,7 +149,7 @@ export class WebChannel implements ChannelAdapter {
         const html = fs.readFileSync(indexPath, 'utf-8')
           .replace('<option>mock</option>', '')
           .replace(":/nvidia/i.test(providerName)?'NVIDIA':'mock'", ":/nvidia/i.test(providerName)?'NVIDIA':'OpenRouter'")
-          .replace('</head>', '<link rel="stylesheet" href="/layout-fix.css"><link rel="stylesheet" href="/chat-progress.css"></head>')
+          .replace('</head>', '<link rel="stylesheet" href="/layout-fix.css"><link rel="stylesheet" href="/chat-progress.css"><link rel="stylesheet" href="/webui.css"></head>')
           .replace('</body>', '<script src="/chat-progress.js"></script></body>');
         res.type('html').send(html);
       });

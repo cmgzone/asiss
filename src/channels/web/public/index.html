@@ -140,16 +140,20 @@
     // for the common languages, keyed off the language-* class marked emits.
     const HL_KEYWORDS={js:['const','let','var','function','return','if','else','for','while','do','switch','case','break','continue','new','delete','typeof','instanceof','in','of','class','extends','super','this','import','export','from','default','async','await','try','catch','finally','throw','yield','static','get','set','true','false','null','undefined','void','with','debugger'],ts:['const','let','var','function','return','if','else','for','while','do','switch','case','break','continue','new','delete','typeof','instanceof','in','of','class','extends','super','this','import','export','from','default','async','await','try','catch','finally','throw','yield','static','get','set','true','false','null','undefined','void','interface','type','enum','namespace','declare','readonly','public','private','protected','abstract','implements','keyof','as','satisfies','unknown','never','any','string','number','boolean','symbol','object','with','debugger'],python:['def','return','if','elif','else','for','while','in','not','and','or','import','from','as','class','try','except','finally','raise','with','lambda','pass','break','continue','yield','global','nonlocal','del','assert','is','None','True','False','async','await','self','print'],bash:['if','then','else','elif','fi','for','while','do','done','case','esac','function','return','local','export','echo','exit','read','cd','source','set','unset','shift','true','false','sudo','grep','sed','awk','cat','ls','mkdir','rm','cp','mv','touch','chmod','chown','curl','wget','git','npm','npx','pnpm','yarn','node','python','pip','docker','kubectl','tar','zip','unzip'],json:['true','false','null'],sql:['select','from','where','insert','into','values','update','set','delete','create','table','index','view','drop','alter','join','left','right','inner','outer','on','group','by','order','having','limit','offset','and','or','not','in','exists','between','like','is','null','primary','key','foreign','references','distinct','count','sum','avg','min','max','as','union','all','begin','commit','rollback','default','unique','check','constraint','case','when','then','else','end'],go:['package','import','func','var','const','type','struct','interface','map','chan','go','defer','return','if','else','for','range','switch','case','default','break','continue','fallthrough','select','goto','new','make','len','cap','append','true','false','nil','error','string','int','float64','bool','byte','rune'],rust:['fn','let','mut','const','static','struct','enum','trait','impl','mod','use','pub','crate','super','self','return','if','else','match','for','while','loop','break','continue','async','await','move','ref','type','where','dyn','true','false','String','Option','Result','Some','None','Ok','Err','Vec','Box'],java:['public','private','protected','class','interface','enum','extends','implements','import','package','static','final','void','int','long','double','float','boolean','char','byte','short','String','new','return','if','else','for','while','do','switch','case','break','continue','try','catch','finally','throw','throws','this','super','abstract','synchronized','volatile','true','false','null','var','record'],c:['int','char','float','double','long','short','unsigned','signed','void','struct','union','enum','typedef','const','static','extern','register','volatile','auto','return','if','else','for','while','do','switch','case','default','break','continue','goto','sizeof','true','false','NULL','malloc','free','printf','include','define'],cpp:['int','char','float','double','long','short','unsigned','signed','void','struct','union','enum','typedef','const','static','extern','register','volatile','auto','return','if','else','for','while','do','switch','case','default','break','continue','goto','sizeof','true','false','nullptr','NULL','class','namespace','using','template','typename','public','private','protected','virtual','override','final','new','delete','this','std','cout','cin','include','define','string','vector','map','set'],css:['import','media','keyframes','important','root','hover','focus','active','before','after','first','last','child','nth','not','is','where','has'],html:['html','head','body','div','span','class','id','style','script','link','meta','title','img','a','href','src','p','h1','h2','h3','ul','ol','li','table','tr','td','th','form','input','button','select','option','textarea','label','header','footer','main','section','article','nav','aside','iframe','video','audio','canvas','svg'],yaml:['true','false','null','yes','no','on','off']};
     function highlightCode(src,lang){const keywords=HL_KEYWORDS[lang]||HL_KEYWORDS.js;const ignoreCase=/^(sql|bash|sh|shell|html|css|yaml|yml|ini|toml|dockerfile)$/.test(lang||'');const hashComments=/^(python|bash|sh|shell|yaml|yml|ruby|perl|makefile|dockerfile|ini|toml|r)$/.test(lang||'');const comment=hashComments?'(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/|#[^\\n]*|<!--[\\s\\S]*?-->)':'(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/|<!--[\\s\\S]*?-->)';const re=new RegExp(comment+'|("(?:[^"\\\\\\n]|\\\\.)*"|\'(?:[^\'\\\\\\n]|\\\\.)*\'|`(?:[^`\\\\]|\\\\.)*`)|(\\b0x[0-9a-fA-F]+\\b|\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b)|([A-Za-z_$][\\w$]*)','g');const escSrc=String(src).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));let out='',last=0,m;while((m=re.exec(escSrc))){out+=escSrc.slice(last,m.index);if(m[1])out+='<span class="tok-c">'+m[1]+'</span>';else if(m[2])out+='<span class="tok-s">'+m[2]+'</span>';else if(m[3])out+='<span class="tok-n">'+m[3]+'</span>';else{const w=m[4];const word=ignoreCase?w.toLowerCase():w;if(keywords.includes(word))out+='<span class="tok-k">'+w+'</span>';else if(/^\s*\(/.test(escSrc.slice(m.index+m[0].length)))out+='<span class="tok-f">'+w+'</span>';else out+=w}last=m.index+m[0].length}out+=escSrc.slice(last);return out}
-    function enhanceCodeBlocks(root){if(!root)return;root.querySelectorAll('.message-body pre').forEach(pre=>{if(pre.dataset.hlDone)return;pre.dataset.hlDone='1';const code=pre.querySelector('code');const btn=document.createElement('button');btn.type='button';btn.className='code-copy';btn.textContent='⧉';btn.title='Copy code';btn.onclick=async(e)=>{e.stopPropagation();const text=(code?code.textContent:pre.textContent)||'';try{await navigator.clipboard.writeText(text)}catch{const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove()}toast('Code copied')};pre.appendChild(btn);if(code&&!code.dataset.hl){const lang=(code.className.match(/language-(\w+)/)||[])[1]||'';code.dataset.hl='1';code.innerHTML=highlightCode(code.textContent,lang.toLowerCase())}})}
+    // Code blocks render as embedded editor artifacts: a header bar with the
+    // language tag + copy action, then the monospace body with the existing
+    // dependency-free highlighter. Wrapping happens once per block (dataset
+    // guard survives streaming re-renders because renderAssistantBody rebuilds
+    // the body from scratch, so these nodes are always fresh).
+    function enhanceCodeBlocks(root){if(!root)return;root.querySelectorAll('.message-body pre').forEach(pre=>{if(pre.dataset.hlDone)return;pre.dataset.hlDone='1';const code=pre.querySelector('code');const lang=(code&&(code.className.match(/language-(\w+)/)||[])[1])||'';const wrap=document.createElement('div');wrap.className='code-block';const bar=document.createElement('div');bar.className='code-bar';if(lang){const tag=document.createElement('span');tag.className='code-lang';tag.textContent=lang;bar.appendChild(tag)}const btn=document.createElement('button');btn.type='button';btn.className='code-copy';btn.textContent='Copy';btn.title='Copy code';btn.onclick=async(e)=>{e.stopPropagation();const text=(code?code.textContent:pre.textContent)||'';try{await navigator.clipboard.writeText(text)}catch{const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove()}toast('Code copied')};bar.appendChild(btn);pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(bar);wrap.appendChild(pre);if(code&&!code.dataset.hl){code.dataset.hl='1';code.innerHTML=highlightCode(code.textContent,lang.toLowerCase())}})}
     function toast(text,bad=false){const el=$('#toast');el.textContent=text;el.style.borderColor=bad?'rgba(255,107,122,.5)':'';el.classList.remove('hidden');clearTimeout(toast.t);toast.t=setTimeout(()=>el.classList.add('hidden'),3200)}
     function updateStopButton(){const stop=$('#stopBtn');if(!stop)return;stop.classList.toggle('hidden',!state.missionActive);const hint=$('#composerHint');if(hint)hint.textContent=state.missionActive?'Enter to stop · Shift+Enter for a new line':'Enter to send · Shift+Enter for a new line'}
     // True when the user is already reading the latest messages — used to
     // auto-scroll during streaming without yanking them back down when they
     // scrolled up through history.
     function nearBottom(){const root=$('#messages');return root?root.scrollHeight-root.scrollTop-root.clientHeight<120:true}
-    // Execution panel render (DOM side of the store — throttled to one rAF).
-    let executionRenderTimer=0;
-    function scheduleExecutionRender(){if(executionRenderTimer)return;executionRenderTimer=requestAnimationFrame(()=>{executionRenderTimer=0;renderExecution();renderExecutionCard();renderExecSheet()})}
+    // Execution renders are throttled to one rAF per event burst (the rAF
+    // loop lives with the per-execution card layer below).
     function executionStatusBadge(status){const s=String(status||'running');if(s==='running')return['run','Running'];if(s==='completed')return['ok','Completed'];if(s==='cancelled')return['stopped','Stopped'];if(s==='failed')return['err','Failed'];return['dim','Blocked']}
     function executionMatchesScope(ex,projectId,conversationId){
       if(projectId)return String(ex.scope.projectId||'')===String(projectId);
@@ -189,75 +193,136 @@
         ${chips.length?`<div class="exec-chips">${chips.join('')}</div>`:''}
       `;
     }
-    // Phase 4 — the chat ExecutionCard. Transient: rendered from the store into
-    // a dedicated #messages child, never pushed to state.messages, never
-    // persisted. Running = expanded with compact per-tool rows; terminal =
-    // collapsed to a one-line summary; click toggles. Per-tool rows expand to
-    // show their output (Phase 6: compact by default).
-    function ensureExecutionCard(){
-      const card=document.getElementById('executionCard');
-      if(card)return card;
-      const fresh=document.createElement('article');
-      fresh.className='message exec-card-message';
-      fresh.id='executionCard';
-      const root=$('#messages');
-      root.querySelector('.empty')?.remove();
-      root.appendChild(fresh);
-      if(nearBottom())root.scrollTop=root.scrollHeight;
-      renderExecutionCard();
+    // ===== Phase 21 — per-execution chat cards (PURE identity/HTML) =====
+    // Delimited so smoke-webui-execution-cards.ts can extract and unit-test
+    // the message→execution contract without a DOM. Every execution gets ONE
+    // unique card element (`execution-card-<executionId>`) bound to its own
+    // assistant turn; cards never share a global element and never overwrite
+    // each other. Card HTML is built here (pure string, self-contained esc)
+    // and mounted by the DOM layer below. Do NOT reference globals in here
+    // except executionWork (the store block, also pure).
+    const CARD_ESC=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+    function executionCardId(executionId){return 'execution-card-'+String(executionId||'')}
+    function cardDuration(from,to){const ms=Math.max(0,(to||Date.now())-(from||Date.now()));if(ms<1000)return `${ms}ms`;const s=Math.round(ms/1000);if(s<60)return `${s}s`;const m=Math.floor(s/60),r=s%60;return r?`${m}m ${r}s`:`${m}m`}
+    function executionCardState(ex){
+      const s=String(ex?.status||'running');
+      if(s==='completed')return{key:'completed',icon:'✓',label:'Completed'};
+      if(s==='failed')return{key:'failed',icon:'⚠',label:'Failed'};
+      if(s==='cancelled')return{key:'stopped',icon:'■',label:'Stopped'};
+      if(s==='blocked')return{key:'blocked',icon:'◌',label:'Blocked'};
+      if(ex.tools.find(t=>t.id===ex.activeToolId))return{key:'tool',icon:'◉',label:'Working'};
+      if(String(ex.currentTask||'').trim())return{key:'working',icon:'◉',label:'Working'};
+      return{key:'thinking',icon:'○',label:'Thinking'};
     }
-    function renderExecutionCard(){
-      const card=document.getElementById('executionCard');
-      const ex=currentScopeExecution();
-      if(!card)return;
-      // Leaving the scope (conversation/project switch) removes the transient card.
-      if(!ex){card.remove();return}
-      const terminal=ex.status!=='running';
-      // Terminal cards default collapsed, but a manual expand/collapse is
-      // preserved across re-renders (data-manual is set by the click handler).
-      const manual=card.dataset.manual;
-      const collapsed=terminal?(manual==='0'?0:1):(card.dataset.collapsed==='1'?1:0);
-      const badge=executionStatusBadge(ex.status);
-      const icon={running:'●',completed:'✓',failed:'⚠',cancelled:'■',blocked:'◌'}[ex.status]||'●';
-      const active=ex.tools.find(t=>t.id===ex.activeToolId);
-      const done=ex.tools.filter(t=>t.status!=='running').length;
-      const summaryText=ex.currentTask||`${done}/${ex.tools.length} tools`;
-      const dur=fmtDuration(ex.startedAt,ex.endedAt);
-      const agentsLine=ex.agents.length?` · ${ex.agents.filter(a=>a.status!=='running').length}/${ex.agents.length} agents`:'';
-      const counts=`${done}/${ex.tools.length} tools${agentsLine}${ex.progress!=null?` · ${Math.round(ex.progress)}%`:''}`;
-      const cardOpenTools=new Set();(card.querySelectorAll('.exec-tool-row.open')||[]).forEach(r=>r.dataset.tool&&cardOpenTools.add(r.dataset.tool));
-const toolRows=ex.tools.slice(-12).map(t=>{
-        const st=t.status==='running'?'running':t.status==='failed'?'failed':'completed';
-        const ico=st==='running'?'●':st==='failed'?'✕':'✓';
-        const durT=t.startedAt&&t.endedAt?fmtDuration(t.startedAt,t.endedAt):'';
-        const rowOpen=cardOpenTools.has(t.id);
-        const detail=(t.output||t.error)?`<div class="exec-tool-detail${rowOpen?'':' hidden'}">${esc(String(t.error||t.output||'').slice(0,2000))}</div>`:'';
-        return `<div class="exec-tool-row ${st}${rowOpen?' open':''}" data-tool="${esc(t.id)}" role="button"><span class="exec-tool-ico">${ico}</span><span class="exec-tool-name">${esc(t.name)}</span>${t.label&&t.label!==t.name?`<span class="exec-tool-label">${esc(t.label)}</span>`:''}${durT?`<span class="exec-tool-dur">${durT}</span>`:''}<span class="exec-tool-caret">▾</span>${detail}</div>`;
+    function executionSummaryText(ex){
+      if(!ex)return'';
+      const st=executionCardState(ex);
+      const bits=[];
+      if(ex.tools.length)bits.push(`${ex.tools.filter(t=>t.status!=='running').length}/${ex.tools.length} tools`);
+      if(ex.agents.length)bits.push(`${ex.agents.filter(a=>a.status!=='running').length}/${ex.agents.length} agents`);
+      if(ex.endedAt||ex.status!=='running')bits.push(cardDuration(ex.startedAt,ex.endedAt));
+      return `${st.icon} ${st.label}${bits.length?' · '+bits.join(' · '):''}`;
+    }
+    // One card HTML string per execution. `openTools` preserves manually
+    // expanded tool rows across re-renders; `collapsed` collapses the body.
+    // The dominant line is the work STATE ("Running tests") — the progress
+    // percentage stays a thin secondary line, never a fake completion meter.
+    function cardHtmlForExecution(ex,opts){
+      const o=opts||{};
+      const st=executionCardState(ex);
+      const work=executionWork(ex);
+      const done=(ex.tools||[]).filter(t=>t.status!=='running').length;
+      const dur=cardDuration(ex.startedAt,ex.endedAt);
+      const openTools=o.openTools instanceof Set?o.openTools:new Set();
+      const collapsed=!!o.collapsed;
+      const toolRows=(ex.tools||[]).slice(-12).map(t=>{
+        const stT=t.status==='running'?'running':t.status==='failed'?'failed':'completed';
+        const icoT=stT==='running'?'◉':stT==='failed'?'⚠':'✓';
+        const durT=t.startedAt&&t.endedAt?cardDuration(t.startedAt,t.endedAt):'';
+        const rowOpen=openTools.has(t.id);
+        const detail=(t.output||t.error)?`<div class="exec-tool-detail${rowOpen?'':' hidden'}">${CARD_ESC(String(t.error||t.output||'').slice(0,2000))}</div>`:'';
+        return `<div class="exec-tool-row ${stT}${rowOpen?' open':''}" data-tool="${CARD_ESC(t.id)}" role="button"><span class="exec-tool-ico">${icoT}</span><span class="exec-tool-name">${CARD_ESC(t.name)}</span>${t.label&&t.label!==t.name?`<span class="exec-tool-label">${CARD_ESC(t.label)}</span>`:''}${durT?`<span class="exec-tool-dur">${durT}</span>`:''}<span class="exec-tool-caret">▾</span>${detail}</div>`;
       }).join('');
-      const artifactRows=ex.artifacts.slice(0,4).map(a=>`<div class="exec-artifact">▣ ${esc(a.caption)}</div>`).join('');
-      card.dataset.collapsed=String(collapsed);
-      card.innerHTML=`
-        <div class="role">◈</div>
-        <div class="exec-card ${collapsed?'collapsed':''}" role="button">
+      const artifactRows=(ex.artifacts||[]).slice(0,4).map(a=>`<div class="exec-artifact">▣ ${CARD_ESC(a.caption)}</div>`).join('');
+      const agentsLine=ex.agents.length?` · ${ex.agents.filter(a=>a.status!=='running').length}/${ex.agents.length} agents`:'';
+      return `<div class="role">◈</div>
+        <div class="exec-card ${collapsed?'collapsed':''} st-${st.key}" role="button" data-exec="${CARD_ESC(ex.id)}" aria-expanded="${collapsed?'false':'true'}">
           <div class="exec-card-summary">
-            <span class="exec-card-ico ${badge[0]}">${icon}</span>
-            <span class="exec-card-state ${badge[0]}">${esc(badge[1])}</span>
-            <span class="exec-card-line">${esc(summaryText)}</span>
+            <span class="exec-card-ico st-${st.key}">${st.icon}</span>
+            <span class="exec-card-state st-${st.key}">${CARD_ESC(st.label)}</span>
+            <span class="exec-card-line">${CARD_ESC(work.label)}</span>
             <span class="exec-card-meta">${dur}</span>
-            ${terminal?`<button type="button" class="exec-history-open" data-history="1" title="Replay the tool timeline">View execution</button>`:''}
+            ${ex.status!=='running'?`<button type="button" class="exec-history-open" data-history="1" title="Replay the tool timeline">View execution</button>`:''}
             <span class="exec-card-toggle">${collapsed?'▸':'⌄'}</span>
           </div>
           <div class="exec-card-body">
-            <div class="exec-card-counts">${counts} · ${esc(ex.id.slice(0,8))}</div>
-            ${ex.progress!=null?`<div class="progress"><span style="width:${Math.round(ex.progress)}%"></span></div>`:''}
-            ${ex.recoveryPhase?`<div class="exec-card-recovery warn">↻ ${esc(ex.recoveryPhase)} — ${esc(String(ex.currentTask||'recovering').slice(0,90))}</div>`:''}
-            ${ex.latestError?`<div class="exec-card-error">⚠ ${esc(String(ex.latestError).slice(0,180))}</div>`:''}
-            ${active?`<div class="exec-card-active">● ${esc(active.label||active.name)}</div>`:''}
+            <div class="exec-card-counts">${done}/${ex.tools.length} tools${agentsLine}</div>
+            ${ex.progress!=null?`<div class="exec-progress-line" aria-hidden="true"><span style="width:${Math.round(ex.progress)}%"></span></div>`:''}
+            ${ex.recoveryPhase?`<div class="exec-card-recovery">↻ ${CARD_ESC(ex.recoveryPhase)}</div>`:''}
+            ${ex.latestError?`<div class="exec-card-error">⚠ ${CARD_ESC(String(ex.latestError).slice(0,180))}</div>`:''}
             ${toolRows?`<div class="exec-tools">${toolRows}</div>`:''}
             ${artifactRows?`<div class="exec-artifacts">${artifactRows}</div>`:''}
           </div>
         </div>`;
-      if(nearBottom()){$('#messages').scrollTop=$('#messages').scrollHeight}
+    }
+    // Snapshot an execution into a persistable, store-compatible shape so a
+    // reloaded conversation can REPLAY every tool row under its assistant
+    // message. The live store stays ephemeral — this is the durable projection
+    // (outputs bounded so conversation storage cannot balloon).
+    function executionSnapshotFor(ex){
+      if(!ex)return null;
+      const st=executionCardState(ex);
+      const snap={id:ex.id,status:ex.status,state:st.key,startedAt:ex.startedAt,endedAt:ex.endedAt,durationMs:Math.max(0,(ex.endedAt||Date.now())-ex.startedAt),currentTask:String(ex.currentTask||'').slice(0,160),progress:ex.progress!=null?Number(ex.progress):null,latestError:ex.latestError?String(ex.latestError).slice(0,500):null,recoveryPhase:ex.recoveryPhase||null,recoveryPhases:(ex.recoveryPhases||[]).map(r=>({phase:r.phase,at:r.at,text:String(r.text||'').slice(0,200)})),tools:(ex.tools||[]).slice(-40).map(t=>({id:t.id,name:t.name,label:t.label||t.name,status:t.status,startedAt:t.startedAt,endedAt:t.endedAt,error:t.error?String(t.error).slice(0,1500):null,output:String(t.output||'').slice(0,2000)})),agents:(ex.agents||[]).slice(-20).map(a=>({id:a.id,name:a.name,status:a.status})),artifacts:(ex.artifacts||[]).slice(0,8).map(a=>({caption:String(a.caption||'').slice(0,120),url:String(a.url||'').slice(0,300),filename:String(a.filename||'').slice(0,120)})),terminal:String(ex.terminal||'').slice(-8000)};
+      snap.text=executionSummaryText(ex);
+      return snap;
+    }
+    // ===== /per-execution cards (PURE) =====
+    // ===== DOM layer: mount + targeted render of per-execution cards =====
+    // One article per executionId; each renders only when ITS version changed,
+    // so a busy execution never re-renders its neighbors. Never a singleton.
+    const executionCards=new Map(); // executionId -> article element
+    const executionCardVersions=new Map(); // executionId -> last rendered version
+    let executionRenderTimer=0;
+    function mountExecutionCard(executionId){
+      const id=executionCardId(executionId);
+      const existing=document.getElementById(id);
+      if(existing){executionCards.set(executionId,existing);return existing}
+      const root=$('#messages');if(!root)return null;
+      const fresh=document.createElement('article');
+      fresh.className='message exec-card-message';
+      fresh.id=id;
+      fresh.dataset.execution=executionId;
+      root.querySelector('.empty')?.remove();
+      root.appendChild(fresh);
+      executionCards.set(executionId,fresh);
+      if(nearBottom())root.scrollTop=root.scrollHeight;
+      return fresh;
+    }
+    function unmountExecutionCard(executionId){const el=executionCards.get(executionId);if(el){el.remove();executionCards.delete(executionId);executionCardVersions.delete(executionId)}}
+    function renderExecutionCardById(executionId){
+      const ex=executionStore.executions.get(executionId);
+      const el=executionCards.get(executionId)||mountExecutionCard(executionId);
+      if(!el)return;
+      if(!ex){unmountExecutionCard(executionId);return}
+      const openTools=new Set();(el.querySelectorAll('.exec-tool-row.open')||[]).forEach(r=>r.dataset.tool&&openTools.add(r.dataset.tool));
+      const collapsed=ex.status!=='running'?(el.dataset.manual!=='0'):(el.dataset.collapsed==='1');
+      el.dataset.collapsed=String(collapsed);
+      el.innerHTML=cardHtmlForExecution(ex,{openTools,collapsed});
+      executionCardVersions.set(executionId,ex.version||0);
+      if(nearBottom()){const root=$('#messages');if(root)root.scrollTop=root.scrollHeight}
+    }
+    // One rAF per event burst; re-renders only mounted cards whose version
+    // changed. Canvas panel + mobile sheet re-render as views of the store.
+    function scheduleExecutionRender(){
+      if(executionRenderTimer)return;
+      executionRenderTimer=requestAnimationFrame(()=>{
+        executionRenderTimer=0;
+        renderExecution();
+        for(const [exId,ex] of executionStore.executions){
+          if(executionCards.has(exId)&&(executionCardVersions.get(exId)||0)!==(ex.version||0))renderExecutionCardById(exId);
+        }
+        renderExecSheet();
+      });
     }
     // Phase 16 — mobile bottom sheet. Rendered from the store on the same rAF
     // as the card; auto-opens while a mission runs (per executionId, so a
@@ -329,10 +394,10 @@ const toolRows=ex.tools.slice(-12).map(t=>{
     // from the store into a modal (reusing the Loop dialog shell). The store
     // record carries everything: status, tools (+durations +output), agents,
     // recovery phases, artifacts, terminal, progress.
-    function openExecutionHistory(){const ex=currentScopeExecution();if(!ex)return;$('#execHistoryMeta').textContent=`${ex.id.slice(0,8)} · ${executionStatusBadge(ex.status)[1]} · ${fmtDuration(ex.startedAt,ex.endedAt)}`;renderExecutionHistory();$('#execHistoryDialog').showModal()}
-    function renderExecutionHistory(){
+    function openExecutionHistory(executionId){let ex=executionId?executionStore.executions.get(executionId):null;if(!ex&&!executionId)ex=currentScopeExecution();if(!ex){const m=state.messages.find(x=>x.execution&&Array.isArray(x.execution.tools)&&String(x.execution.id)===String(executionId));if(m)ex=m.execution}if(!ex)return;$('#execHistoryMeta').textContent=`${ex.id.slice(0,8)} · ${executionCardState(ex).label} · ${cardDuration(ex.startedAt,ex.endedAt)}`;renderExecutionHistory(ex);$('#execHistoryDialog').showModal()}
+    function renderExecutionHistory(ex){
       const root=$('#execHistoryList');if(!root)return;
-      const ex=currentScopeExecution();if(!ex){root.innerHTML='<div class="loop-empty">No execution selected.</div>';return}
+      if(!ex){root.innerHTML='<div class="loop-empty">No execution selected.</div>';return}
       const done=ex.tools.filter(t=>t.status!=='running').length;
       const agentsDone=ex.agents.filter(a=>a.status!=='running').length;
       const toolRows=ex.tools.slice(-40).map(t=>{
@@ -363,7 +428,9 @@ async function artifactUrl(url){if(!url)return'';try{const r=await fetch(url,{he
 const blobUrls=[];function trackBlobUrl(u){blobUrls.push(u);while(blobUrls.length>20)URL.revokeObjectURL(blobUrls.shift())}
     const projectChatKey=()=>`gitu:v2:chat:${state.user}:${state.projectId}`;
     const activeConversationKey=()=>`gitu:v3:active:${state.user}`;
-    const completedMessages=()=>state.messages.filter(m=>m.complete!==false&&m.kind!=='update').slice(-120);
+    // Private reasoning (assistant_done.reasoning) is deliberately NOT rendered
+    // in the UI and is stripped here so it never reaches persisted history.
+    const completedMessages=()=>state.messages.filter(m=>m.complete!==false&&m.kind!=='update').slice(-120).map(m=>{const c={...m};delete c.reasoning;return c});
     function normalizeConversationMessages(messages){const output=[],groups=new Map();for(const raw of Array.isArray(messages)?messages:[]){const message={...raw};if(message.kind==='update')continue;if(message.kind==='user')groups.clear();if(message.kind!=='activity'){output.push(message);continue}const kind=toolSummaryKind(message.name),key=kind==='tool'?`tool:${message.name}`:kind,existing=groups.get(key);if(!existing){message.count=Number(message.count||1);groups.set(key,message);output.push(message);continue}existing.count=Number(existing.count||1)+Number(message.count||1);existing.failed=existing.failed||message.failed||message.status==='failed';existing.status=existing.failed?'failed':message.status;existing.complete=message.complete;existing.text=`${toolSummaryText(existing.name||message.name,existing.status)} · ${existing.count} actions`;if(message.output)existing.output=safeToolOutput(`${existing.output||''}${existing.output?'\n\n':''}${message.output}`)}return output.slice(-120)}
     const currentTitle=()=>String(state.messages.find(m=>m.kind==='user')?.text||'New conversation').trim().replace(/\s+/g,' ').slice(0,80)||'New conversation';
     async function persistConversation(){if(state.projectId||!state.conversationId)return;const id=state.conversationId;const messages=completedMessages();try{await api(`/api/conversations/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify({title:currentTitle(),messages})});const row=state.conversations.find(x=>x.id===id);if(row){row.title=currentTitle();row.updatedAt=new Date().toISOString();row.messageCount=messages.length}renderThreads()}catch(error){toast(`Chat save failed: ${error.message}`,true)}}
@@ -394,21 +461,20 @@ const blobUrls=[];function trackBlobUrl(u){blobUrls.push(u);while(blobUrls.lengt
     }
     async function loadLoop(){try{const r=await fetch('/api/loop',{headers:state.token?{Authorization:'Bearer '+state.token}:{}});const d=await r.json();if(!r.ok||d.error){$('#goalList').innerHTML='<div class="loop-empty">Could not load the loop trace ('+(r.status||'error')+'). Sign in and try again.</div>';$('#taskList').innerHTML='';return}loopData=d;renderLoop()}catch(e){}}
     function emptyMarkup(){return `<div class="empty"><div class="eyebrow">Autonomous by design</div><h2>Give Gitu an outcome, not a sequence of clicks.</h2><p>It can inspect, edit, run tools, recover from failures, verify work, and delegate independent tasks in parallel.</p><div class="prompts"><button class="prompt-card">Audit this project and fix the highest-impact issue</button><button class="prompt-card">Build this feature end to end and verify it</button><button class="prompt-card">Research this topic and produce an evidence-backed brief</button><button class="prompt-card">Split this work across specialist agents in parallel</button></div></div>`}
-    function renderMessages(){const root=$('#messages');if(!state.messages.length){root.innerHTML=emptyMarkup();root.querySelectorAll('.prompt-card').forEach(b=>b.onclick=()=>{$('#chatInput').value=b.textContent;sendMessage()});return}root.innerHTML='';state.messages.forEach(m=>appendMessageNode(m,false));if(currentScopeExecution())ensureExecutionCard();requestAnimationFrame(()=>root.scrollTop=root.scrollHeight)}
-    function appendMessageNode(m,animate=true){const root=$('#messages');root.querySelector('.empty')?.remove();const el=document.createElement('article');const kindClass=m.kind==='activity'?'activity-message':m.kind;el.className=`message ${kindClass}${animate?' entering':''}`;if(m.runId)el.dataset.run=m.runId;if(m.activityId)el.dataset.activityMessage=m.activityId;if(m.kind==='user')el.innerHTML=`<div class="message-body">${esc(m.text).replace(/\n/g,'<br>')}</div>`;else if(m.kind==='activity'){const toolKind=toolSummaryKind(m.name),detail=formatToolDetail(m.name,m.output,m.status);el.innerHTML=`<div class="activity-spacer"></div><div class="activity-stack"><button type="button" class="tool-summary ${esc(m.status||'running')}" data-tool="${esc(toolKind)}" aria-expanded="false"><span class="tool-summary-icon" aria-hidden="true">${esc(toolSummaryIcon(m.name))}</span><span class="tool-summary-label">${esc(m.text)}</span><span class="tool-summary-caret" aria-hidden="true"></span></button><div class="tool-detail hidden"><div class="tool-detail-head"><span>${esc(toolDetailLabel(m.name))}</span><span class="tool-detail-status">${esc(m.status||'running')}</span></div><pre>${esc(detail)}</pre></div></div>`}else if(m.kind==='update')el.innerHTML=`<div class="update-rail" aria-hidden="true"></div><div class="message-body">${markdown(m.text)}</div>`;else el.innerHTML=`<div class="role">G</div><div>${m.reasoning?`<details class="thinking-block"><summary>💭 Thinking</summary><div>${esc(m.reasoning)}</div></details>`:''}<div class="message-body">${m.pending?'<div class="thinking"><div class="shimmer"></div><span>Working</span></div>':markdown(m.text)}</div><div class="message-meta">${m.complete===false?'In progress':(m.stopped?'Stopped':m.failed?'Failed':'Completed')}</div><div class="message-actions">${(m.failed||m.stopped)?'<button type="button" class="retry-btn" data-retry="1">↻ Retry</button>':''}</div></div>`;root.appendChild(el);if(m.kind==='user'||nearBottom())root.scrollTop=root.scrollHeight;if(m.kind==='assistant'||m.kind==='update')enhanceCodeBlocks(el);return el}
+    function renderMessages(){const root=$('#messages');if(!state.messages.length){root.innerHTML=emptyMarkup();root.querySelectorAll('.prompt-card').forEach(b=>b.onclick=()=>{$('#chatInput').value=b.textContent;sendMessage()});return}root.innerHTML='';state.messages.forEach(m=>appendMessageNode(m,false));executionCards.clear();executionCardVersions.clear();for(const exId of executionStore.executions.keys())mountExecutionCard(exId);scheduleExecutionRender();requestAnimationFrame(()=>root.scrollTop=root.scrollHeight)}
+    function appendMessageNode(m,animate=true){const root=$('#messages');root.querySelector('.empty')?.remove();const el=document.createElement('article');const kindClass=m.kind==='activity'?'activity-message':m.kind;el.className=`message ${kindClass}${animate?' entering':''}`;if(m.runId)el.dataset.run=m.runId;if(m.activityId)el.dataset.activityMessage=m.activityId;if(m.kind==='user')el.innerHTML=`<div class="message-body">${esc(m.text).replace(/\n/g,'<br>')}</div>`;else if(m.kind==='activity'){const toolKind=toolSummaryKind(m.name),detail=formatToolDetail(m.name,m.output,m.status);el.innerHTML=`<div class="activity-spacer"></div><div class="activity-stack"><button type="button" class="tool-summary ${esc(m.status||'running')}" data-tool="${esc(toolKind)}" aria-expanded="false"><span class="tool-summary-icon" aria-hidden="true">${esc(toolSummaryIcon(m.name))}</span><span class="tool-summary-label">${esc(m.text)}</span><span class="tool-summary-caret" aria-hidden="true"></span></button><div class="tool-detail hidden"><div class="tool-detail-head"><span>${esc(toolDetailLabel(m.name))}</span><span class="tool-detail-status">${esc(m.status||'running')}</span></div><pre>${esc(detail)}</pre></div></div>`      }else if(m.kind==='update')el.innerHTML=`<div class="update-rail" aria-hidden="true"></div><div class="message-body">${markdown(m.text)}</div>`;else el.innerHTML=`<div class="role">G</div><div><div class="assistant-head"><span class="assistant-name">Gitu</span><span class="assistant-time">· just now</span></div><div class="message-body">${m.pending?'<div class="work-status" data-work="1"><span class="work-dot"></span><span class="work-label">Thinking</span></div>':markdown(m.text)}</div><div class="message-meta">${m.complete===false?'In progress':(m.stopped?'Stopped':m.failed?'Failed':'Completed')}</div>${m.execution&&!Array.isArray(m.execution.tools)?`<div class="message-execution st-${esc(String(m.execution.state||'completed'))}">${esc(m.execution.text||'')}</div>`:''}<div class="message-actions">${(m.failed||m.stopped)?'<button type="button" class="retry-btn" data-retry="1">↻ Retry</button>':''}</div></div>`;root.appendChild(el);if(m.execution&&Array.isArray(m.execution.tools)&&!executionStore.executions.has(String(m.execution.id))){const cardEl=document.createElement('article');cardEl.className='message exec-card-message';cardEl.id=executionCardId(m.execution.id);cardEl.dataset.execution=m.execution.id;cardEl.innerHTML=cardHtmlForExecution(m.execution,{collapsed:true});root.appendChild(cardEl)}if(m.kind==='user'||nearBottom())root.scrollTop=root.scrollHeight;if(m.kind==='assistant'||m.kind==='update')enhanceCodeBlocks(el);return el}
     function retryButtonHtml(){return '<button type="button" class="retry-btn" data-retry="1">↻ Retry</button>'}
     function syncRetryButton(m){const el=$(`[data-run="${CSS.escape(m.runId||'')}"]`);if(!el)return;const meta=el.querySelector('.message-meta');if(meta&&m.stopped)meta.textContent='Stopped';else if(meta&&m.failed)meta.textContent='Failed';const wrap=el.querySelector('.message-actions');if(wrap)wrap.innerHTML=(m.failed||m.stopped)?retryButtonHtml():''}
     async function retryMessage(){if(!state.socket||!state.socket.connected){toast('Not connected',true);return}const lastUser=[...state.messages].reverse().find(m=>m.kind==='user');if(!lastUser)return;const text=String(lastUser.text||'').trim();if(!text)return;if(!state.projectId&&!state.conversationId)await createConversation();const idx=state.messages.indexOf(lastUser);state.messages=state.messages.slice(0,idx+1);renderMessages();state.socket.emit('message',{text,projectId:state.projectId||undefined,conversationId:state.projectId?undefined:state.conversationId});ensureThinking();toast('Retrying…')}
     function addUser(text){const m={kind:'user',text,complete:true,at:Date.now()};state.messages.push(m);appendMessageNode(m);saveChat()}
     function clearProgressUpdates(){state.messages=state.messages.filter(message=>message.kind!=='update');$$('.message.update').forEach(element=>element.remove())}
-    function renderThinking(el,m){const body=el.querySelector('.message-body');if(!body)return;let tb=el.querySelector('.thinking-block');const text=String(m.reasoning||'').trim();if(!text){if(tb)tb.remove();return}if(!tb){tb=document.createElement('details');tb.className='thinking-block';tb.innerHTML='<summary>💭 Thinking</summary><div></div>';body.parentNode.insertBefore(tb,body)}tb.querySelector('div').textContent=m.reasoning}
     // Streaming renders are throttled: assistant_delta can arrive many times
     // per second, and re-parsing the whole markdown body on every token is
     // O(n^2) on long replies. The text accumulates on the message immediately;
     // the DOM re-render is deferred to at most one per 60 ms, then flushed
     // synchronously when the run completes.
     let assistantRenderTimer=null;
-    function renderAssistantBody(el,m){const body=el.querySelector('.message-body');if(body)body.innerHTML=markdown(m.text);renderThinking(el,m);enhanceCodeBlocks(el);const meta=el.querySelector('.message-meta');if(meta)meta.textContent=m.complete?'Completed':'In progress';if(nearBottom()){const root=$('#messages');if(root)root.scrollTop=root.scrollHeight}}
+    function renderAssistantBody(el,m){const body=el.querySelector('.message-body');if(body)body.innerHTML=markdown(m.text);enhanceCodeBlocks(el);const meta=el.querySelector('.message-meta');if(meta)meta.textContent=m.complete?'Completed':'In progress';if(nearBottom()){const root=$('#messages');if(root)root.scrollTop=root.scrollHeight}}
     function scheduleAssistantRender(m,done){
       const runId=m.runId;
       if(done){
@@ -438,7 +504,33 @@ const blobUrls=[];function trackBlobUrl(u){blobUrls.push(u);while(blobUrls.lengt
     function safeToolOutput(value){return String(value||'').replace(/__SHELL_STREAM(?:_END)?__/g,'').replace(/\b(?:sk|nvapi|xox[baprs])-[A-Za-z0-9_-]{10,}\b/g,'[REDACTED]').replace(/\b(OPENROUTER_API_KEY|OPENAI_API_KEY|NVIDIA_API_KEY|SERPER_API_KEY|BRAVE_API_KEY|DEEPGRAM_API_KEY|ELEVENLABS_API_KEY)\s*=\s*\S+/gi,'$1=[REDACTED]').trim().slice(-6000)}
     function formatToolDetail(name,raw,status){const clean=safeToolOutput(raw);if(!clean)return status==='running'?'Waiting for live output…':'No additional output was returned.';let data;try{data=JSON.parse(clean)}catch{return clean}const kind=toolSummaryKind(name);if(kind==='shell'){return safeToolOutput([data.command?`Command: ${data.command}`:'',data.cwd?`Folder: ${data.cwd}`:'',data.stdout||'',data.stderr?`Error output:\n${data.stderr}`:'',data.error?`Error: ${data.error}`:'',Number.isFinite(data.exitCode)?`Exit code: ${data.exitCode}`:''].filter(Boolean).join('\n\n'))}if(kind==='search'){const results=Array.isArray(data.results)?data.results:Array.isArray(data)?data:[];if(results.length)return results.slice(0,8).map((item,index)=>[`${index+1}. ${item.title||item.name||'Result'}`,item.url||item.link||'',item.snippet||item.description||''].filter(Boolean).join('\n')).join('\n\n')}if(kind==='edit'){const rows=Array.isArray(data.results)?data.results:(data.results?[data.results]:[]);const head=[data.summary?`${data.summary.success||0} of ${data.summary.total||0} file op${data.summary.total===1?'':'s'} succeeded`:'',data.summary&&(data.summary.added||data.summary.removed)?`Total: +${data.summary.added||0} / -${data.summary.removed||0} lines`:''].filter(Boolean);const perFile=rows.map(r=>{const p=String(r.path||'').split(/[\\/\\\\]/).pop()||r.path||'';const op=r.operation||'';let d='';if(r.success){if(op==='add')d=`+${r.added||0} lines`;else if(op==='delete')d=`-${r.removed||0} lines`;else if(r.added||r.removed)d=`+${r.added||0} / -${r.removed||0} lines`;else d='ok'}return d?`${p} (${op}) — ${d}`:p}).filter(Boolean);const out=[...head,...perFile].filter(Boolean);if(out.length)return out.join('\n')}if(kind==='tool'&&Number.isFinite(Number(data.lines))){return `${data.path||'File'} — ${data.lines} line${data.lines===1?'':'s'} ${data.action||'written'}`}return safeToolOutput(JSON.stringify(data,null,2))}
     function ensureThinking(){if(state.messages.some(m=>m.complete===false))return;const id='pending_'+Date.now();const m={kind:'assistant',text:'',runId:id,complete:false,pending:true,at:Date.now()};state.messages.push(m);appendMessageNode(m)}
-    function clearPending(){state.messages=state.messages.filter(m=>!(m.complete===false&&m.pending));$$('.message').forEach(el=>{if(el.querySelector('.thinking'))el.remove()})}
+    function clearPending(){const removed=new Set();state.messages=state.messages.filter(m=>{if(m.complete===false&&m.pending){removed.add(m.runId);return false}return true});for(const id of removed){const el=$(`[data-run="${CSS.escape(String(id||''))}"]`);if(el)el.remove()}}
+    // Message-scoped work state: when the real assistant turn starts, reuse the
+    // pending thinking message in place — no node removal/re-add, no layout
+    // jump, and each turn's thinking stays scoped to ITS OWN message.
+    function adoptPendingMessage(runId){
+      const pending=[...state.messages].reverse().find(m=>m.kind==='assistant'&&m.complete===false&&m.pending);
+      if(!pending)return false;
+      const oldRun=pending.runId;
+      pending.runId=runId;pending.pending=false;
+      const el=oldRun?$(`[data-run="${CSS.escape(String(oldRun))}"]`):null;
+      if(el){el.dataset.run=runId;el.querySelector('.work-status')?.remove();const meta=el.querySelector('.message-meta');if(meta)meta.textContent='In progress'}
+      return true;
+    }
+    function setMessageWork(el,label){const s=el?.querySelector?.('.work-status .work-label');if(s)s.textContent=String(label||'Thinking').slice(0,120)}
+    // When a mission settles, fold a compact execution summary into the last
+    // assistant message so restored conversations keep the tool timeline close
+    // to the turn that produced it (the live store stays ephemeral).
+    function persistExecutionSummary(ex){
+      // Bind the snapshot to the assistant message that belongs to THIS
+      // execution (via the runIds observed on its events). Never latch onto a
+      // neighbor's message: a stopped/failed mission with no assistant turn
+      // persists nothing rather than overwrite the previous mission's summary.
+      const m=[...state.messages].reverse().find(x=>x.kind==='assistant'&&x.complete!==false&&x.runId&&(ex?.runIds||[]).includes(String(x.runId)));
+      if(!m)return;
+      m.execution=executionSnapshotFor(ex);
+      saveChat();
+    }
     function activity(id,name,status='running',output=''){let el=$(`[data-activity="${CSS.escape(id)}"]`);if(!el){el=document.createElement('div');el.className='activity';el.dataset.activity=id;$('#activityList').prepend(el)}el.className=`activity ${status}`;el.innerHTML=`<div class="activity-top"><span class="activity-name">${esc(name||'Tool')}</span><span class="activity-state">${esc(status)}</span></div>${output?`<pre>${esc(output)}</pre>`:''}`}
     function handleDebug(text){const clean=text.replace(/^__DEBUG__\s*/,'').trim();if(!clean)return;activity('debug_'+Date.now(),'Tool output','completed',clean)}
     async function sendMessage(){const input=$('#chatInput');const text=input.value.trim()||(state.attachments.length?'Describe and use the attached image(s).':'');if(!text||!state.socket?.connected)return;if(!state.projectId&&!state.conversationId)await createConversation();const attachmentIds=state.attachments.map(x=>x.id);const attachmentNames=state.attachments.map(x=>x.name);state.attachments=[];$('#attachmentHint').textContent='';$('#imageInput').value='';input.value='';input.style.height='auto';addUser(attachmentNames.length?`${text}\n[Images: ${attachmentNames.join(', ')}]`:text);ensureThinking();state.socket.emit('message',{text,attachments:attachmentIds,projectId:state.projectId||undefined,conversationId:state.projectId?undefined:state.conversationId});$('#chatTitle').textContent=text.slice(0,48)}
@@ -485,7 +577,7 @@ function showRepoWarmth(d){const el=$('#repoWarmth');if(!el)return;el.classList.
     async function toggleVoice(){if(state.recording){state.recorder.stop();return}try{const stream=await navigator.mediaDevices.getUserMedia({audio:true});const chunks=[];const rec=new MediaRecorder(stream);state.recorder=rec;rec.ondataavailable=e=>chunks.push(e.data);rec.onstop=async()=>{state.recording=false;$('#voiceBtn').textContent='●';stream.getTracks().forEach(t=>t.stop());const fd=new FormData();fd.append('audio',new Blob(chunks,{type:rec.mimeType}),'voice.webm');fd.append('socketId',state.socketId);try{const r=await fetch('/voice',{method:'POST',body:fd});const d=await r.json();if(!r.ok)throw new Error(d.error);$('#chatInput').value=d.transcription||'';if(d.transcription)sendMessage()}catch(e){toast(e.message,true)}};rec.start();state.recording=true;$('#voiceBtn').textContent='■';toast('Recording… tap again to stop')}catch(e){toast('Microphone unavailable',true)}}
     function showView(name){$$('.view').forEach(v=>v.classList.toggle('active',v.id===`view-${name}`));$$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===name));document.body.classList.remove('menu-open');if(name==='projects')loadProjects();if(name==='agents')loadAgents();if(name==='skills')loadSkills().then(loadPortableSkills);if(name==='runtime')loadRuntime();if(name==='analytics')loadAnalytics();if(name==='settings')loadSettings()}
     $('#loginForm').onsubmit=async e=>{e.preventDefault();$('#loginError').textContent='';try{const r=await fetch('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('#loginUser').value.trim(),password:$('#loginPass').value})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Invalid credentials');state.token=d.token;state.user=d.username;localStorage.setItem('gitu:token',state.token);localStorage.setItem('gitu:user',state.user);connectSocket()}catch(e){$('#loginError').textContent=e.message}};
-    $('#messages').onclick=e=>{const retry=e.target.closest('.retry-btn');if(retry){retryMessage();return}const historyBtn=e.target.closest('.exec-history-open');if(historyBtn){openExecutionHistory();return}const execCard=e.target.closest('.exec-card');if(execCard){const toolRow=e.target.closest('.exec-tool-row');if(toolRow){toolRow.classList.toggle('open');const d=toolRow.querySelector('.exec-tool-detail');if(d)d.classList.toggle('hidden');return}const collapsed=execCard.classList.toggle('collapsed');execCard.parentElement.dataset.collapsed=collapsed?'1':'0';execCard.parentElement.dataset.manual=collapsed?'1':'0';execCard.querySelector('.exec-card-toggle').textContent=collapsed?'▸':'⌄';return}const button=e.target.closest('.tool-summary');if(!button)return;const detail=button.closest('.activity-stack')?.querySelector('.tool-detail');if(!detail)return;const open=detail.classList.toggle('hidden')===false;button.setAttribute('aria-expanded',String(open))};$('#execHistoryClose').onclick=()=>$('#execHistoryDialog').close();$('#execHistoryDialog').addEventListener('click',e=>{const toolRow=e.target.closest('.exec-tool-row');if(!toolRow)return;toolRow.classList.toggle('open');const d=toolRow.querySelector('.exec-tool-detail');if(d)d.classList.toggle('hidden')});
+    $('#messages').onclick=e=>{const retry=e.target.closest('.retry-btn');if(retry){retryMessage();return}    const historyBtn=e.target.closest('.exec-history-open');if(historyBtn){openExecutionHistory(historyBtn.closest('.exec-card-message')?.dataset.execution);return}const execCard=e.target.closest('.exec-card');if(execCard){const toolRow=e.target.closest('.exec-tool-row');if(toolRow){toolRow.classList.toggle('open');const d=toolRow.querySelector('.exec-tool-detail');if(d)d.classList.toggle('hidden');return}const collapsed=execCard.classList.toggle('collapsed');execCard.parentElement.dataset.collapsed=collapsed?'1':'0';execCard.parentElement.dataset.manual=collapsed?'1':'0';execCard.querySelector('.exec-card-toggle').textContent=collapsed?'▸':'⌄';return}const button=e.target.closest('.tool-summary');if(!button)return;const detail=button.closest('.activity-stack')?.querySelector('.tool-detail');if(!detail)return;const open=detail.classList.toggle('hidden')===false;button.setAttribute('aria-expanded',String(open))};$('#execHistoryClose').onclick=()=>$('#execHistoryDialog').close();$('#execHistoryDialog').addEventListener('click',e=>{const toolRow=e.target.closest('.exec-tool-row');if(!toolRow)return;toolRow.classList.toggle('open');const d=toolRow.querySelector('.exec-tool-detail');if(d)d.classList.toggle('hidden')});
     $('#nav').onclick=e=>{const b=e.target.closest('[data-view]');if(b)showView(b.dataset.view)};$$('.mobile-menu').forEach(b=>b.onclick=()=>document.body.classList.toggle('menu-open'));$('#menuBtn').onclick=()=>document.body.classList.toggle('menu-open');$('#newChat').onclick=()=>createConversation().catch(error=>toast(error.message,true));$('#logout').onclick=signOut;$('#composer').onsubmit=e=>{e.preventDefault();sendMessage()};$('#chatInput').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(state.missionActive){stopMission();return}sendMessage()}};$('#chatInput').oninput=e=>{e.target.style.height='auto';e.target.style.height=Math.min(e.target.scrollHeight,180)+'px'};$('#projectSelect').onchange=e=>switchProject(e.target.value);$('#modelSelect').onchange=async e=>{if(!e.target.value)return;try{await api('/api/models/use',{method:'POST',body:JSON.stringify({id:e.target.value})});toast('Model switched');loadModels()}catch(err){toast(err.message,true)}};function toggleCanvas(open){$('#chatShell').classList.toggle('canvas-closed',!open);$('#composerWrap').style.right=open?'var(--canvas)':'0'}$('#canvasToggle').onclick=()=>toggleCanvas($('#chatShell').classList.contains('canvas-closed'));$('#canvasClose').onclick=()=>toggleCanvas(false);$('#loopBtn').onclick=()=>{$('#loopDialog').showModal();loadLoop();if(!loopTimer)loopTimer=setInterval(loadLoop,3000)};$('#loopClose').onclick=()=>{$('#loopDialog').close();clearInterval(loopTimer);loopTimer=null};$('#loopRefresh').onclick=loadLoop;$('#loopDialog').addEventListener('click',e=>{const goalChip=e.target.closest('[data-goal]');if(goalChip){const el=$('#goalList').querySelector(`[data-goal="${CSS.escape(goalChip.dataset.goal)}"]`);if(el)el.scrollIntoView({block:'nearest'});return}const taskChip=e.target.closest('[data-task]');if(taskChip){const el=$('#taskList').querySelector(`[data-task="${CSS.escape(taskChip.dataset.task)}"]`);if(el)el.scrollIntoView({block:'nearest'})}});$('#repoRefreshBtn').onclick=()=>{if(!state.socket||!state.socket.connected){toast('Not connected',true);return}if(!state.projectId&&!state.conversationId){toast('Attach a project folder first',true);return}state.socket.emit('message',{type:'repo_refresh',projectId:state.projectId||'',conversationId:state.conversationId||''});toast('Refreshing repository index…')};$('#voiceBtn').onclick=toggleVoice;function stopMission(){if(!state.socket||!state.socket.connected){toast('Not connected',true);return}state.socket.emit('stop',{projectId:state.projectId||undefined,conversationId:state.projectId?undefined:state.conversationId});$('#stopBtn').classList.add('hidden');toast('Stopping…')}$('#stopBtn').onclick=stopMission;$('#execSheetStop').onclick=()=>{stopMission();document.getElementById('execSheet')?.classList.remove('open')};$('#execSheetClose').onclick=()=>{const ex=currentScopeExecution();state.sheetDismissedFor=ex?ex.id:null;document.getElementById('execSheet')?.classList.remove('open')};$('#execSheetTools').onclick=e=>{const toolRow=e.target.closest('.exec-tool-row');if(!toolRow)return;toolRow.classList.toggle('open');const d=toolRow.querySelector('.exec-tool-detail');if(d)d.classList.toggle('hidden')};$('#execSheetGrab').onclick=()=>{const sheet=document.getElementById('execSheet');if(sheet&&sheet.dataset.dragged){delete sheet.dataset.dragged;return}const ex=currentScopeExecution();state.sheetDismissedFor=ex?ex.id:null;sheet?.classList.remove('open')};wireExecSheetDrag();$('#saveSettingsTop').onclick=saveSettings;$('#addModelBtn').onclick=()=>$('#modelDialog').showModal();
 $('#fetchOpencodeModels').onclick=async()=>{const keyDoc=$('#keyOpencode').value.trim();if(!keyDoc){toast('Enter your OpenCode Zen key in API keys first.',true);return}try{const d=await api('/api/models/opencode',{method:'POST',body:JSON.stringify({apiKey:keyDoc})});const list=d.models||[];const sel=$('#opencodeModelSelect');sel.innerHTML=list.map(m=>`<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('')||'<option value="">No models returned</option>';if(list.length){const cur=$('#keyOpencodeModel').value.trim();if(cur){const found=[...sel.options].find(o=>o.value===cur);if(found)found.selected=true;else{const o=document.createElement('option');o.value=cur;o.textContent=cur+' (current)';o.selected=true;sel.appendChild(o)}}else{$('#keyOpencodeModel').value=list[0].id}toast(`Loaded ${list.length} OpenCode models`)}else{toast('No models returned',true)}}catch(e){toast(e.message,true)}};
 function updateProviderFields(){const p=$('#setProvider').value;const oc=/opencode/i.test(p);$('#modelFieldOpencode').style.display=oc?'':'none';$('#modelFieldGeneric').style.display=oc?'none':'';}

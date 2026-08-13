@@ -16,6 +16,10 @@ export interface StoredConversationMessage {
   pending?: boolean;
   failed?: boolean;
   stopped?: boolean;
+  // Phase 21 — the persisted execution snapshot (bounded shape, produced by
+  // executionSnapshotFor in the web UI). Round-trips through this store so a
+  // restored conversation can replay every tool row under its assistant turn.
+  execution?: unknown;
   at: number;
 }
 
@@ -139,6 +143,19 @@ class ConversationManager {
     }
     for (const field of ['complete', 'pending', 'failed', 'stopped'] as const) {
       if (typeof raw[field] === 'boolean') message[field] = raw[field] as boolean;
+    }
+    // Phase 21 execution snapshot: persisted as an opaque bounded object. The
+    // UI produces it with executionSnapshotFor (outputs/tools/agents bounded),
+    // so it round-trips as-is with a hard size cap as the safety net.
+    if (raw.execution && typeof raw.execution === 'object') {
+      try {
+        const serialized = JSON.stringify(raw.execution);
+        if (typeof serialized === 'string' && serialized.length <= 200_000) {
+          message.execution = JSON.parse(serialized);
+        }
+      } catch {
+        // A malformed snapshot must not reject the whole conversation update.
+      }
     }
     return message;
   }
