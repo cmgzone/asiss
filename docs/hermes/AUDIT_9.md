@@ -142,7 +142,9 @@ insufficient for the Phase 18 "symbol graphs" ambition. **Plan (Move 6):
 deepen only where the index already pays for it** — decide, on evidence,
 whether the next increment is a real parser for one language family
 (feeding callers/callees) or a usage-reference map over the existing
-extraction; do not build a second index authority to get there.
+extraction; do not build a second index authority to get there. — RESOLVED
+(Move 6, below): the evidence pass decided usage-reference-map for this
+corpus and the map (callers/callees/implementations) is implemented.
 
 ### G6 — architecture discovery is absent
 
@@ -158,10 +160,11 @@ Deliberately heuristic like the rest of the index — not a new authority.
 
 Today "relevant context" is `matchBySymbols` ranking + the token budget.
 There is no selection of the smallest dependency-closed set (symbols →
-dependencies → tests → memory) for a goal. **Plan (Move 7a, folded into
+dependencies → tests → memory) for a goal. **Plan (Move 7b, folded into
 Moves 2-3): after dependents exist, add a minimal-set selector** that walks
 goal → symbols → importing/imported modules → tests and returns the
-budgeted, dependency-closed context the Phase 18 row names.
+budgeted, dependency-closed context the Phase 18 row names. — RESOLVED
+(Move 7b, below).
 
 ### G8 — no permanent Phase 18 regression gate
 
@@ -170,7 +173,9 @@ same comment-aware, permanent guard once the capabilities exist.
 **Plan (Move 7b): `smoke:phase18`** asserting the new invariants — the
 dependents API is queried, change-impact is reachable, `'repo'` is wired in
 the child runtime, project memory has a producer, and no competing index
-authority appears.
+authority appears. — RESOLVED (Move 7a, below): `npm run smoke:phase18`
+guards all six invariants; only the minimal dependency-closed context
+selector (G7, Move 7b) remains.
 
 ## 5. Move plan (Moves 2-7)
 
@@ -190,9 +195,9 @@ authority appears.
    integrations); architecture section/skill.
 5. **Move 6 — deeper symbols (G5).** Evidence-based decision: real parser
    (one family) or usage-reference map; callers/callees/implementations.
-6. **Move 7 — permanent gate + minimal context (G7 + G8).** `smoke:phase18`
-   permanent gate; minimal dependency-closed context selector on top of
-   Moves 2-3.
+6. **Move 7 — permanent gate + minimal context (G7 + G8).** Split: 7a =
+   `smoke:phase18` permanent gate — DONE (below); 7b = minimal
+dependency-closed context selector on top of Moves 2-3 — DONE (below).
 
 ## 6. Acceptance gate (Move 1 — this audit)
 
@@ -327,3 +332,283 @@ and the e2e smoke:runtime — which constructs the runner with the new
 wiring). Next: Move 5 — architecture discovery; Move 6 — deeper symbols;
 Move 7 — permanent `smoke:phase18` gate + minimal dependency-closed
 context.
+
+## 13. Architecture discovery (Move 5, G6)
+
+`src/core/context/architecture.ts` lands the Phase 18 G6 gap — a bounded,
+convention-based pass over the **persistent index only** (no content reads,
+no new index authority):
+
+- **`classifyArchitecture(file)`** — role classification from path/name
+  tokens + the index's `isTest`/`isConfig` flags, using the `stemOf`-style
+  basename rule (`path.posix.basename` minus extension) shared with the
+  rest of the index codebase. Buckets: `entry` (root `main|server|app|start|
+  bootstrap|run|cli` basenames, `index` only at depth ≤ 2 — deep barrels
+  excluded), `worker` (`worker|queue|job|cron|scheduler|daemon|listener`),
+  `service` (`api|route|controller|handler|endpoint|service|graphql|rest|
+  view`), `database` (`db|database|schema|migration|repository|entity|
+  sql|query`), `integration` (`integration|connector|adapter|webhook|
+  provider|plugin|sdk|client`), plus `test` and `config` from the index
+  flags.
+- **`discoverArchitecture(index)`** — the profile: entry points, services,
+  workers, databases, integrations, test files, test configs (config
+  filtered through the jest/vitest/mocha/cypress/playwright/karma/pytest
+  regex), config files, languages, file count, indexed-at. Each file
+  carries its exported symbols (the API surface for entry/service buckets).
+- **`renderArchitectureProfile(profile)`** — the human-readable
+  `Architecture overview:` section (buckets, per-bucket caps, export notes)
+  that renders into agent context.
+- **`ContextEngine.architecture(root)` / `architectureSection(root)`** —
+  thin wrappers resolving through the persistent index (load → incremental
+  refresh → save, cached); `[]`-safe/empty for lightweight indexes and
+  unknown roots, matching the dependents/change-impact discipline.
+- **`src/skills/architecture.ts`** — the `architecture_survey` skill
+  registered on the runner, rendering the section into the system prompt.
+
+## 14. Acceptance gate (Move 5)
+
+Verified by `tsc --noEmit` clean + `smoke:repo-index` section 21 (entry
+points: `src/main.ts`/`src/server.ts`/`src/app.ts`/root `index.ts` in,
+deep barrel `src/auth/index.ts` out, `src/utils/format.ts` not an entry
+point; service/worker/database/integration/test/config classification;
+entry point carries its exports; rendered section headers) + the full
+regression battery green in one pass (repo-index 21 sections, context,
+turn-contract, phase16 gates, baseline, terminal-paths, and the e2e
+smoke:runtime). One real bug caught and fixed during verification: the
+initial classifier split on `.` too, so `src/main.ts` produced basename
+`ts` — now `path.posix.basename` minus extension like `stemOf`.
+
+## 15. Deeper symbol intelligence (Move 6, G5)
+
+**The evidence-based decision.** AUDIT_9 §G5 said: decide, on evidence,
+whether the next increment is a real parser for one language family or a
+usage-reference map over the existing extraction. `symbolIntelligenceEvidence`
+(`src/core/context/symbols.ts`) measures the persistent index — per-family
+file/symbol density, dominance, parser availability (TypeScript is the only
+family with an in-tree parser), cross-family symbol coverage, reference
+edges, parse cost — and decides:
+
+- no dominant family (largest < 50% of files) → usage-reference map
+- dominant family without an in-tree parser → usage-reference map
+- dominant TypeScript but other families still carry symbols →
+  usage-reference map
+- single-family TypeScript corpus → parser is viable
+
+**The evidence (this repo, at implementation time).** Running the pass over
+the Hermes repo itself: **336 files, 1,047 symbols, 3,401 usage-reference
+edges** — families: typescript (213 files, 914 symbols), other (122 files,
+132 symbols), python (1 file, 1 symbol). TypeScript dominates at 63% but
+python + other families still carry 133 symbols, so the decision is
+**usage-reference-map**: a TS-only parser would cover 63% of the corpus and
+miss the rest, while the word-boundary map covers every family from the
+existing extraction — zero new dependencies, no second index authority (the
+audit's explicit constraint), and the map stays incremental-refresh
+compatible. A future single-family TS corpus would flip the decision to
+parser-viable (the rule is data-driven, not hard-coded).
+
+**The usage-reference map (chosen increment).** `repo-index.ts` records per
+file a bounded `identifiers` list (≤ 512 distinct word-boundary
+identifiers, the reference signal) and `implementedSymbols` (`implements X`
+/ `extends Y`, ≤ 16, TS + JVM/.NET families only) during `detailOf`;
+`finalize` derives the index-level `symbolReferences` (symbol → files that
+reference it, excluding definers) and `implementations` (symbol → files
+that implement/extends it, kept only for repo-defined symbols) —
+incremental-refresh compatible: unchanged files are reused by identity,
+exactly like the importers graph. The persisted index format bumps to
+version 2, invalidating old persisted indexes through the existing load
+check (one-time rebuild, no rebuild semantics added). Queries —
+`findCallers` / `findCallees` / `findImplementations` — answer "who calls
+this symbol?", "what does this file call?", "who implements this
+interface?" with per-file isTest/isConfig flags, sorted, deduped, capped.
+Hosted on `ContextEngine` (`callersOf` / `calleesOf` / `implementationsOf`
+/ `symbolIntelligenceEvidence`), exported through `src/core/context/index.ts`.
+Same tolerant "not a compiler" discipline: references are bounded and may
+include noise (documented heuristic, like the rest of the index).
+
+**A real bug the move exposed and fixed.** The plain-object record maps
+inherit Object.prototype members, so an identifier like `constructor`
+(present in this repo's docs) passed the `exportedSymbols[name]` truthiness
+check and crashed map building. `hasOwnKey`
+(Object.prototype.hasOwnProperty.call) now guards every record-map
+membership check in `finalize`, the reference builders, `resolveSymbols`,
+and the symbols.ts queries — prototype member names never resolve as
+symbols.
+
+## 16. Acceptance gate (Move 6)
+
+Verified by `tsc --noEmit` clean + `smoke:repo-index` section 22 (mixed
+corpus decides usage-reference-map with TS dominant + cross-family symbols;
+pure single-family TS corpus decides parser-viable; identifiers collected;
+callers excluding the defining file with isTest flags; callees carrying
+defining files; own definitions excluded; implements/extends recorded and
+unimplemented symbols empty; unknown symbols/files → []; persistence
+round-trip of symbolReferences/implementations/identifiers; incremental
+refresh dropping a stale caller while keeping fresh ones; engine host
+callersOf/calleesOf/implementationsOf/evidence + limit + lightweight opt-out
+→ []/undefined; prototype-safety: `constructor` never resolves) + the
+regression battery green in one pass (repo-index 22 sections, context,
+turn-contract, phase16 gates, baseline, terminal-paths, agent-engine,
+agent-task-profile, scheduler, delegation, agent-execution, memory-unified,
+and the e2e smoke:runtime). One pre-existing flake noted: smoke:delegation's
+parallel-child completion assertion is timing-sensitive and intermittently
+fails under load on any tree (HEAD and working tree both green on re-run).
+## 17. Permanent Phase 18 gate (Move 7a, G8)
+
+`scripts/smoke-phase18.ts` (registered as `npm run smoke:phase18`) is the
+permanent, comment-aware regression gate — same discipline as `smoke:phase16`:
+comments are stripped so explanatory prose can neither trip nor soothe a
+sweep. Seven gates, one per closed gap:
+
+- **Gate A (G1) — dependents queried:** `findDependents` is defined in
+  repo-index.ts and READS `index.importers` (never write-only dead data),
+  and ContextEngine.dependents delegates to it.
+- **Gate B (G2) — change-impact reachable:** `analyzeChangeImpact` is
+defined in change-impact.ts and ContextEngine.changeImpact delegates.
+- **Gate C (G3) — 'repo' wired in the child runtime:** the engine keeps the
+  `contextEngine` slot + `buildChildRepoSection`, `runChildMission` handles
+  `sources.has('repo')`, and the runner wires `contextEngine:` into
+  `agentEngine.configure`.
+- **Gate D (G4) — project memory has a producer:** `ProjectMemoryStore` +
+  `ProjectMemoryBridge` + `captureIndexFacts` exist AND the runner
+  constructs the bridge and calls `captureIndexFacts` on warm — a declared
+  type with no producer trips this gate.
+- **Gate E (G5/Move 6) — symbol intelligence reachable:** the four
+  symbols.ts exports (`findCallers` / `findCallees` / `findImplementations` /
+  `symbolIntelligenceEvidence`) are defined and each is hosted on
+  ContextEngine, and the persisted `symbolReferences` / `implementations`
+  maps stay derived in `finalize`.
+- **Gate F — no competing index authority:** in src/, the persistent index
+  lifecycle (`getRepositoryIndex` / `buildPersistentIndex` /
+  `refreshRepositoryIndex` / `loadRepositoryIndex` / `saveRepositoryIndex`)
+  appears only in repo-index.ts + context-engine.ts; `indexWorkspace` (the
+  lightweight fallback) only in its module + the host + repo-index's base
+  passes; and the extraction/derivation authorities (`extractSymbols` /
+  `extractImports` / `collectIdentifiers` / `extractImplemented` /
+  `buildSymbolReferences` / `buildImplementations`) are defined exactly
+  once, in repo-index.ts.
+- **Gate G (G7/Move 7b) — minimal context reachable:** `selectMinimalContext`
+  + `renderMinimalContext` + `emptyMinimalContext` exist in
+  minimal-context.ts and ContextEngine.minimalContext delegates (with the
+  empty fallback), so the selector can never silently disappear from the
+  host surface.
+
+Verified bidirectionally: a comment naming `getRepositoryIndex` in a src
+file does NOT trip the gate (comment-aware), while an actual code reference
+in any non-host src module FAILS it with the offending file named.
+
+## 18. Acceptance gate (Move 7a)
+
+Verified by `tsc --noEmit` clean + `npm run smoke:phase18` (all seven gates;
+168 src files scanned; negative + comment-awareness probes both behave) +
+`smoke:phase16` still green (the new gate is additive) + the regression
+battery green in one pass (repo-index 22 sections, context, turn-contract,
+phase16, baseline, terminal-paths, agent-engine, agent-task-profile,
+scheduler, delegation, agent-execution, memory-unified, and the e2e
+smoke:runtime). Next was Move 7b — the minimal dependency-closed context
+selector (G7), landed below.
+
+## 19. Minimal dependency-closed context (Move 7b, G7)
+
+`src/core/context/minimal-context.ts` lands the audit's G7 gap — the
+smallest useful, budgeted context the Phase 18 row names, built on the Move
+2-3 machinery with zero new index authority:
+
+- **`selectMinimalContext(index, goal, options)`** — walks the audit's
+  chain goal → symbols → importing/imported modules → tests:
+  - **Seeds (goal → symbols)** — `matchBySymbols` ranking (capped,
+    `seedLimit`, default 6). Seeds always survive the budget — they are the
+    point.
+  - **Dependency closure, both directions** — BFS over the per-file
+    `imports` (outgoing, resolved via the shared `resolveImportTarget`
+    against each file's directory) and `findDependents` (incoming), level
+    by level, with **smallest-first admission** so large unrelated files
+    never displace the dependency spine. Bare specifiers (packages/aliases)
+    are collected as `externalModules` — legitimate leaves, not missing
+    closure.
+  - **Closure status** — `closed` is true only when every in-repo module
+    referenced by an included file (both directions) is itself included;
+    `truncated` reports a budget/file-cap cut, so callers know whether the
+    returned context is complete.
+  - **Related tests** — the goal-surfaced + sibling tests via the
+    signal-gated `matchedTestFiles` rule (`includeTests`, default true).
+  - **Budget** — byte cap (`maxBytes`, default 96 KB) + file cap
+    (`maxFiles`, default 40); `totalTokens` at the codebase's ~4 chars/token
+    estimate; direction opt-outs `includeDependents` / `includeImports`.
+- **`renderMinimalContext(ctx)`** — the human-readable
+  `Minimal dependency-closed context` section (seeds / imported modules /
+  importing modules / tests / totals / external modules) ready for the
+  mission prompt.
+- **`ContextEngine.minimalContext(root, goal, options)`** — the host
+  wrapper (empty fallback for lightweight indexes), exported through
+  `src/core/context/index.ts`.
+
+**Wired into the mission prompt.** `ContextEngine.repositorySection` — the
+block the main loop (runner) and child agents (`buildChildRepoSection`)
+render — now renders the **minimal dependency-closed context** instead of
+the per-goal file hint whenever a persistent index exists, so an agent
+sees not just the matched files but the smallest closure around them
+(seeds → imported/importing modules → tests) with the closure status.
+Lightweight indexes and no-match goals fall back to the previous hint path;
+`goalHints.enabled === false` still restores the plain path list;
+`goalHints.maxFiles` now seeds the minimal context (`seedLimit`) for
+persistent indexes. The new **`repository.minimal` config** makes the
+section tunable: `minimal.enabled` (default true — set false to fall back
+to the goal-file hint), `minimal.maxBytes` (byte cap, default 96 KB), and
+`minimal.maxFiles` (file cap, default 40); both caps are strict in the
+config schema (`src/core/config.ts`) and thread through `repositorySection`
+into `selectMinimalContext`. Depth-bonus-only matcher noise is excluded by
+the same `hasGoalSignalForFile` gate the hint renderer uses (a seed must
+carry a real path/symbol/import stem hit). The `smoke:phase18` Gate G
+additionally asserts `minimalContextSection` is defined AND called from
+`repositorySection` with the `minimal` config threaded in, so the wiring
+and its knobs cannot silently regress.
+
+**Runtime skill.** `src/skills/minimal-context.ts` registers the
+`minimal_context` skill (runner-wired, mirroring `/symbol` and `/warmth`):
+force-warms the index, then answers the closure for **any goal** (e.g.
+"fix the authentication flow") or **any single file** (a root-relative
+path via the selector's new `seedFiles` option — the closure around ONE
+change, unknown paths safely ignored) and returns the structured context
+plus the rendered section. A lightweight index yields an advisory note, not
+a crash. The four index-backed context skills (`symbol`, `warmth`,
+`architecture`, `minimal_context`) are cross-linked in
+`src/skills/README.md` with a "which question → which skill" table, so an
+agent can pick the right query without reading source.
+
+## 20. Acceptance gate (Move 7b)
+
+Verified by `tsc --noEmit` clean + `smoke:repo-index` sections 23-24 (23:
+seeds with the unrelated file excluded; imported/importing/transitive
+modules joining with roles dependency/dependent; dependency-closed status;
+bare package reported as an external leaf; deterministic across calls;
+seed-capped role block proving jwt/app/server enter via the closure, not
+the seeds; the tests pass surfacing a nothing-imports test only via
+matchedTestFiles, removed by includeTests:false; includeDependents /
+includeImports opt-outs; budget truncation keeping only the top seed with
+closed=false; rendered section; lightweight-index empty fallback. 24: the
+repository section renders the minimal context for persistent indexes
+(seeds + imported/importing modules + tests, unrelated file absent,
+closure status), goalFilesSection stays the unchanged fallback API,
+goalHints opt-out restores the plain list, non-matching goals render no
+block, lightweight indexes never render it. 25: the `repository.minimal`
+config threads through — `maxFiles` caps the rendered set with truncation
+reported, `maxBytes` keeps only the top seed, `enabled:false` restores the
+goal-file hint, `goalHints.maxFiles` still seeds) + `smoke:config`
+(minimal.enabled/maxBytes/maxFiles survive the strict schema round-trip) +
+`smoke:agent-execution` section 15 (the child agent with the `'repo'`
+source sees the minimal context section in its system prompt — end-to-end
+through the runner wiring; the control agent gets none). 26: the
+`minimal_context` skill — goal-driven and file-driven closures via
+`seedFiles` (imported/importing modules + related test, unrelated file
+excluded, closed status), unknown seed files → empty, missing args → loud
+error, lightweight index → advisory note) + the permanent `smoke:phase18`
+Gate G (selector defined + hosted + empty fallback + repositorySection
+wiring + minimal config threading + skill defined and runner-registered +
+seedFiles option) + the full regression battery green in one pass
+(repo-index 26 sections, phase16 + phase18 gates, context, turn-contract,
+baseline, terminal-paths, agent-engine, agent-task-profile, scheduler,
+delegation, agent-execution, memory-unified, config, tools, policy, and the
+e2e smoke:runtime — which constructs the runner with the new skill
+registration).
+**Phase 18 is complete** — every gap in the §3 evidence matrix is closed
+and permanently guarded.

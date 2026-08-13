@@ -47,6 +47,8 @@ import { MemorySkill } from '../skills/memory';
 import { CodeSearchSkill } from '../skills/code-search';
 import { SymbolSkill } from '../skills/symbol';
 import { WarmthSkill } from '../skills/warmth';
+import { ArchitectureSkill } from '../skills/architecture';
+import { MinimalContextSkill } from '../skills/minimal-context';
 import { GitSkill } from '../skills/git';
 import { CodeReviewSkill } from '../skills/code-review';
 import { PlanModeSkill } from '../skills/plan-mode';
@@ -84,10 +86,10 @@ import { proactiveEngine } from '../core/proactive-engine';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { installTaskEventProjections, taskEngine, taskEventBus, taskMemory } from '../core/task';
-import type { TaskCompletionContext, TaskCompletionEvidence, TaskDiagnoser, TaskMissionIteration, TaskToolKind, TaskTurnVerdict, TaskVerifier } from '../core/task';
+import type { Task, TaskCompletionContext, TaskCompletionEvidence, TaskDiagnoser, TaskMissionIteration, TaskToolKind, TaskTurnVerdict, TaskVerifier } from '../core/task';
 import { loadHermesConfig } from '../core/config';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
-import { ContextEngine, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
+import { buildGoalPlan, ContextEngine, evaluateAcceptanceCriteria, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
 import { ToolEngine, normalizeToolRequest } from '../core/tools';
 import fs from 'fs';
 import path from 'path';
@@ -119,6 +121,18 @@ interface IGateway {
   supportsStructuredStreaming?(sessionId: string): boolean;
 }
 
+/**
+ * Thrown inside a mission turn when the user asked to stop the run. It is
+ * caught around runMission() and surfaced as a graceful 'stopped' message
+ * instead of a failure.
+ */
+export class MissionStoppedError extends Error {
+  constructor() {
+    super('Mission stopped by user.');
+    this.name = 'MissionStoppedError';
+  }
+}
+
 export class AgentRunner {
   private gateway: IGateway;
   private baseSystemPrompt: string;
@@ -147,6 +161,14 @@ export class AgentRunner {
   // Keys already warned about (tool-capping) so truncation warnings are logged
   // once per process run instead of on every message.
   private advertisedWarnings = new Set<string>();
+  // Sessions whose in-flight mission the user asked to stop. Consumed at the
+  // next turn boundary (see the iterate hook) and cleared at mission start so
+  // a stale stop request can never abort a future mission.
+  private readonly stoppedSessions = new Set<string>();
+  // Per-session abort controllers for long-running tool calls (shell). A user
+  // stop aborts the controller so the running command is killed immediately
+  // instead of waiting for the turn boundary.
+  private readonly sessionSignals = new Map<string, AbortController>();
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private heartbeatMs: number = 60000; // Default 1 minute
   private proactiveEnabled: boolean = false;
@@ -341,6 +363,8 @@ export class AgentRunner {
     SkillRegistry.register(new CodeSearchSkill());
     SkillRegistry.register(new SymbolSkill({ contextEngine: this.contextEngine }));
     SkillRegistry.register(new WarmthSkill({ contextEngine: this.contextEngine }));
+    SkillRegistry.register(new ArchitectureSkill({ contextEngine: this.contextEngine }));
+    SkillRegistry.register(new MinimalContextSkill({ contextEngine: this.contextEngine }));
     SkillRegistry.register(new GitSkill());
     SkillRegistry.register(new CodeReviewSkill());
     SkillRegistry.register(new PlanModeSkill());
@@ -537,6 +561,19 @@ export class AgentRunner {
       }
       progressCallback(20, `Selected worker ${selected.agent.name} for the background goal`);
 
+      // Phase 20 Move 8 — the goal's position in the project/milestone/task
+      // plan tree becomes the canonical Task's plan, the same artifact the
+      // mission loop renders (buildGoalPlan on the goal side). The goal's
+      // own work item starts IN_PROGRESS and the remaining tree steps PENDING,
+      // so the engine's live step machine (Move 7) advances as the child
+      // mission walks the tree.
+      const planSteps = backgroundWorker.planStepsForGoal(goal.id).map((step, idx) => ({
+        id: step.id,
+        title: step.title,
+        description: step.description,
+        status: idx === 0 ? 'IN_PROGRESS' as const : 'PENDING' as const
+      }));
+
       const exec = await agentEngine.executeTask({
         agentId: selected.agent.id,
         task,
@@ -544,6 +581,7 @@ export class AgentRunner {
         sessionId: goal.sessionId,
         maxTurns: 10,
         retries: 0,
+        planSteps,
         metadata: {
           backgroundGoalId: goal.id,
           backgroundGoalTitle: goal.title,
@@ -787,14 +825,24 @@ export class AgentRunner {
   }
 
   /**
-   * Phase 17 Move 2 — the completion verification gate's verifier: the
-   * goal-matched tests must PASS before the mission completes. Fail-open when
-   * there is nothing to gate on (no workspace / no goal-matched tests / the
-   * verifier itself cannot run) — the engine decides pass -> COMPLETED,
-   * fail -> repair-until-budget -> FAILED.
+   * Phase 17 Move 2 + Phase 19 Move 7 — the completion verification gate's
+   * verifier: the goal-matched tests must PASS before the mission completes,
+   * and the goal's acceptance criteria are evaluated deterministically
+   * (criteria that look like assertions — test commands / file-contains —
+   * must pass; uncheckable criteria are recorded as SKIPPED evidence, never
+   * silently passed). Each criterion is recorded as a 'criteria'
+   * TaskVerification. Fail-open when there is nothing to gate on (no
+   * workspace / no tests and no criteria / the verifier itself cannot run) —
+   * the engine decides pass -> COMPLETED, fail -> repair-until-budget ->
+   * FAILED.
    */
-  private buildMissionVerifier(goal: string, workspacePathValue: unknown, workspaceFallback?: string): TaskVerifier {
-    return async (task) => {
+  private buildMissionVerifier(
+    goal: string,
+    workspacePathValue: unknown,
+    workspaceFallback?: string,
+    criteria: string[] = []
+  ): TaskVerifier {
+    return async (task, engine) => {
       const taskWorkspace = this.getValidWorkspacePath(task.context?.workspacePath) || workspaceFallback || '';
       const taskGoal = task.goal || goal;
       const workspace = taskWorkspace || this.getValidWorkspacePath(workspacePathValue) || '';
@@ -802,18 +850,48 @@ export class AgentRunner {
       try {
         const evidence = await this.goalTestEvidence(workspace, taskGoal);
         const tests = evidence.tests || [];
-        if (tests.length === 0) {
-          return { passed: true, detail: `No goal-matched tests for '${taskGoal.slice(0, 80)}' — completion trusted.` };
+        const detailParts: string[] = [];
+        let allPassed = true;
+        if (tests.length > 0) {
+          const failed = tests.filter(t => !t.passed);
+          allPassed = failed.length === 0;
+          detailParts.push(evidence.evidence || tests.map(t => `\`${t.command}\` exit ${t.exitCode}`).join('; '));
         }
-        const failed = tests.filter(t => !t.passed);
+        // Phase 19 Move 7 — deterministic acceptance-criteria evaluation.
+        const criterionResults = await evaluateAcceptanceCriteria(criteria || [], workspace);
+        for (const cr of criterionResults) {
+          const status = cr.passed === null ? 'SKIPPED' : cr.passed ? 'PASSED' : 'FAILED';
+          await engine.recordVerification(task.id, 'criteria', status, `[${cr.kind}] ${cr.detail}`);
+          if (cr.passed === false) allPassed = false;
+          detailParts.push(`[criteria ${status}] ${cr.detail}`);
+        }
+        if (tests.length === 0 && criterionResults.length === 0) {
+          return { passed: true, detail: `No goal-matched tests or checkable criteria for '${taskGoal.slice(0, 80)}' — completion trusted.` };
+        }
         return {
-          passed: failed.length === 0,
-          detail: evidence.evidence || tests.map(t => `\`${t.command}\` exit ${t.exitCode}`).join('; ')
+          passed: allPassed,
+          detail: detailParts.join('\n')
         };
       } catch (error: any) {
         return { passed: true, detail: `Verifier failed to run: ${error?.message || String(error)} — completion trusted.` };
       }
     };
+  }
+
+  /**
+   * Phase 20 Move 2/3 (G3) — render the canonical Task's verification +
+   * criteria evidence into one summary line for the goal record, e.g.
+   * "custom passed 1; criteria passed 2; criteria skipped 1". The goal's
+   * Complete stage records this so a completed goal shows WHY.
+   */
+  private taskVerificationSummary(task?: Task | null): string | undefined {
+    if (!task?.verification || task.verification.length === 0) return undefined;
+    const counts = new Map<string, number>();
+    for (const v of task.verification) {
+      const key = `${v.kind} ${v.status.toLowerCase()}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return [...counts.entries()].map(([k, n]) => `${k} ${n}`).join('; ');
   }
 
   /**
@@ -2004,10 +2082,27 @@ export class AgentRunner {
           input: String(input.content)
         },
         constraints: { maxTurns, maxToolCalls, workspacePath: input.workspacePath },
-        metadata: { source: 'agent-runner', background: input.background }
+        // Phase 20 Move 2 (G2): stamp the session's current goal id on the
+        // mission Task so goal -> task is traceable from the canonical Task.
+        metadata: {
+          source: 'agent-runner',
+          background: input.background,
+          ...(mainGoalManager.getCurrent(input.sessionId)?.id
+            ? { goalId: mainGoalManager.getCurrent(input.sessionId)?.id }
+            : {})
+        }
       });
       await taskEngine.analyze(task.id);
-      await taskEngine.plan(task.id);
+      // Phase 20 Move 3 (G1): the plan is a real artifact — derive steps
+      // from the goal's own criteria/constraints (no model call, no second
+      // authority) and record them on the canonical Task; the bare plan()
+      // path is preserved when nothing is planable.
+      const planSteps = buildGoalPlan({
+        goal: String(input.content).slice(0, 2_000),
+        acceptanceCriteria: mainGoalManager.getCurrent(input.sessionId)?.acceptanceCriteria || [],
+        constraints: mainGoalManager.getCurrent(input.sessionId)?.constraints || []
+      });
+      await taskEngine.plan(task.id, planSteps);
       await taskEngine.start(task.id);
       return task.id;
     } catch (error: any) {
@@ -2161,6 +2256,11 @@ export class AgentRunner {
       background: isBackgroundMessage,
       defaultAgent
     });
+    // Phase 20 Move 2 (G2): link the goal record to its mission Task so the
+    // chain is queryable from the goal end too.
+    if (missionTaskId) {
+      mainGoalManager.linkTask(sessionId, missionTaskId);
+    }
     // Phase 12 Move 4c: never fall back to a runner-owned mission loop. If a
     // canonical Task cannot be created, surface the infrastructure failure
     // instead of executing an untracked mission independently.
@@ -2300,16 +2400,41 @@ export class AgentRunner {
       sanitize?: boolean;
       recordLearning?: boolean;
     } | undefined;
+    // User Stop: a stop request that raced in before this mission started must
+    // not leak into it, so the flag is cleared here (the iterate check above
+    // re-arms it for the live mission if a stop arrives while it runs).
+    this.stoppedSessions.delete(sessionId);
+    // Abort controller for long-running tools in this mission. A stale
+    // controller from a previous mission is replaced here.
+    const missionSignal = new AbortController();
+    this.sessionSignals.set(sessionId, missionSignal);
+    void this.gateway.sendStreamEvent(sessionId, {
+      type: 'mission_start',
+      runId: missionMarker,
+      messageId: missionMarker
+    });
     try {
       const missionResult = await taskEngine.runMission(missionTaskId, {
         budget: { maxTurns: missionTurnBudget, maxForcedContinuations },
         completionVerdict: this.completionVerdictHook,
         diagnoser: this.buildMissionDiagnoser(msg.content, msg.metadata?.projectWorkspacePath),
-        // Phase 17 Move 2 — the terminal verification gate: a completion point
-        // that answers 'verify' runs the goal-matched tests; pass -> complete,
-        // fail -> repair until the turn budget exhausts -> FAILED.
-        verifier: this.buildMissionVerifier(msg.content, msg.metadata?.projectWorkspacePath),
+        // Phase 17 Move 2 + Phase 19 Move 7 — the terminal verification gate:
+        // a completion point that answers 'verify' runs the goal-matched tests
+        // and evaluates the goal's acceptance criteria; pass -> complete, fail
+        // -> repair until the turn budget exhausts -> FAILED.
+        verifier: this.buildMissionVerifier(
+          msg.content,
+          msg.metadata?.projectWorkspacePath,
+          undefined,
+          mainGoalManager.getCurrent(sessionId)?.acceptanceCriteria || []
+        ),
         iterate: async ({ turn }): Promise<TaskMissionIteration> => {
+        // User Stop: checked at the turn boundary (the safe checkpoint — never
+        // mid-tool-execution) so an in-flight mission halts on the next turn.
+        if (this.stoppedSessions.has(sessionId)) {
+          this.stoppedSessions.delete(sessionId);
+          throw new MissionStoppedError();
+        }
         const i = turn - 1;
         iterationPresentation = undefined;
         // Smart Context Construction
@@ -2441,6 +2566,23 @@ export class AgentRunner {
         });
         let systemPrompt = missionPrompt.systemPrompt;
         const prompt = missionPrompt.prompt;
+
+        // Phase 20 Move 3 (G1): render the mission's recorded plan as an
+        // advisory section (agent.context.plan.enabled, default on; present
+        // only when the canonical Task actually has steps). The plan is
+        // goal-owned data — criteria/constraints turned into steps — so the
+        // model follows the same guide the Verify stage later checks.
+        const planCfg = contextCfg.plan;
+        if (planCfg?.enabled !== false) {
+          const planSteps = missionTaskId ? taskEngine.get(missionTaskId)?.plan : undefined;
+          if (Array.isArray(planSteps) && planSteps.length > 0) {
+            // Phase 20 Move 7: per-step status (PENDING / IN_PROGRESS /
+            // COMPLETED) is engine-owned and rendered so the model sees where
+            // the mission is in its own plan.
+            systemPrompt += '\n\nMission plan (derived from the goal and its acceptance criteria; complete these steps before answering):\n'
+              + planSteps.map((step, idx) => `${idx + 1}. [${step.status || 'PENDING'}] ${step.title}${step.description ? ' — ' + step.description : ''}`).join('\n');
+          }
+        }
 
         // Apply thinking level enhancement
         const thinkingPrompt = thinkingManager.getThinkingPrompt(sessionId);
@@ -2853,6 +2995,9 @@ export class AgentRunner {
           // the task-hooks bridge. Nothing is emitted here.
           const executeToolCall = async (call: any) => {
             try {
+              if (this.sessionSignals.get(sessionId)?.signal.aborted) {
+                return { success: false, call, error: 'Stopped by user.' };
+              }
               const projectWorkspacePath = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
               const projectId = typeof msg.metadata?.projectId === 'string'
                 ? msg.metadata.projectId.trim()
@@ -2869,6 +3014,7 @@ export class AgentRunner {
                   projectId: projectId || undefined,
                   workspacePath: projectWorkspacePath,
                   config: this.loadConfig(),
+                  signal: this.sessionSignals.get(sessionId)?.signal,
                   stream: (chunk: string) => {
                     if (chunk) void this.gateway.sendStreamChunk(sessionId, chunk);
                   }
@@ -3392,9 +3538,51 @@ export class AgentRunner {
             if (presentation?.recordLearning && !isBackgroundMessage) {
               void this.learning.recordInteraction(sessionId, msg.content, cleanContent);
             }
+            // Phase 20 Move 2/3 (G3): the loop's Complete stage records the
+            // canonical Task evidence on the goal — task id, outcome,
+            // verification/criteria counts, attempts/turns — so a completed
+            // goal shows WHY and a failed mission leaves a traceable failure
+            // without silently killing the goal. Auto-origin goals are
+            // completed with that evidence; manual goals keep their evidence
+            // recorded while the user decides completion.
             const currentGoal = mainGoalManager.getCurrent(sessionId);
-            if (completed && currentGoal?.origin === 'auto') {
-              mainGoalManager.completeGoal(sessionId, 'Completed by the autonomous execution loop.');
+            if (currentGoal && missionTaskId) {
+              const terminalTask = turnResult?.task || taskEngine.get(missionTaskId);
+              const evidence = {
+                taskId: missionTaskId,
+                outcome: completed ? 'SUCCESS' : turnResult.action === 'blocked' ? 'PARTIAL' : 'FAILURE',
+                summary: cleanContent.slice(0, 600),
+                attempts: terminalTask?.timing?.attempts,
+                turns: terminalTask?.timing?.turns,
+                verification: this.taskVerificationSummary(terminalTask),
+                toolCalls: terminalTask?.toolExecutions?.length,
+                completedAt: Date.now()
+              };
+              mainGoalManager.recordTaskOutcome(sessionId, evidence);
+              if (completed && currentGoal.origin === 'auto') {
+                mainGoalManager.completeGoal(sessionId, 'Completed by the autonomous execution loop.', evidence);
+                // Phase 20 Move 6: the LAST linked task of the auto-completed
+                // goal finished — queue a goal-level retrospective spanning
+                // the goal's task set (all linked outcomes), linked to the
+                // goal id. `currentGoal` is the same object the manager
+                // mutated (recordTaskOutcome + completeGoal), so it now
+                // carries the full taskOutcomes evidence. Same approval
+                // pipeline + config gate as task reviews.
+                void this.learning.queueGoalReview({
+                  goalId: currentGoal.id,
+                  sessionId,
+                  title: currentGoal.title,
+                  objective: currentGoal.objective,
+                  status: currentGoal.status,
+                  taskOutcomes: (currentGoal.taskOutcomes || []).map((o) => ({
+                    taskId: o.taskId,
+                    outcome: o.outcome,
+                    summary: o.summary,
+                    verification: o.verification,
+                    turns: o.turns
+                  }))
+                });
+              }
             }
             return;
           }
@@ -3419,6 +3607,56 @@ export class AgentRunner {
         });
       }
     } catch (error: any) {
+      // User Stop: deliver a graceful 'stopped' outcome — the partial work is
+      // preserved on the client, the canonical task and goal are marked
+      // CANCELLED, and no failure is surfaced.
+      if (error instanceof MissionStoppedError) {
+        this.stoppedSessions.delete(sessionId);
+        const stoppedText = '⏹ Stopped.';
+        try {
+          // Record the distinct user-stop state: the canonical Task transitions
+          // to CANCELLED (outcome CANCELLED + stoppedByUser marker) and the
+          // goal gets a matching CANCELLED task outcome — so the loop trace,
+          // goal cards and task cards all render "Stopped" consistently.
+          const currentTask = taskEngine.get(missionTaskId);
+          if (currentTask && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(currentTask.status)) {
+            await taskEngine.cancel(missionTaskId, 'Stopped by user.');
+          }
+          const afterStop = taskEngine.get(missionTaskId);
+          if (afterStop) {
+            taskEngine.store.update(missionTaskId, {
+              metadata: { ...(afterStop.metadata || {}), stoppedByUser: true }
+            });
+            mainGoalManager.recordTaskOutcome(sessionId, {
+              taskId: missionTaskId,
+              outcome: 'CANCELLED',
+              summary: 'Stopped by user.',
+              turns: afterStop.timing?.turns,
+              toolCalls: (afterStop.toolExecutions || []).length,
+              completedAt: Date.now()
+            });
+          }
+        } catch (taskError: any) {
+          console.warn('[TaskEngine] could not record user-stop state:', taskError?.message || taskError);
+        }
+        this.memory.add(sessionId, {
+          role: 'assistant',
+          content: stoppedText,
+          timestamp: Date.now(),
+          metadata: { final: true, completed: false, stoppedByUser: true }
+        });
+        if (this.gateway.supportsStructuredStreaming?.(sessionId)) {
+          await this.gateway.sendStreamEvent(sessionId, {
+            type: 'assistant_stopped',
+            runId: uuidv4(),
+            messageId: uuidv4(),
+            finalText: stoppedText
+          });
+        } else {
+          await this.gateway.sendResponse(sessionId, stoppedText);
+        }
+        return;
+      }
       const errorText = `The mission stopped because the execution driver failed: ${error?.message || String(error)}`;
       try {
         const currentTask = taskEngine.get(missionTaskId);
@@ -3436,7 +3674,26 @@ export class AgentRunner {
         metadata: { final: true, completed: false, missionDriverFailed: true }
       });
       await this.deliverFinalResponse(sessionId, errorText, uuidv4(), uuidv4(), false);
+    } finally {
+      this.sessionSignals.delete(sessionId);
+      void this.gateway.sendStreamEvent(sessionId, {
+        type: 'mission_end',
+        runId: missionMarker,
+        messageId: missionMarker
+      });
     }
+  }
+
+  /**
+   * Ask the runner to stop the in-flight mission for a session. Long-running
+   * tool calls (shell commands) are interrupted immediately via the abort
+   * signal; the mission itself stops at the next turn boundary. Safe to call
+   * when nothing is running.
+   */
+  stopSession(sessionId: string) {
+    this.stoppedSessions.add(sessionId);
+    const controller = this.sessionSignals.get(sessionId);
+    if (controller) controller.abort();
   }
 
   private async proactiveTick() {

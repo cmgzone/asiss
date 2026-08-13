@@ -14,6 +14,9 @@
  *   6. Disk round-trip (save/load/corrupt) under a hermetic data root
  *   7. Incremental refresh: only changed files re-parsed (identity check)
  *   8. ContextEngine integration: persistent default, light fallback opt-out
+ *   ... (Phase 18 moves: 19 dependents, 20 change-impact, 21 architecture,
+ *   22 deeper symbols — evidence-based usage-reference map, 23 minimal
+ *   dependency-closed context)
  *
  * Run with: npx ts-node scripts/smoke-repo-index.ts
  */
@@ -26,17 +29,24 @@ import { ContextEngine, detectTestCommand, matchedTestFiles, resolveSymbols, run
 import { TaskEngine, TaskEventBus, TaskMemory, TaskStore, installTaskEventProjections } from '../src/core/task';
 import { SymbolSkill } from '../src/skills/symbol';
 import { WarmthSkill } from '../src/skills/warmth';
+import { ArchitectureSkill } from '../src/skills/architecture';
+import { MinimalContextSkill } from '../src/skills/minimal-context';
 import {
   buildPersistentIndex,
   extractImports,
   extractSymbols,
+  findCallers,
+  findCallees,
   getRepositoryIndex,
   isConfigFile,
   isTestFile,
   loadRepositoryIndex,
   matchBySymbols,
   refreshRepositoryIndex,
-  saveRepositoryIndex
+  renderMinimalContext,
+  renderSymbolIntelligenceEvidence,
+  saveRepositoryIndex,
+  symbolIntelligenceEvidence
 } from '../src/core/context';
 
 function tmpRepo(prefix: string): string {
@@ -145,7 +155,7 @@ const helper = require('./util');
     write(root, 'package.json', '{"name": "demo", "scripts": {"test": "jest"}}\n');
     write(root, 'README.md', '# demo\n');
     const index = buildPersistentIndex(root);
-    assert.strictEqual(index.version, 1, 'version stamped');
+    assert.strictEqual(index.version, 2, 'version stamped (Phase 18 Move 6 format)');
     assert.strictEqual(index.fileCount, 5, 'all 5 files indexed');
     const auth = index.files.find((f) => f.path === 'src/auth/auth.ts')!;
     assert.ok(auth.symbols.some((s) => s.name === 'authenticate'), 'auth symbol extracted');
@@ -278,7 +288,7 @@ const helper = require('./util');
     const engine = new ContextEngine({ config: { repository: { dataRoot } } });
     const index = engine.indexRepository(root) as any;
     assert.strictEqual(index.version
-    , 1, 'engine uses persistent index by default');
+    , 2, 'engine uses persistent index by default (Phase 18 Move 6 format)');
     const relevant = engine.relevantFiles(root, 'verify authentication', 4).map((f: any) => f.path);
     assert.ok(relevant.includes('src/auth/auth.test.ts'), 'engine matching is symbol-aware');
     assert.ok(fs.existsSync(path.join(dataRoot, 'repo-index')), 'index written under configured data root');
@@ -304,16 +314,16 @@ const helper = require('./util');
     write(root, 'src/auth/auth.test.ts', 'test("authenticates", () => {});\n');
     const engine = new ContextEngine({ config: { repository: { dataRoot } } });
 
-    // Default: repository section renders the static block + the per-goal
-    // symbol-aware hint with reasons; the plain list is replaced.
+    // Default: for a persistent index the repository section renders the
+    // static block + the Phase 18 Move 7b minimal dependency-closed context
+    // (the per-goal hint is replaced); the plain list is never shown.
     const section = engine.repositorySection(root, 'fix the authentication bug');
-    assert.ok(section.includes('Files relevant to the current goal:'), 'hint header present by default');
-    assert.ok(section.includes('- src/auth/auth.ts (exports authenticate, refreshToken)'), 'hint carries symbol reasons');
-    const testSection = engine.repositorySection(root, 'verify login works with tests');
-    assert.ok(testSection.includes('- src/auth/auth.test.ts (tests)'), 'hint carries test classification on test goals');
-    assert.ok(!section.includes('Files most relevant to the current goal:'), 'plain list replaced by hint');
+    assert.ok(section.includes('Minimal dependency-closed context'), 'minimal context header present by default (persistent index)');
+    assert.ok(section.includes('src/auth/auth.ts'), 'minimal context lists the seed');
+    assert.ok(!section.includes('Files relevant to the current goal:'), 'per-goal hint replaced by the minimal context');
+    assert.ok(!section.includes('Files most relevant to the current goal:'), 'plain list replaced by the minimal context');
 
-    // Test goal: the test file surfaces via goalFilesSection with reasons.
+    // goalFilesSection stays the unchanged lightweight fallback API.
     const hint = engine.goalFilesSection(root, 'verify login works with tests');
     assert.ok(hint.includes('src/auth/auth.test.ts'), 'test goal surfaces test file in hint');
     assert.ok(hint.indexOf('src/auth/auth.test.ts') < hint.indexOf('src/auth/auth.ts'), 'test file ranks above source for test goal');
@@ -322,11 +332,11 @@ const helper = require('./util');
     const plain = new ContextEngine({ config: { repository: { dataRoot, goalHints: { enabled: false } } } });
     const plainSection = plain.repositorySection(root, 'fix the authentication bug');
     assert.ok(plainSection.includes('Files most relevant to the current goal:'), 'plain list restored on opt-out');
-    assert.ok(!plainSection.includes('Files relevant to the current goal:'), 'hint suppressed on opt-out');
+    assert.ok(!plainSection.includes('Minimal dependency-closed context'), 'minimal context suppressed on opt-out');
 
-    // Non-matching goal -> no hint block at all.
+    // Non-matching goal -> no minimal block at all.
     const empty = engine.repositorySection(root, 'zzz nonexistent topic qqq');
-    assert.ok(!empty.includes('Files relevant to the current goal:'), 'no hint when nothing matches');
+    assert.ok(!empty.includes('Minimal dependency-closed context'), 'no minimal block when nothing matches');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(dataRoot, { recursive: true, force: true });
@@ -903,6 +913,447 @@ async function main(): Promise<void> {
     console.log('19. queried dependents API (reverse deps)          ok');
   }
 
+  // ---- 21. Phase 18 Move 5 — architecture discovery (convention-based) ----
+  // Entry points, services/APIs, workers/queues, databases, test infra,
+  // integrations, config surfaces — classified from the persistent index.
+  {
+    const root = tmpRepo('repo-index-21-');
+    const dataRoot = tmpRepo('repo-data-21-');
+    try {
+      write(root, 'src/main.ts', 'export function main() {}\n');
+      write(root, 'src/server.ts', 'export function startServer() {}\n');
+      write(root, 'src/app.ts', "import { main } from './main';\nexport function app() { main(); }\n");
+      write(root, 'index.ts', 'export * from "./src/app";\n');
+      write(root, 'src/auth/index.ts', 'export * from "./auth";\n');
+      write(root, 'src/api/users.ts', 'export function listUsers() {}\n');
+      write(root, 'src/workers/email-queue.ts', 'export function drainQueue() {}\n');
+      write(root, 'src/db/schema.ts', 'export const schema = 1;\n');
+      write(root, 'src/integrations/slack-webhook.ts', 'export function notifySlack() {}\n');
+      write(root, 'src/auth/auth.test.ts', 'test("auth works", () => {});\n');
+      write(root, 'jest.config.ts', 'export default {};\n');
+      write(root, 'tsconfig.json', '{}\n');
+      write(root, 'src/utils/format.ts', 'export const formatted = 1;\n');
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+
+      const profile = engine.architecture(root)!;
+      assert(profile, 'architecture profile for the persistent index');
+      const paths = (files: Array<{ path: string }>) => files.map((f) => f.path);
+      assert.ok(paths(profile.entryPoints).includes('src/main.ts'), 'main.ts is an entry point');
+      assert.ok(paths(profile.entryPoints).includes('src/server.ts'), 'server.ts is an entry point');
+      assert.ok(paths(profile.entryPoints).includes('src/app.ts'), 'app.ts is an entry point');
+      assert.ok(paths(profile.entryPoints).includes('index.ts'), 'root index.ts is an entry point');
+      assert.ok(!paths(profile.entryPoints).includes('src/auth/index.ts'), 'deep barrel index is not an entry point');
+      assert.ok(paths(profile.services).includes('src/api/users.ts'), 'api file classified as service');
+      assert.ok(paths(profile.workers).includes('src/workers/email-queue.ts'), 'worker/queue file classified');
+      assert.ok(paths(profile.databases).includes('src/db/schema.ts'), 'db file classified');
+      assert.ok(paths(profile.integrations).includes('src/integrations/slack-webhook.ts'), 'integration file classified');
+      assert.ok(paths(profile.testFiles).includes('src/auth/auth.test.ts'), 'test file in test infra');
+      assert.ok(paths(profile.testConfigs).includes('jest.config.ts'), 'jest config in test infra');
+      assert.ok(paths(profile.configFiles).includes('tsconfig.json'), 'config surface listed');
+      assert.ok(!paths(profile.entryPoints).includes('src/utils/format.ts'), 'utility file is not an entry point');
+      const main = profile.entryPoints.find((f) => f.path === 'src/main.ts')!;
+      assert.ok(main.exports.includes('main'), 'entry point carries its exports');
+
+      const section = engine.architectureSection(root);
+      assert.ok(section.includes('Architecture overview:'), 'render header');
+      assert.ok(section.includes('Entry points'), 'render entry bucket');
+      assert.ok(section.includes('Workers / queues'), 'render worker bucket');
+
+      const skill = new ArchitectureSkill({ contextEngine: engine });
+      const result = await skill.execute({ __workspacePath: root });
+      assert.ok(result.section.includes('Entry points'), 'skill renders the overview');
+      assert.ok(result.profile.entryPoints.some((f: any) => f.path === 'src/main.ts'), 'skill profile carries buckets');
+
+      const light = new ContextEngine({ config: { repository: { dataRoot, persistent: false } } });
+      assert.strictEqual(light.architecture(root), undefined, 'lightweight index has no architecture profile');
+      assert.strictEqual(light.architectureSection(root), '', 'lightweight index renders empty section');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+    console.log('21. architecture discovery (convention-based)       ok');
+  }
+
+  // ---- 22. Phase 18 Move 6 — deeper symbols (evidence-based usage-reference map) ----
+  // The evidence pass decides parser vs usage-reference map on data; the map
+  // answers callers/callees/implementations from the persisted index.
+  {
+    const root = tmpRepo('repo-index-22-');
+    const dataRoot = tmpRepo('repo-data-22-');
+    try {
+      write(root, 'src/auth/auth.ts', 'export function authenticate(u: string): boolean { return true; }\n');
+      write(root, 'src/app.ts', "import { authenticate } from './auth/auth';\nexport function main() { authenticate('u'); }\n");
+      write(root, 'src/auth/auth.test.ts', "import { authenticate } from './auth';\ntest('authenticates', () => { expect(authenticate('u')).toBe(true); });\n");
+      write(root, 'src/worker.py', 'def drain_queue():\n    pass\n');
+      write(root, 'src/types.ts', 'export interface Repository { find(id: string): unknown; }\nexport interface Logger { log(msg: string): void; }\n');
+      write(root, 'src/users/repo.ts', "import type { Repository } from '../types';\nexport class UserRepository implements Repository { find(id: string) { return id; } }\n");
+      write(root, 'src/base/service.ts', 'export class BaseService { run() {} }\n');
+      write(root, 'src/orders/service.ts', "import { BaseService } from '../base/service';\nexport class OrderService extends BaseService {}\n");
+      const index = buildPersistentIndex(root);
+      assert.strictEqual(index.version, 2, 'Move 6 index format');
+
+      // --- evidence pass: mixed corpus -> usage-reference map ---
+      const evidence = symbolIntelligenceEvidence(index);
+      assert.strictEqual(evidence.decision, 'usage-reference-map', 'mixed corpus decides the usage-reference map');
+      assert.strictEqual(evidence.dominantFamily, 'typescript', 'TS is the dominant family');
+      assert.ok(evidence.dominantShare >= 0.5, 'TS dominates the corpus');
+      assert.ok(evidence.parserAvailable, 'a TS parser is available in-tree');
+      assert.ok(evidence.crossFamilySymbols, 'python still carries symbols — a TS-only parser would miss it');
+      assert.ok(evidence.families.some((f) => f.family === 'python' && f.symbols > 0), 'python family carries symbols');
+      assert.ok(evidence.referenceEdges > 0, 'reference edges measured');
+      assert.ok(renderSymbolIntelligenceEvidence(evidence).includes('usage-reference-map'), 'evidence renders human-readable');
+
+      // --- identifier extraction (the usage-reference signal) ---
+      const app = index.files.find((f) => f.path === 'src/app.ts')!;
+      assert.ok(app.identifiers.includes('authenticate'), 'identifiers carry referenced names');
+      assert.ok(app.identifiers.includes('main'), 'identifiers carry own definitions too');
+
+      // --- callers (external references, defining file excluded) ---
+      const callers = findCallers(index, 'authenticate');
+      const cPaths = callers.map((c) => c.path);
+      assert.deepStrictEqual(cPaths, ['src/app.ts', 'src/auth/auth.test.ts'], 'callers of authenticate, sorted');
+      assert.ok(!cPaths.includes('src/auth/auth.ts'), 'defining file is not its own caller');
+      assert.ok(callers.find((c) => c.path === 'src/auth/auth.test.ts')?.isTest, 'caller carries isTest flag');
+
+      // --- callees (symbols a file uses that are defined elsewhere) ---
+      const callees = findCallees(index, 'src/app.ts');
+      const authCallee = callees.find((c) => c.symbol === 'authenticate');
+      assert.ok(authCallee, 'app.ts callees include authenticate');
+      assert.ok(authCallee!.definingFiles.some((f) => f.path === 'src/auth/auth.ts'), 'callee carries the defining file');
+      assert.ok(!callees.some((c) => c.symbol === 'main'), 'own definitions are not callees');
+
+      // --- implementations (implements / extends) ---
+      assert.deepStrictEqual(index.implementations['Repository'], ['src/users/repo.ts'], 'implements Repository recorded');
+      assert.deepStrictEqual(index.implementations['BaseService'], ['src/orders/service.ts'], 'extends BaseService recorded');
+      assert.ok(!index.implementations['Logger'], 'unimplemented symbol has no implementations');
+
+      // --- unknown symbols / files -> empty ---
+      assert.deepStrictEqual(findCallers(index, 'nope'), [], 'unknown symbol -> no callers');
+      assert.deepStrictEqual(findCallees(index, 'src/missing.ts'), [], 'unknown file -> no callees');
+      assert.deepStrictEqual(findCallers(index, 'main'), [], 'no false-positive callers for main');
+
+      // --- persistence round-trip keeps the maps ---
+      const savedAt = saveRepositoryIndex(index, dataRoot);
+      assert.ok(fs.existsSync(savedAt), 'Move 6 index persisted');
+      const loaded = loadRepositoryIndex(root, dataRoot)!;
+      assert.strictEqual(loaded.version, 2, 'round-trip keeps Move 6 format');
+      assert.deepStrictEqual(
+        [...(loaded.symbolReferences['authenticate'] || [])].sort(),
+        ['src/app.ts', 'src/auth/auth.test.ts'],
+        'round-trip symbolReferences'
+      );
+      assert.deepStrictEqual(loaded.implementations['Repository'], ['src/users/repo.ts'], 'round-trip implementations');
+      assert.ok(loaded.files.find((f) => f.path === 'src/app.ts')!.identifiers.includes('authenticate'), 'round-trip identifiers');
+
+      // --- ContextEngine host (index still reflects the unmodified repo) ---
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+      assert.deepStrictEqual(
+        engine.callersOf(root, 'authenticate').map((c) => c.path),
+        ['src/app.ts', 'src/auth/auth.test.ts'],
+        'engine callersOf'
+      );
+      assert.strictEqual(engine.callersOf(root, 'authenticate', { limit: 1 }).length, 1, 'limit caps callers');
+      assert.ok(engine.calleesOf(root, 'src/app.ts').some((c) => c.symbol === 'authenticate'), 'engine calleesOf');
+      assert.deepStrictEqual(
+        engine.implementationsOf(root, 'Repository').map((f) => f.path),
+        ['src/users/repo.ts'],
+        'engine implementationsOf'
+      );
+      assert.strictEqual(engine.symbolIntelligenceEvidence(root)!.decision, 'usage-reference-map', 'engine evidence');
+      const light = new ContextEngine({ config: { repository: { dataRoot, persistent: false } } });
+      assert.deepStrictEqual(light.callersOf(root, 'authenticate'), [], 'lightweight index -> no callers');
+      assert.deepStrictEqual(light.calleesOf(root, 'src/app.ts'), [], 'lightweight index -> no callees');
+      assert.deepStrictEqual(light.implementationsOf(root, 'Repository'), [], 'lightweight index -> no implementations');
+      assert.strictEqual(light.symbolIntelligenceEvidence(root), undefined, 'lightweight index -> no evidence');
+
+      // --- incremental refresh drops stale references, keeps fresh ones ---
+      write(root, 'src/app.ts', 'export function main() { return 1; }\n');
+      const refreshed = refreshRepositoryIndex(index, root);
+      assert.ok(!(refreshed.symbolReferences['authenticate'] || []).includes('src/app.ts'), 'refresh drops stale caller');
+      assert.ok((refreshed.symbolReferences['authenticate'] || []).includes('src/auth/auth.test.ts'), 'refresh keeps fresh caller');
+      // Engine freshness flows through the warm path (force), like the symbol skill.
+      assert.strictEqual(engine.refreshRepository(root, { force: true }), true, 'engine warms on demand');
+      assert.ok(
+        engine.callersOf(root, 'authenticate').every((c) => c.path !== 'src/app.ts'),
+        'engine sees the refreshed repo (stale caller dropped)'
+      );
+
+      // --- prototype safety: `constructor` etc. must not pollute the maps ---
+      write(root, 'docs/notes.md', '# notes\n```ts\nclass Foo { constructor() {} }\n```\n');
+      const withDoc = buildPersistentIndex(root);
+      assert.deepStrictEqual(findCallers(withDoc, 'constructor'), [], 'prototype member names never resolve as callers');
+      assert.ok(!findCallees(withDoc, 'src/app.ts').some((c) => c.symbol === 'constructor'), 'prototype member names never appear as callees');
+      assert.deepStrictEqual(findCallers(withDoc, 'authenticate').map((c) => c.path), ['src/auth/auth.test.ts'], 'edited file no longer references authenticate, test still does');
+
+      // --- evidence: single-family TS corpus justifies a parser ---
+      const pureRoot = tmpRepo('repo-index-22b-');
+      try {
+        write(pureRoot, 'src/main.ts', 'export function main() { return 1; }\n');
+        const pure = symbolIntelligenceEvidence(buildPersistentIndex(pureRoot));
+        assert.strictEqual(pure.decision, 'parser', 'single-family TS corpus decides the parser is viable');
+      } finally {
+        fs.rmSync(pureRoot, { recursive: true, force: true });
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+    console.log('22. deeper symbols (evidence-based usage-reference map) ok');
+  }
+
+  // ---- 23. Phase 18 Move 7b — minimal dependency-closed context (G7) ----
+  // goal -> symbols (seeds) -> importing/imported modules -> tests, bounded
+  // by a byte budget with smallest-first admission; closed when the budget
+  // let the closure finish.
+  {
+    const root = tmpRepo('repo-index-23-');
+    const dataRoot = tmpRepo('repo-data-23-');
+    try {
+      write(root, 'src/auth/auth.ts', "import { sign } from '../util/jwt';\nexport function authenticate(u: string): boolean { return true; }\n");
+      write(root, 'src/util/jwt.ts', 'export function sign(payload: string): string { return payload; }\n');
+      write(root, 'src/app.ts', "import { authenticate } from './auth/auth';\nimport express from 'express';\nexport function main() { authenticate('u'); }\n");
+      write(root, 'src/server.ts', "import { main } from './app';\nexport function serve() { main(); }\n");
+      write(root, 'src/payments/billing.ts', "import { authenticate } from '../auth/auth';\nexport function charge() { authenticate('x'); }\n");
+      write(root, 'src/auth/auth.test.ts', "import { authenticate } from './auth';\ntest('authenticates', () => { authenticate('u'); });\n");
+      write(root, 'src/app.test.ts', "import { main } from './app';\ntest('app works', () => { main(); });\n");
+      write(root, 'src/auth/extra.test.ts', "test('extra auth coverage', () => {});\n");
+      write(root, 'src/random.ts', 'export function unrelated() { return 1; }\n');
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+
+      const ctx = engine.minimalContext(root, 'fix authentication');
+      const paths = ctx.files.map((f) => f.path);
+      assert.ok(paths.includes('src/auth/auth.ts'), 'seed: auth.ts in the set');
+      assert.ok(paths.includes('src/auth/auth.test.ts'), 'related test auth.test.ts in the set');
+      assert.ok(paths.includes('src/util/jwt.ts'), 'imported module jwt.ts joins the closure');
+      assert.ok(paths.includes('src/app.ts'), 'importing module app.ts joins the closure');
+      assert.ok(paths.includes('src/server.ts'), 'transitive dependent server.ts joins via app.ts');
+      assert.ok(!paths.includes('src/random.ts'), 'unrelated file excluded');
+      assert.strictEqual(ctx.closed, true, 'every in-repo reference is included (dependency-closed)');
+      assert.strictEqual(ctx.truncated, false, 'default budget fits the closure');
+      assert.ok(ctx.externalModules.includes('express'), 'bare package reported as an external leaf');
+      assert.ok(ctx.totalBytes > 0 && ctx.totalTokens > 0, 'bytes + token estimate reported');
+      assert.ok(ctx.files.every((f) => f.depth >= 0), 'every file carries a BFS depth');
+      assert.strictEqual(engine.minimalContext(root, 'fix authentication').files.map((f) => f.path).join(','), paths.join(','), 'deterministic across calls');
+
+      // --- role block: with seeds capped, jwt/server/app can only arrive via
+      // the closure (their scores are below the seed cutoff) ---
+      const ctx4 = engine.minimalContext(root, 'fix authentication', { seedLimit: 4 });
+      assert.deepStrictEqual(
+        ctx4.seeds.slice().sort(),
+        ['src/auth/auth.test.ts', 'src/auth/auth.ts', 'src/auth/extra.test.ts', 'src/payments/billing.ts'],
+        'seedLimit:4 keeps exactly the four top-ranked files as seeds'
+      );
+      assert.strictEqual(ctx4.files.find((f) => f.path === 'src/auth/auth.ts')!.role, 'seed', 'auth.ts is a goal seed');
+      assert.strictEqual(ctx4.files.find((f) => f.path === 'src/util/jwt.ts')!.role, 'dependency', 'jwt.ts enters as an imported module');
+      assert.strictEqual(ctx4.files.find((f) => f.path === 'src/app.ts')!.role, 'dependent', 'app.ts enters as an importing module');
+      assert.strictEqual(ctx4.files.find((f) => f.path === 'src/server.ts')!.role, 'dependent', 'server.ts enters as a transitive importing module');
+      assert.strictEqual(ctx4.closed, true, 'seed-capped context is still dependency-closed');
+
+      // --- the tests pass surfaces a test that nothing imports (only reachable
+      // via the goal/sibling test rules) when seeds are capped ---
+      const narrow = engine.minimalContext(root, 'fix authentication', { seedLimit: 2 });
+      const extra = narrow.files.find((f) => f.path === 'src/auth/extra.test.ts');
+      assert.ok(extra && extra.role === 'test', 'matchedTestFiles rule adds the extra test');
+      const noTests = engine.minimalContext(root, 'fix authentication', { seedLimit: 2, includeTests: false });
+      assert.ok(!noTests.files.some((f) => f.path === 'src/auth/extra.test.ts'), 'includeTests:false drops the test-only file');
+
+      // --- direction opt-outs (seed-capped so the closure-only files are the probe) ---
+      const noDeps = engine.minimalContext(root, 'fix authentication', { seedLimit: 4, includeDependents: false });
+      assert.ok(!noDeps.files.some((f) => f.path === 'src/server.ts' || f.path === 'src/app.ts'), 'includeDependents:false drops importing modules');
+      assert.ok(noDeps.files.some((f) => f.path === 'src/util/jwt.ts'), 'imported modules still join');
+      const noImports = engine.minimalContext(root, 'fix authentication', { seedLimit: 4, includeImports: false });
+      assert.ok(!noImports.files.some((f) => f.path === 'src/util/jwt.ts'), 'includeImports:false drops imported modules');
+      assert.ok(noImports.files.some((f) => f.path === 'src/server.ts'), 'importing modules still join');
+
+      // --- budget truncation: only the first seed fits ---
+      const tight = engine.minimalContext(root, 'fix authentication', { maxBytes: 1, seedLimit: 2 });
+      assert.deepStrictEqual(tight.files.map((f) => f.path), ['src/auth/auth.test.ts'], 'tiny budget keeps only the top seed');
+      assert.strictEqual(tight.files[0].role, 'seed', 'the survivor is a seed');
+      assert.strictEqual(tight.truncated, true, 'budget cut the closure short');
+      assert.strictEqual(tight.closed, false, 'truncated closure is not dependency-closed');
+
+      // --- rendered section ---
+      const section = renderMinimalContext(ctx);
+      assert.ok(section.includes('Minimal dependency-closed context'), 'render header');
+      assert.ok(section.includes('dependency-closed'), 'render closure status');
+      assert.ok(section.includes('express'), 'render external modules');
+
+      // --- lightweight index -> empty context ---
+      const light = new ContextEngine({ config: { repository: { dataRoot, persistent: false } } });
+      const empty = light.minimalContext(root, 'fix authentication');
+      assert.deepStrictEqual(empty.files, [], 'lightweight index -> empty minimal context');
+      assert.strictEqual(empty.totalBytes, 0, 'lightweight index -> zero bytes');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+    console.log('23. minimal dependency-closed context (G7)          ok');
+  }
+
+  // ---- 24. Phase 18 Move 7b wiring — the mission prompt's repository
+  // section renders the minimal dependency-closed context for persistent
+  // indexes (replacing the per-goal hint); opt-outs and fallbacks intact.
+  {
+    const root = tmpRepo('repo-index-24-');
+    const dataRoot = tmpRepo('repo-data-24-');
+    try {
+      write(root, 'src/auth/auth.ts', "import { sign } from '../util/jwt';\nexport function authenticate(u: string): boolean { return true; }\n");
+      write(root, 'src/util/jwt.ts', 'export function sign(payload: string): string { return payload; }\n');
+      write(root, 'src/app.ts', "import { authenticate } from './auth/auth';\nimport express from 'express';\nexport function main() { authenticate('u'); }\n");
+      write(root, 'src/payments/billing.ts', "import { authenticate } from '../auth/auth';\nexport function charge() { authenticate('x'); }\n");
+      write(root, 'src/auth/auth.test.ts', "import { authenticate } from './auth';\ntest('authenticates', () => { authenticate('u'); });\n");
+      write(root, 'src/random.ts', 'export function unrelated() { return 1; }\n');
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+
+      const section = engine.repositorySection(root, 'fix the authentication bug');
+      assert.ok(section.includes('Minimal dependency-closed context'), 'persistent repo section renders the minimal context header');
+      assert.ok(section.includes('src/auth/auth.ts'), 'section lists the seed');
+      assert.ok(section.includes('src/util/jwt.ts'), 'section lists the imported module (dependency closure)');
+      assert.ok(section.includes('src/payments/billing.ts'), 'section lists the importing module');
+      assert.ok(section.includes('src/auth/auth.test.ts'), 'section lists the related test');
+      assert.ok(!section.includes('src/random.ts'), 'unrelated file absent from the section');
+      assert.ok(!section.includes('Files relevant to the current goal:'), 'per-goal hint replaced by the minimal context');
+      assert.ok(section.includes('dependency-closed'), 'section carries the closure status');
+
+      // goalFilesSection remains the unchanged lightweight fallback API.
+      assert.ok(
+        engine.goalFilesSection(root, 'fix the authentication bug').includes('Files relevant to the current goal:'),
+        'goalFilesSection API unchanged'
+      );
+
+      // Opt-out: goalHints.enabled === false restores the plain path list.
+      const plain = new ContextEngine({ config: { repository: { dataRoot, goalHints: { enabled: false } } } });
+      const plainSection = plain.repositorySection(root, 'fix the authentication bug');
+      assert.ok(plainSection.includes('Files most relevant to the current goal:'), 'plain list restored on opt-out');
+      assert.ok(!plainSection.includes('Minimal dependency-closed context'), 'minimal context suppressed on opt-out');
+
+      // Non-matching goal -> no minimal block.
+      assert.ok(
+        !engine.repositorySection(root, 'zzz nonexistent topic qqq').includes('Minimal dependency-closed context'),
+        'no minimal block when nothing matches'
+      );
+
+      // Lightweight index -> falls back to the hint path (never minimal).
+      const light = new ContextEngine({ config: { repository: { dataRoot, persistent: false } } });
+      const lightSection = light.repositorySection(root, 'auth');
+      assert.ok(!lightSection.includes('Minimal dependency-closed context'), 'lightweight index never renders the minimal context');
+      assert.ok(lightSection.includes('Files relevant to the current goal:'), 'lightweight index keeps the goal-file hint');
+      assert.ok(lightSection.includes('- src/auth/auth.ts'), 'lightweight hint lists the path-matched file');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+    console.log('24. minimal context wired into the repo section     ok');
+  }
+
+  // ---- 25. Phase 18 Move 7b config — repository.minimal caps thread into
+  // the repositorySection's dependency-closed context (maxBytes / maxFiles /
+  // enabled).
+  {
+    const root = tmpRepo('repo-index-25-');
+    const dataRoot = tmpRepo('repo-data-25-');
+    try {
+      write(root, 'src/auth/auth.ts', "import { sign } from '../util/jwt';\nexport function authenticate(u: string): boolean { return true; }\n");
+      write(root, 'src/util/jwt.ts', 'export function sign(payload: string): string { return payload; }\n');
+      write(root, 'src/app.ts', "import { authenticate } from './auth/auth';\nimport express from 'express';\nexport function main() { authenticate('u'); }\n");
+      write(root, 'src/payments/billing.ts', "import { authenticate } from '../auth/auth';\nexport function charge() { authenticate('x'); }\n");
+      write(root, 'src/auth/auth.test.ts', "import { authenticate } from './auth';\ntest('authenticates', () => { authenticate('u'); });\n");
+      write(root, 'src/random.ts', 'export function unrelated() { return 1; }\n');
+      const pathCount = (section: string) => (section.match(/src\/[a-zA-Z0-9_./-]+\.ts/g) || []).length;
+
+      // Default (no minimal config): the full closure, dependency-closed.
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+      const full = engine.repositorySection(root, 'fix the authentication bug');
+      assert.ok(full.includes('dependency-closed') && !full.includes('truncated'), 'default minimal context is complete');
+
+      // minimal.maxFiles caps the set (seeds keep priority, rest truncated).
+      const capped = new ContextEngine({ config: { repository: { dataRoot, minimal: { maxFiles: 2 } } } });
+      const cappedSection = capped.repositorySection(root, 'fix the authentication bug');
+      assert.strictEqual(pathCount(cappedSection), 2, 'minimal.maxFiles=2 caps the rendered set');
+      assert.ok(cappedSection.includes('truncated (budget-limited)'), 'file cap reports truncation');
+      assert.ok(cappedSection.includes('src/auth/auth.ts') && cappedSection.includes('src/auth/auth.test.ts'), 'seeds survive the file cap');
+      assert.ok(!cappedSection.includes('src/util/jwt.ts'), 'closure modules cut by the file cap');
+
+      // minimal.maxBytes caps by bytes (only the top seed fits).
+      const authSize = fs.statSync(path.join(root, 'src/auth/auth.ts')).size;
+      const byteCapped = new ContextEngine({ config: { repository: { dataRoot, minimal: { maxBytes: authSize } } } });
+      const byteSection = byteCapped.repositorySection(root, 'fix the authentication bug');
+      assert.strictEqual(pathCount(byteSection), 1, 'minimal.maxBytes keeps only the top seed');
+      assert.ok(byteSection.includes('src/auth/auth.ts'), 'the survivor is the top seed');
+      assert.ok(byteSection.includes('truncated'), 'byte cap reports truncation');
+
+      // minimal.enabled=false restores the persistent goal-file hint path.
+      const disabled = new ContextEngine({ config: { repository: { dataRoot, minimal: { enabled: false } } } });
+      const disabledSection = disabled.repositorySection(root, 'fix the authentication bug');
+      assert.ok(!disabledSection.includes('Minimal dependency-closed context'), 'minimal.enabled=false suppresses the minimal context');
+      assert.ok(disabledSection.includes('Files relevant to the current goal:'), 'minimal.enabled=false falls back to the goal-file hint');
+
+      // goalHints.maxFiles still seeds the context (seedLimit threading).
+      const seeded = new ContextEngine({ config: { repository: { dataRoot, goalHints: { maxFiles: 1 } } } });
+      const seededSection = seeded.repositorySection(root, 'fix the authentication bug');
+      assert.strictEqual(pathCount(seededSection), 5, 'goalHints.maxFiles seeds the context; closure completes under default budget');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+    console.log('25. minimal-context config caps thread into the section ok');
+  }
+
+  // ---- 26. Phase 18 Move 7b — the minimal_context runtime skill (closure of
+  // a goal or of ONE file via seedFiles), mirroring /symbol and /warmth.
+  {
+    const root = tmpRepo('repo-index-26-');
+    const dataRoot = tmpRepo('repo-data-26-');
+    try {
+      write(root, 'src/auth/auth.ts', "import { sign } from '../util/jwt';\nexport function authenticate(u: string): boolean { return true; }\n");
+      write(root, 'src/util/jwt.ts', 'export function sign(payload: string): string { return payload; }\n');
+      write(root, 'src/app.ts', "import { authenticate } from './auth/auth';\nimport express from 'express';\nexport function main() { authenticate('u'); }\n");
+      write(root, 'src/payments/billing.ts', "import { authenticate } from '../auth/auth';\nexport function charge() { authenticate('x'); }\n");
+      write(root, 'src/auth/auth.test.ts', "import { authenticate } from './auth';\ntest('authenticates', () => { authenticate('u'); });\n");
+      write(root, 'src/random.ts', 'export function unrelated() { return 1; }\n');
+      const engine = new ContextEngine({ config: { repository: { dataRoot } } });
+
+      // seedFiles: the dependency closure around ONE explicit file.
+      const aroundAuth = engine.minimalContext(root, '', { seedFiles: ['src/auth/auth.ts'] });
+      const aPaths = aroundAuth.files.map((f) => f.path);
+      assert.ok(aPaths.includes('src/auth/auth.ts'), 'explicit seed is the anchor file');
+      assert.ok(aPaths.includes('src/util/jwt.ts'), 'seedFiles closure includes the imported module');
+      assert.ok(aPaths.includes('src/app.ts') && aPaths.includes('src/payments/billing.ts'), 'seedFiles closure includes importing modules');
+      assert.ok(aPaths.includes('src/auth/auth.test.ts'), 'seedFiles closure includes the related test');
+      assert.ok(!aPaths.includes('src/random.ts'), 'unrelated file excluded from the file closure');
+      assert.strictEqual(aroundAuth.closed, true, 'file closure is dependency-closed');
+      assert.deepStrictEqual(engine.minimalContext(root, '', { seedFiles: ['src/nope.ts'] }).files, [], 'unknown seed file -> empty context');
+
+      // The skill: goal-driven.
+      const skill = new MinimalContextSkill({ contextEngine: engine });
+      const byGoal = await skill.execute({ goal: 'fix the authentication bug', __workspacePath: root });
+      assert.ok(byGoal.section.includes('Minimal dependency-closed context'), 'skill renders the section');
+      assert.strictEqual(byGoal.context.closed, true, 'skill reports dependency-closed');
+      assert.ok(byGoal.context.files.some((f: any) => f.path === 'src/auth/auth.ts'), 'skill goal path lists the seed');
+      assert.ok(byGoal.context.files.some((f: any) => f.path === 'src/util/jwt.ts'), 'skill goal path lists the imported module');
+
+      // The skill: file-driven (closure around one file).
+      const byFile = await skill.execute({ file: 'src/auth/auth.ts', __workspacePath: root });
+      assert.strictEqual(byFile.file, 'src/auth/auth.ts', 'skill echoes the queried file');
+      assert.ok(byFile.context.files.some((f: any) => f.path === 'src/util/jwt.ts'), 'skill file path lists the imported module');
+      assert.ok(byFile.context.files.some((f: any) => f.path === 'src/app.ts'), 'skill file path lists the importing module');
+      assert.strictEqual(byFile.context.closed, true, 'skill file closure is dependency-closed');
+
+      // No args -> loud error; lightweight index -> note, not a crash.
+      const noArgs = await skill.execute({ __workspacePath: root });
+      assert.ok(String(noArgs.error).includes('Provide a goal phrase or a root-relative file path'), 'skill requires goal or file');
+      const light = new ContextEngine({ config: { repository: { dataRoot, persistent: false } } });
+      const lightSkill = new MinimalContextSkill({ contextEngine: light });
+      const lightResult = await lightSkill.execute({ goal: 'fix the authentication bug', __workspacePath: root });
+      assert.ok(String(lightResult.note || '').includes('No persistent repository index'), 'lightweight index -> advisory note');
+      assert.ok(!lightResult.section, 'lightweight index -> no section');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+    console.log('26. minimal_context skill (goal or file closure)    ok');
+  }
+
   // ---- 20. Phase 18 Move 3 — change-impact analysis (regression surface) ----
   // target -> dependents (direct first, then transitive) -> exported API
   // surface -> sibling + goal tests ranked as the regression surface.
@@ -976,7 +1427,13 @@ async function main(): Promise<void> {
     eventProjection: true,
     taskMemoryFold: true,
     dependentsQuery: true,
-    changeImpact: true
+    changeImpact: true,
+    architectureDiscovery: true,
+    symbolIntelligence: true,
+    minimalContext: true,
+    minimalContextWired: true,
+    minimalContextConfig: true,
+    minimalContextSkill: true
   }));
 }
 

@@ -108,6 +108,17 @@ export interface ProjectMilestonePlan {
     tasks?: ProjectTaskPlan[];
 }
 
+/**
+ * Phase 20 Move 8 — a work item in the goal's plan tree, in execution order.
+ * The runner maps these to canonical TaskPlanStep[] (adding status) so the
+ * child mission renders the same plan artifact as the mission loop.
+ */
+export interface BackgroundPlanStep {
+    id: string;
+    title: string;
+    description?: string;
+}
+
 export interface BackgroundWorkerConfig {
     enabled: boolean;
     alwaysOn: boolean;           // Run even when user is active
@@ -568,6 +579,55 @@ export class BackgroundWorker {
         return Object.values(this.goals)
             .filter(goal => goal.projectId === projectId)
             .sort((a, b) => a.createdAt - b.createdAt);
+    }
+
+    /**
+     * Phase 20 Move 8 — the goal's position in the project plan tree as an
+     * ordered work-item list, so /goal and /plan_project goals produce the
+     * SAME plan artifact the canonical mission loop renders.
+     *
+     * addTaskTree records milestone.goalIds in depth-first pre-order (a goal,
+     * then its subtask subtree, then the next sibling's subtree), so slicing
+     * from the goal's index yields exactly the remaining work of the
+     * milestone's plan tree from this goal onward: the goal itself, its
+     * subtasks, then every later milestone goal. Standalone goals (no
+     * project/milestone) return a single item for the goal itself. Returns
+     * [] for unknown goals. The caller maps these to TaskPlanStep[] and
+     * decides statuses; this module stays free of core/task types.
+     */
+    public planStepsForGoal(goalId: string): BackgroundPlanStep[] {
+        const goal = this.goals[goalId];
+        if (!goal) return [];
+        if (!goal.projectId) {
+            return [{ id: `bg-${goal.id}`, title: goal.title, description: goal.description || undefined }];
+        }
+        const project = this.projects[goal.projectId];
+        if (!project) return [];
+        const milestone = goal.milestoneId ? project.milestones[goal.milestoneId] : undefined;
+        const goals = this.getProjectGoals(project.id);
+        const byId = new Map(goals.map(g => [g.id, g]));
+        if (milestone && milestone.goalIds.includes(goal.id)) {
+            const rest = milestone.goalIds
+                .slice(milestone.goalIds.indexOf(goal.id))
+                .map(id => byId.get(id))
+                .filter((g): g is BackgroundGoal => Boolean(g));
+            return rest.map(g => ({
+                id: `bg-${g.id}`,
+                title: g.title,
+                description: g.description || undefined
+            }));
+        }
+        // A project goal outside the milestone tree (or with a missing
+        // milestone): the goal plus its direct subtasks, tree order.
+        const items: BackgroundGoal[] = [goal];
+        for (const g of goals) {
+            if (g.parentId === goal.id) items.push(g);
+        }
+        return items.map(g => ({
+            id: `bg-${g.id}`,
+            title: g.title,
+            description: g.description || undefined
+        }));
     }
 
     public recordGoalMemory(id: string, details: {

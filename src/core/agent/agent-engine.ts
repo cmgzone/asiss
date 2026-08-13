@@ -38,7 +38,7 @@ import {
 } from './agent-result';
 import type { Agent, AgentInput } from './agent-types';
 import { profileFromTask, type TaskProfile } from './task-profile';
-import type { Task, TaskKind } from '../task';
+import type { Task, TaskKind, TaskPlanStep } from '../task';
 import type { ContextEngine } from '../context';
 import { SkillRegistry } from '../skills';
 import { ToolEngine } from '../tools';
@@ -100,6 +100,13 @@ export interface ExecuteTaskOptions {  /** Canonical agent id or name. */
   projectId?: string;
   /** Host linkage metadata merged onto the child Task (e.g. backgroundGoalId). */
   metadata?: Record<string, unknown>;
+  /**
+   * Phase 20 Move 8 — pre-built canonical plan steps for the child Task
+   * (e.g. the background worker's project/milestone/task tree). Passed to
+   * taskEngine.plan so /goal and /plan_project goals produce the same plan
+   * artifact the mission loop renders. Absent -> the bare plan() path.
+   */
+  planSteps?: TaskPlanStep[];
 }
 
 export interface ExecuteTaskResult {
@@ -447,7 +454,11 @@ export class AgentEngine {
         // CREATED -> ANALYZING -> PLANNING -> READY so runMission can auto-start
         // (runMission only auto-starts READY tasks; create() leaves CREATED).
         await taskEngine.analyze(childTask.id);
-        await taskEngine.plan(childTask.id);
+        // Phase 20 Move 8: the host's plan steps (background worker project /
+        // milestone / task tree) become the child Task's canonical plan —
+        // never a bare plan() when steps are provided, so the child mission
+        // renders the same plan artifact as the mission loop.
+        await taskEngine.plan(childTask.id, options.planSteps);
 
         const mission = await this.runChildMission(runtime, taskEngine, childTask.id, agent, {
           ...options,
@@ -537,7 +548,7 @@ export class AgentEngine {
     return Array.from(byName.values());
   }
 
-  private buildChildSystemPrompt(agent: Agent, tools: Tool[], memorySection: string, repoSection = ''): string {
+  private buildChildSystemPrompt(agent: Agent, tools: Tool[], memorySection: string, repoSection = '', planSection = ''): string {
     const toolList = tools.length
       ? tools.map(tool => `- ${tool.name}: ${tool.description || 'No description'}`).join('\n')
       : '- No tools allowed for this delegation.';
@@ -553,6 +564,7 @@ export class AgentEngine {
       toolList,
       ...(memorySection ? ['', memorySection] : []),
       ...(repoSection ? ['', repoSection] : []),
+      ...(planSection ? ['', planSection] : []),
       '',
       'When finished, respond with one JSON object and no extra prose:',
       '{',
@@ -586,6 +598,25 @@ export class AgentEngine {
       ...(priorOutcomes.length ? ['Previous attempts:'] : []),
       ...priorOutcomes.map(p => `- Attempt ${p.attempt}: ${p.summary}`)
     ].filter(Boolean).join('\n');
+  }
+
+  /**
+   * Phase 20 Move 8 — render the child Task's recorded plan with live
+   * statuses, the same numbered artifact the mission loop renders (Phase 20
+   * Move 3/7). The background worker's project/milestone/task tree lands on
+   * the canonical Task via executeTask.planSteps, so /goal and /plan_project
+   * goals walk the same guide in child missions. Never throws — plan context
+   * is advisory.
+   */
+  private buildChildPlanSection(taskEngine: TaskEngine, taskId: string): string {
+    try {
+      const plan = taskEngine.get(taskId)?.plan;
+      if (!Array.isArray(plan) || plan.length === 0) return '';
+      return '\n\nMission plan (from the project/milestone plan tree; complete these steps before answering):\n'
+        + plan.map((step, idx) => `${idx + 1}. [${step.status || 'PENDING'}] ${step.title}${step.description ? ' — ' + step.description : ''}`).join('\n');
+    } catch {
+      return '';
+    }
   }
 
   /**
@@ -657,7 +688,8 @@ export class AgentEngine {
     const repoSection = sources.has('repo') && runtime.contextEngine
       ? this.buildChildRepoSection(runtime, params.workspacePath, params.task, childTaskId, params.sessionId)
       : '';
-    const systemPrompt = this.buildChildSystemPrompt(agent, params.allToolSchemas, memorySection, repoSection);
+    const planSection = this.buildChildPlanSection(taskEngine, childTaskId);
+    const systemPrompt = this.buildChildSystemPrompt(agent, params.allToolSchemas, memorySection, repoSection, planSection);
     const priorOutcomes = sources.has('attempts') ? params.priorOutcomes : [];
     const initialUser = this.buildChildTaskPrompt(
       params.task,

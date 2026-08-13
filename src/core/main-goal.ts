@@ -5,6 +5,28 @@ import { v4 as uuidv4 } from 'uuid';
 export type MainGoalStatus = 'active' | 'completed' | 'paused' | 'cleared';
 export type MainGoalOrigin = 'auto' | 'manual';
 
+/**
+ * Phase 20 Move 2 — one terminal canonical Task outcome attached to a goal.
+ * The autonomous loop's Complete stage records this so a goal can show WHICH
+ * task completed/failed it and the evidence (verification + criteria) behind
+ * the verdict — goal -> task -> agent -> verify -> complete is queryable from
+ * the goal record itself.
+ */
+export interface GoalTaskEvidence {
+  /** Canonical Task id that served this goal. */
+  taskId: string;
+  /** TaskOutcomeStatus: SUCCESS / FAILURE / PARTIAL / CANCELLED. */
+  outcome: string;
+  /** Short user-facing summary of the outcome. */
+  summary?: string;
+  attempts?: number;
+  turns?: number;
+  /** Rendered verification/criteria summary (e.g. "2 passed, 1 failed"). */
+  verification?: string;
+  toolCalls?: number;
+  completedAt?: number;
+}
+
 export interface MainChatGoal {
     id: string;
     sessionId: string;
@@ -23,6 +45,10 @@ export interface MainChatGoal {
     notes: string[];
     linkedProjectId?: string;
     linkedBackgroundGoalIds: string[];
+    /** Phase 20 Move 2 — canonical Tasks created to serve this goal. */
+    linkedTaskIds: string[];
+    /** Phase 20 Move 2 — terminal outcomes of the linked canonical Tasks. */
+    taskOutcomes: GoalTaskEvidence[];
     completedAt?: number;
     metadata?: Record<string, any>;
 }
@@ -105,6 +131,12 @@ export class MainGoalManager {
             linkedBackgroundGoalIds: Array.isArray(raw?.linkedBackgroundGoalIds)
                 ? raw.linkedBackgroundGoalIds.map((v: any) => String(v)).filter(Boolean).slice(-50)
                 : [],
+            linkedTaskIds: Array.isArray(raw?.linkedTaskIds)
+                ? raw.linkedTaskIds.map((v: any) => String(v)).filter(Boolean).slice(-50)
+                : [],
+            taskOutcomes: Array.isArray(raw?.taskOutcomes)
+                ? raw.taskOutcomes.map((v: any) => this.normalizeTaskEvidence(v)).filter(Boolean).slice(-20)
+                : [],
             completedAt: Number(raw?.completedAt) || undefined,
             metadata: raw?.metadata && typeof raw.metadata === 'object' ? raw.metadata : undefined
         };
@@ -124,6 +156,25 @@ export class MainGoalManager {
 
     public getRecent(sessionId: string): MainChatGoal[] {
         return this.getSession(sessionId).recent;
+    }
+
+    /**
+     * Phase 20 web UI — every session's goal state (current + recent, with
+     * the goal <-> task linkage) for the /api/loop trace panel.
+     */
+    public snapshot(limit: number = 20): Array<{ sessionId: string; current: MainChatGoal | null; recent: MainChatGoal[] }> {
+        return Object.entries(this.state.sessions)
+            .map(([sessionId, state]) => ({
+                sessionId,
+                current: state.current,
+                recent: state.recent.slice(0, 5)
+            }))
+            .sort((a, b) => {
+                const aTime = a.current?.updatedAt || a.recent[0]?.updatedAt || 0;
+                const bTime = b.current?.updatedAt || b.recent[0]?.updatedAt || 0;
+                return bTime - aTime;
+            })
+            .slice(0, limit);
     }
 
     public observeUserMessage(sessionId: string, message: { id?: string; content: string; timestamp?: number; metadata?: any }): MainChatGoal | null {
@@ -204,6 +255,8 @@ export class MainGoalManager {
             acceptanceCriteria: this.unique(params.acceptanceCriteria || []),
             notes: (params.notes || []).filter(Boolean).slice(-50),
             linkedBackgroundGoalIds: [],
+            linkedTaskIds: [],
+            taskOutcomes: [],
             metadata: params.metadata
         };
 
@@ -246,10 +299,11 @@ export class MainGoalManager {
         return true;
     }
 
-    public completeGoal(sessionId: string, note?: string): boolean {
+    public completeGoal(sessionId: string, note?: string, evidence?: GoalTaskEvidence): boolean {
         const session = this.getSession(sessionId);
         if (!session.current) return false;
         if (note) session.current.notes = [...session.current.notes, this.clean(note)].filter(Boolean).slice(-50);
+        if (evidence) session.current.taskOutcomes = this.pushTaskEvidence(session.current.taskOutcomes, evidence);
         session.current.status = 'completed';
         session.current.completedAt = Date.now();
         session.current.updatedAt = Date.now();
@@ -282,6 +336,36 @@ export class MainGoalManager {
         return true;
     }
 
+    /**
+     * Phase 20 Move 2 — record that a canonical Task was created to serve the
+     * current goal (the Task carries the goal id via metadata.goalId). Both
+     * ends of goal <-> task are now traceable.
+     */
+    public linkTask(sessionId: string, taskId: string): boolean {
+        const current = this.getSession(sessionId).current;
+        if (!current) return false;
+        if (!current.linkedTaskIds.includes(taskId)) {
+            current.linkedTaskIds = [...current.linkedTaskIds, taskId].slice(-50);
+            current.updatedAt = Date.now();
+            this.save();
+        }
+        return true;
+    }
+
+    /**
+     * Phase 20 Move 2 — attach a terminal canonical Task outcome to the
+     * current goal WITHOUT completing it. Used for failed/blocked missions so
+     * the failure is traceable on the goal while the goal stays active.
+     */
+    public recordTaskOutcome(sessionId: string, evidence: GoalTaskEvidence): boolean {
+        const current = this.getSession(sessionId).current;
+        if (!current) return false;
+        current.taskOutcomes = this.pushTaskEvidence(current.taskOutcomes, evidence);
+        current.updatedAt = Date.now();
+        this.save();
+        return true;
+    }
+
     public linkBackgroundGoal(sessionId: string, goalId: string): boolean {
         const current = this.getSession(sessionId).current;
         if (!current) return false;
@@ -308,6 +392,14 @@ export class MainGoalManager {
         if (current.linkedProjectId) lines.push(`- Linked project: ${current.linkedProjectId}`);
         if (current.linkedBackgroundGoalIds.length > 0) {
             lines.push(`- Linked background goals: ${current.linkedBackgroundGoalIds.slice(-5).join(', ')}`);
+        }
+        if (current.linkedTaskIds.length > 0) {
+            lines.push(`- Linked tasks: ${current.linkedTaskIds.slice(-5).join(', ')}`);
+        }
+        if (current.taskOutcomes.length > 0) {
+            const last = current.taskOutcomes[current.taskOutcomes.length - 1];
+            const verification = last.verification ? `; verification: ${last.verification}` : '';
+            lines.push(`- Latest task outcome: ${last.outcome}${last.turns !== undefined ? ` in ${last.turns} turns` : ''}${verification}`);
         }
         if (current.constraints.length > 0) {
             lines.push(`- Constraints: ${current.constraints.slice(-8).join(' | ')}`);
@@ -393,6 +485,32 @@ export class MainGoalManager {
 
     private unique(values: string[]): string[] {
         return Array.from(new Set(values.map(value => this.clean(value)).filter(Boolean)));
+    }
+
+    private normalizeTaskEvidence(raw: any): GoalTaskEvidence | null {
+        if (!raw || typeof raw !== 'object' || !raw.taskId) return null;
+        return {
+            taskId: String(raw.taskId),
+            outcome: ['SUCCESS', 'FAILURE', 'PARTIAL', 'CANCELLED'].includes(String(raw.outcome))
+                ? String(raw.outcome)
+                : 'FAILURE',
+            summary: raw.summary ? this.clip(String(raw.summary), 600) : undefined,
+            attempts: Number.isFinite(Number(raw.attempts)) ? Number(raw.attempts) : undefined,
+            turns: Number.isFinite(Number(raw.turns)) ? Number(raw.turns) : undefined,
+            verification: raw.verification ? this.clip(String(raw.verification), 400) : undefined,
+            toolCalls: Number.isFinite(Number(raw.toolCalls)) ? Number(raw.toolCalls) : undefined,
+            completedAt: Number(raw.completedAt) || undefined
+        };
+    }
+
+    private pushTaskEvidence(list: GoalTaskEvidence[], evidence: GoalTaskEvidence): GoalTaskEvidence[] {
+        const existing = list.findIndex((item) => item.taskId === evidence.taskId);
+        if (existing >= 0) {
+            const next = [...list];
+            next[existing] = { ...next[existing], ...evidence };
+            return next.slice(-20);
+        }
+        return [...list, evidence].slice(-20);
     }
 }
 

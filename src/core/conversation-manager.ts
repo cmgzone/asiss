@@ -15,6 +15,7 @@ export interface StoredConversationMessage {
   complete?: boolean;
   pending?: boolean;
   failed?: boolean;
+  stopped?: boolean;
   at: number;
 }
 
@@ -136,7 +137,7 @@ class ConversationManager {
       const text = this.text(raw[field], maxLength);
       if (text) (message as any)[field] = text;
     }
-    for (const field of ['complete', 'pending', 'failed'] as const) {
+    for (const field of ['complete', 'pending', 'failed', 'stopped'] as const) {
       if (typeof raw[field] === 'boolean') message[field] = raw[field] as boolean;
     }
     return message;

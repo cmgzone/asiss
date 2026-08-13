@@ -1,0 +1,15 @@
+{
+  "name": "gitu-desktop",
+  "productName": "Gitu",
+  "version": "1.0.0",
+  "description": "Native desktop client for the Gitu AI assistant — embeds the web UI, auto-starts the backend, adds tray + notifications.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "smoke": "electron . --smoke"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0"
+  }
+}

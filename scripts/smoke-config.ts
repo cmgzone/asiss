@@ -51,6 +51,7 @@ section('clean config passes', () => {
         repository: {
           enabled: true, persistent: true, maxFiles: 8, dataRoot: '/tmp/x',
           goalHints: { enabled: true, maxFiles: 3 },
+          minimal: { enabled: true, maxBytes: 32768, maxFiles: 8 },
           warm: { enabled: true, throttleMs: 2000 },
           telemetry: { enabled: true }
         },
@@ -69,6 +70,9 @@ section('clean config passes', () => {
   assert.strictEqual(result.config.agent?.autoContinue?.maxBatches, 2);
   assert.strictEqual(result.config.agent?.context?.repository?.dataRoot, '/tmp/x');
   assert.strictEqual(result.config.agent?.context?.repository?.goalHints?.maxFiles, 3);
+  assert.strictEqual(result.config.agent?.context?.repository?.minimal?.maxBytes, 32768, 'minimal.maxBytes survives the strict round-trip');
+  assert.strictEqual(result.config.agent?.context?.repository?.minimal?.maxFiles, 8, 'minimal.maxFiles survives the strict round-trip');
+  assert.strictEqual(result.config.agent?.context?.repository?.minimal?.enabled, true, 'minimal.enabled survives the strict round-trip');
   assert.strictEqual(result.config.agent?.context?.repository?.warm?.throttleMs, 2000);
   assert.strictEqual(result.config.checkpoints?.maxPerWorkspace, 100, 'permissive checkpoint key kept');
   assert.deepStrictEqual(result.config.learning, { enabled: true }, 'non-engine section passes through');

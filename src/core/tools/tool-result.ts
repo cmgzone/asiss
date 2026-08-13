@@ -21,6 +21,9 @@ export interface ToolContext {
   config?: any;
   /** Live output sink (shell streaming). */
   stream?: (chunk: string) => void;
+  /** Abort signal for long-running tools (shell commands) so a user stop can
+   * interrupt execution mid-flight instead of waiting for the turn boundary. */
+  signal?: AbortSignal;
   /** PolicyEngine overrides (Phase 5): per-call approval handler. */
   approve?: (verdict: any, ctx: any) => Promise<boolean> | boolean;
   /** Agent permission allow-list; tools outside it are DENIED when provided. */

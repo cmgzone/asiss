@@ -389,6 +389,47 @@ async function main() {
   assert(liveRule, 'approved lesson projects into the unified catalog');
   assert.strictEqual(liveRule!.importance, 4, 'applied lesson ranks importance 4');
 
+  // 8b) Phase 20 Move 6 — GOAL-level retrospective: when the last linked task
+  //     of an auto-completed goal finishes, a review spanning the goal's task
+  //     set is queued and its lesson links to the goal id. A FRESH manager
+  //     over the same data root processes it (the task review already set the
+  //     per-session review rate limit).
+  // A distinct session sidesteps the per-session review rate limit the task
+  // review's tick already set in the shared learning state.
+  const goalLearning = new LearningManager(reviewStub, memory);
+  const goalId = 'goal-retro-1';
+  const goalSession = 's1-goal';
+  const queued = goalLearning.queueGoalReview({
+    goalId,
+    sessionId: goalSession,
+    title: 'Ship the retrieval regression',
+    objective: 'Add retrieval regression coverage and verify it.',
+    status: 'completed',
+    taskOutcomes: [
+      { taskId: 't1', outcome: 'FAILURE', summary: 'First attempt missed the assertion.' },
+      { taskId: lessonTask.id, outcome: 'SUCCESS', summary: 'Regression assertion added.', turns: 3 }
+    ]
+  });
+  assert(queued, 'goal retrospective queued');
+  const goalReview = JSON.parse(fs.readFileSync(path.join(tempDir, 'learning', 'pending_reviews.json'), 'utf-8'))
+    .find((r: any) => r.origin === 'goal' && r.goalId === goalId);
+  assert(goalReview, 'goal review persisted with the goal origin');
+  assert.strictEqual(goalReview.goalTitle, 'Ship the retrieval regression', 'goal review carries the goal title');
+  assert.strictEqual(goalReview.taskOutcomes.length, 2, 'goal review spans the full task set');
+
+  await goalLearning.tick();
+  const goalAction = goalLearning.listPendingLearningActions(goalSession)
+    .find((a: any) => a.entryTitle.includes('Goal retrospective'));
+  assert(goalAction, 'goal review produced a pending lesson');
+  assert.strictEqual(goalAction.goalId, goalId, 'lesson carries the goal id');
+  const goalApproved = goalLearning.approvePendingLearningAction(goalAction.id, goalSession);
+  assert(goalApproved.success, 'goal lesson approved through the existing pipeline');
+  const goalCatalog = createUnifiedMemory({ memory, learning: goalLearning, taskEngine, capture });
+  const goalRuleId = memoryRecordId('learning', goalAction.id);
+  const goalRule = goalCatalog.records({ sessionId: goalSession, types: ['procedural'] }).find(r => r.id === goalRuleId);
+  assert(goalRule, 'goal lesson projects into the unified catalog');
+  assert.strictEqual(goalRule!.metadata?.goalId, goalId, 'unified memory record links to the goal id');
+
   // RESTART: fresh process instances over the SAME data root — no old objects
   // remain alive. Episodes seed from the durable Task store; the lesson
   // reloads from pending_lessons.json; the overlay reloads from disk.

@@ -624,6 +624,10 @@ async function main() {
       assert.strictEqual(withRepo.success, true, 'repo-context delegation succeeds');
       assert.ok(repoModel.lastSystemPrompt?.includes('Repository context:'), 'repo source renders the repository section');
       assert.ok(repoModel.lastSystemPrompt!.includes('src/auth/auth.ts'), 'repo section names the goal-matched file');
+      assert.ok(
+        repoModel.lastSystemPrompt!.includes('Minimal dependency-closed context'),
+        'repo section renders the Phase 18 Move 7b minimal dependency-closed context for the child goal'
+      );
 
       const controlParent = await taskEngine.create({ goal: 'Fix authentication.', kind: 'mission', constraints: { maxTurns: 2 } });
       const withoutRepo = await repoEngine.executeTask({
@@ -636,6 +640,105 @@ async function main() {
       fs.rmSync(repoRoot, { recursive: true, force: true });
       fs.rmSync(repoData, { recursive: true, force: true });
     }
+  }
+
+  // ------------------------------------------------------------ 16. Phase 20 Move 8 — background plan tree merge
+  // The background worker's project/milestone/task tree lands on the child
+  // Task's canonical plan, so /goal and /plan_project goals produce the same
+  // plan artifact the mission loop renders: planStepsForGoal returns the
+  // remaining work in tree order (the goal, its subtasks, then later
+  // milestone goals), executeTask plans the child with those steps (the
+  // goal's own work item IN_PROGRESS, the rest PENDING), and the child
+  // mission renders them with live status.
+  {
+    // Dynamic import AFTER chdir(tempDir): the module constructs its
+    // backgroundWorker singleton at import time, so it must see the temp cwd.
+    const { BackgroundWorker } = await import('../src/core/background-worker');
+    const worker = new BackgroundWorker();
+    const project = worker.planProject({
+      title: 'Tree merge project',
+      description: 'A project with a nested task tree.',
+      sessionId: 'move8-tree-session',
+      milestones: [{
+        title: 'Milestone One',
+        tasks: [
+          {
+            title: 'Task A',
+            description: 'Root work item A',
+            subtasks: [{ title: 'A1', description: 'Sub work A1' }, { title: 'A2', description: 'Sub work A2' }]
+          },
+          { title: 'Task B', description: 'Root work item B' }
+        ]
+      }]
+    });
+    const goals = worker.getProjectGoals(project.project.id);
+    const byTitle = new Map(goals.map(g => [g.title, g]));
+    assert.strictEqual(byTitle.size, 4, 'plan tree creates the goal, 2 subtasks, and a sibling');
+
+    // Depth-first tree order: a goal, its own subtree, then later milestone
+    // goals (addTaskTree records milestone.goalIds in DFS pre-order).
+    const stepsA = worker.planStepsForGoal(byTitle.get('Task A')!.id);
+    assert.deepStrictEqual(
+      stepsA.map(s => s.title),
+      ['Task A', 'A1', 'A2', 'Task B'],
+      'root goal plan: itself, its subtree, then the remaining milestone'
+    );
+    assert.strictEqual(stepsA[0].description, 'Root work item A', 'step carries the goal description');
+    const stepsA1 = worker.planStepsForGoal(byTitle.get('A1')!.id);
+    assert.deepStrictEqual(
+      stepsA1.map(s => s.title),
+      ['A1', 'A2', 'Task B'],
+      'subtask plan: itself, its siblings, then the rest of the milestone'
+    );
+
+    // A standalone goal (no project) is its own single work item.
+    const lone = worker.addGoal({ title: 'Lone goal', description: 'Standalone work', sessionId: 'move8-tree-session' });
+    assert.deepStrictEqual(worker.planStepsForGoal(lone.id).map(s => s.title), ['Lone goal'], 'standalone goal maps to one step');
+
+    // Execute a tree goal through the canonical engine with the derived
+    // steps: the child Task carries the merged plan, the mission renders it
+    // with the goal's work item IN_PROGRESS, and terminal completion finishes
+    // every remaining tree step.
+    const treeModel = new StubModel({
+      toolToCall: 'math_eval',
+      toolArguments: { expression: '2+2' },
+      reportJson: JSON.stringify({
+        taskId: 'c', status: 'completed', summary: 'walked the tree', workDone: ['Tree step'], filesChanged: [], evidence: ['math_eval'], risks: [], nextSteps: []
+      })
+    });
+    models.set('stub-tree', treeModel);
+    agentRegistry.register({
+      name: 'TreeBot', role: 'analyst', description: 'Child agent executing a background tree goal.',
+      capabilities: ['math', 'analysis'], tools: ['math_eval'], modelPolicy: { modelId: 'stub-tree' }
+    });
+    const treeParent = await taskEngine.create({ goal: 'Walk the background tree.', kind: 'mission', constraints: { maxTurns: 2 } });
+    const planSteps = stepsA.map((step, idx) => ({
+      id: step.id,
+      title: step.title,
+      description: step.description,
+      status: idx === 0 ? ('IN_PROGRESS' as const) : ('PENDING' as const)
+    }));
+    const treeExec = await engine.executeTask({
+      agentId: 'TreeBot', task: 'Walk the plan tree goal.', kind: 'background',
+      maxTurns: 2, parentTaskId: treeParent.id, planSteps
+    });
+    assert.strictEqual(treeExec.success, true, 'tree-goal delegation succeeds');
+    const treeChild = taskEngine.get(treeExec.taskId!)!;
+    assert.ok(Array.isArray(treeChild.plan) && treeChild.plan.length === 4, 'child Task carries the merged plan steps');
+    assert.deepStrictEqual(
+      (treeChild.plan || []).map(s => s.title),
+      ['Task A', 'A1', 'A2', 'Task B'],
+      'merged plan preserves the tree order'
+    );
+    assert.ok((treeChild.plan || []).every(s => s.status === 'COMPLETED'), 'terminal completion finishes every tree step');
+    assert.ok(
+      treeModel.lastSystemPrompt?.includes('Mission plan (from the project/milestone plan tree'),
+      'child mission renders the plan artifact'
+    );
+    assert.ok(
+      treeModel.lastSystemPrompt!.includes('1. [IN_PROGRESS] Task A'),
+      'child mission renders live per-step status'
+    );
   }
 
   console.log('\n{"success":true,"turns":' + (child.timing.turns || 0) + ',"childRepoContext":true}');

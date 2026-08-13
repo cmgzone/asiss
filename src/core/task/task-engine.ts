@@ -28,6 +28,7 @@ import {
   TaskInput,
   TaskOutcome,
   TaskPlanStep,
+  TaskPlanStepStatus,
   TaskStatus,
   TaskToolExecutionInput,
   TaskToolKind,
@@ -1009,12 +1010,17 @@ export class TaskEngine {
     // Preserve an outcome already recorded by the executor/verifier.
     const finalOutcome: TaskOutcome = entity.record.outcome || outcome || { status: 'SUCCESS' };
     const completedAt = Date.now();
+    // Phase 20 Move 7 — a completed task's plan is done: every remaining step
+    // becomes COMPLETED (terminal state owns the final plan status).
+    const rawPlan = entity.record.plan;
     const done = new TaskEntity(entity.record)
       .setOutcome(finalOutcome)
       .setProgress(100)
-      .transition('COMPLETED')
-      .record;
-    this.persist(done, { completedAt, durationMs: completedAt - done.timing.createdAt });
+      .transition('COMPLETED');
+    const doneRecord = rawPlan && rawPlan.length > 0
+      ? done.with({ plan: rawPlan.map((s) => (s.status === 'COMPLETED' ? s : { ...s, status: 'COMPLETED' })) }).record
+      : done.record;
+    this.persist(doneRecord, { completedAt, durationMs: completedAt - doneRecord.timing.createdAt });
     await this.emit('TaskCompleted', taskId, { outcome: finalOutcome });
     this.unblockDependents(taskId);
     return this.store.require(taskId);
@@ -1102,6 +1108,10 @@ export class TaskEngine {
     const entity = new TaskEntity(this.require(taskId));
     const updated = this.persist(entity.setProgress(percent, note).record);
     await this.emit('TaskProgress', taskId, { percent: updated.progress, note });
+    // Phase 20 Move 7 — progress records keep the plan live: map the percent
+    // onto equal step slices (monotonic forward), so model-only turns without
+    // tool kinds still advance step status.
+    await this.advancePlanByPercent(taskId, percent);
     return updated;
   }
 
@@ -1136,6 +1146,17 @@ export class TaskEngine {
     const toolExecutions = [...record.toolExecutions];
     toolExecutions[idx] = { ...toolExecutions[idx], kind };
     this.persist(new TaskEntity(record).with({ toolExecutions }).record);
+    // Phase 20 Move 7 — derive live plan-step status from the annotated tool
+    // role: a successful MUTATION starts the first pending step; a successful
+    // VERIFICATION completes the in-progress step and starts the next (a unit
+    // of work verified done). Monotonic forward, idempotent per execution.
+    if (toolExecutions[idx].status === 'COMPLETED') {
+      if (kind === 'mutation') {
+        await this.startFirstPendingStep(taskId);
+      } else if (kind === 'verification') {
+        await this.advancePastInProgressStep(taskId);
+      }
+    }
     return toolExecutions[idx];
   }
 
@@ -1160,6 +1181,85 @@ export class TaskEngine {
     );
     if (passedEvidenceLater) return false;
     return true;
+  }
+
+  // --------------------------------------------------- plan step status
+  // Phase 20 Move 7 — live TaskPlanStep status. The plan is goal-owned data
+  // on the canonical Task; the ENGINE owns the step state machine (PENDING ->
+  // IN_PROGRESS -> COMPLETED) so there is one authority for "where the mission
+  // is in its plan". Automatic advancement is deterministic:
+  //   - a successful MUTATION tool (recordToolKind) -> the first non-terminal
+  //     step becomes IN_PROGRESS (the mission is working on it);
+  //   - a successful VERIFICATION tool -> the step currently IN_PROGRESS
+  //     becomes COMPLETED and the next PENDING step becomes IN_PROGRESS;
+  //   - progress records (recordProgress) map percent onto equal step slices
+  //     as a fallback for turns without tool kinds;
+  //   - task COMPLETED (complete) -> every remaining step becomes COMPLETED.
+  // markPlanStep is the explicit host surface; all paths are monotonic
+  // forward (a COMPLETED step never reverts).
+
+  /** Read the plan with current statuses (undefined when the task has none). */
+  planSteps(taskId: string): TaskPlanStep[] | undefined {
+    return this.store.get(taskId)?.plan;
+  }
+
+  /**
+   * Explicit, validated per-step transition. Allowed: PENDING -> IN_PROGRESS /
+   * COMPLETED, IN_PROGRESS -> COMPLETED. COMPLETED is terminal for a step;
+   * anything else is a no-op (monotonic forward). Returns the updated plan or
+   * undefined when the task has no plan / unknown step id.
+   */
+  async markPlanStep(taskId: string, stepId: string, status: TaskPlanStepStatus): Promise<TaskPlanStep[] | undefined> {
+    const record = this.require(taskId);
+    if (!Array.isArray(record.plan) || record.plan.length === 0) return undefined;
+    const idx = record.plan.findIndex((s) => s.id === stepId);
+    if (idx === -1) return undefined;
+    const step = record.plan[idx];
+    const allowed: Partial<Record<TaskPlanStepStatus, TaskPlanStepStatus[]>> = {
+      PENDING: ['IN_PROGRESS', 'COMPLETED'],
+      IN_PROGRESS: ['COMPLETED'],
+      COMPLETED: [],
+      FAILED: [],
+      SKIPPED: []
+    };
+    if (!(allowed[step.status] || []).includes(status)) return record.plan;
+    const plan = record.plan.map((s, i) => (i === idx ? { ...s, status } : s));
+    this.persist(new TaskEntity(record).with({ plan }).record);
+    return plan;
+  }
+
+  /** Mark the first PENDING step IN_PROGRESS (mutation evidence). */
+  private async startFirstPendingStep(taskId: string): Promise<void> {
+    const record = this.require(taskId);
+    const first = (record.plan || []).find((s) => s.status === 'PENDING');
+    if (first) await this.markPlanStep(taskId, first.id, 'IN_PROGRESS');
+  }
+
+  /** Complete the IN_PROGRESS step and start the next PENDING one (verification evidence). */
+  private async advancePastInProgressStep(taskId: string): Promise<void> {
+    const record = this.require(taskId);
+    const current = (record.plan || []).find((s) => s.status === 'IN_PROGRESS');
+    if (!current) return;
+    await this.markPlanStep(taskId, current.id, 'COMPLETED');
+    const next = (this.require(taskId).plan || []).find((s) => s.status === 'PENDING');
+    if (next) await this.markPlanStep(taskId, next.id, 'IN_PROGRESS');
+  }
+
+  /** Map a progress percent onto equal step slices (monotonic forward fallback). */
+  private async advancePlanByPercent(taskId: string, percent: number): Promise<void> {
+    if (!Number.isFinite(percent)) return;
+    const plan = this.require(taskId).plan || [];
+    if (plan.length === 0) return;
+    const slice = 100 / plan.length;
+    for (let i = 0; i < plan.length; i++) {
+      const step = plan[i];
+      if (step.status === 'COMPLETED') continue;
+      if (percent >= (i + 1) * slice) {
+        await this.markPlanStep(taskId, step.id, 'COMPLETED');
+      } else if (step.status === 'PENDING' && percent >= i * slice) {
+        await this.markPlanStep(taskId, step.id, 'IN_PROGRESS');
+      }
+    }
   }
 
   /**

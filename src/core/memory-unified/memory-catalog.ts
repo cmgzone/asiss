@@ -299,7 +299,10 @@ export function learningProvider(learning: LearningManager): MemoryProvider {
               successCount: action.successCount,
               failureCount: action.failureCount,
               target: action.target,
-              sectionTitle: action.sectionTitle
+              sectionTitle: action.sectionTitle,
+              // Phase 20 Move 6: lessons extracted from a goal retrospective
+              // stay attributable to the goal that produced them.
+              ...(action.goalId ? { goalId: action.goalId } : {})
             }
           }));
         }

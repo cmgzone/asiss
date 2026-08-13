@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<style>
+  html, body { height: 100%; margin: 0; background: #0a0b10; color: #f2f4f8;
+    font-family: 'Segoe UI', system-ui, sans-serif; display: grid; place-items: center; }
+  .box { text-align: center; max-width: 520px; padding: 0 24px; }
+  .logo { width: 56px; height: 56px; margin: 0 auto 18px; border-radius: 16px;
+    background: linear-gradient(135deg, #6d5efc 0%, #a855f7 55%, #ec4899 100%);
+    display: grid; place-items: center; font-size: 26px; color: #fff;
+    box-shadow: 0 0 30px rgba(109,94,252,.45); }
+  h1 { font-size: 18px; margin: 0 0 6px; font-weight: 600; }
+  p { color: #9aa4b6; font-size: 13px; margin: 0; }
+  .spin { width: 18px; height: 18px; margin: 22px auto 0; border: 3px solid rgba(34,211,238,.25);
+    border-top-color: #22d3ee; border-radius: 50%; animation: sp .8s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  .err { color: #ef4444; font-size: 13px; margin-top: 18px; line-height: 1.6;
+    white-space: pre-line; text-align: left; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="logo">&#9670;</div>
+    <h1>Starting Gitu&hellip;</h1>
+    <p id="msg">Waking up the agent</p>
+    <div class="spin" id="spin"></div>
+    <div class="err hidden" id="err"></div>
+  </div>
+  <script>
+    window.gituDesktop.onSplashStatus((text) => {
+      document.getElementById('msg').textContent = text;
+      document.getElementById('err').classList.add('hidden');
+      document.getElementById('spin').classList.remove('hidden');
+    });
+    window.gituDesktop.onSplashError((text) => {
+      document.getElementById('msg').textContent = 'Could not reach the Gitu backend';
+      document.getElementById('err').textContent = text;
+      document.getElementById('err').classList.remove('hidden');
+      document.getElementById('spin').classList.add('hidden');
+    });
+  </script>
+</body>
+</html>

@@ -24,6 +24,8 @@ export interface LearningEntry {
   recommendations?: string;
   sources?: Array<{ title: string; url: string }>;
   createdAt: number;
+  /** Phase 20 Move 6: the goal this entry's lesson is attributable to. */
+  goalId?: string;
 }
 
 export interface PendingLearningAction {
@@ -51,6 +53,8 @@ export interface PendingLearningAction {
   target?: 'USER.md' | 'AGENTS.md';
   sectionTitle?: string;
   lines?: string[];
+  /** Phase 20 Move 6: goal linkage for lessons extracted from a goal review. */
+  goalId?: string;
   goal?: {
     title: string;
     description: string;
@@ -137,12 +141,26 @@ interface ReviewTask {
   userText: string;
   assistantText: string;
   createdAt: number;
-  /** Move 5: when set, this review came from a terminal canonical Task
-   *  outcome (TaskLessonBridge) rather than an interactive exchange. */
-  origin?: 'task';
+  /** Move 5 + Phase 20 Move 6: 'task' reviews come from a terminal canonical
+   *  Task outcome (TaskLessonBridge); 'goal' reviews are goal-level
+   *  retrospectives spanning a completed goal's task set (queueGoalReview). */
+  origin?: 'task' | 'goal';
   taskId?: string;
   taskKind?: string;
   taskStatus?: string;
+  /** Phase 20 Move 4 (G4): the goal the task served (task.metadata.goalId). */
+  goalId?: string;
+  /** Phase 20 Move 6: a GOAL-level retrospective (origin 'goal') spans the
+   *  completed goal's task set — title/objective + per-task outcome lines. */
+  goalTitle?: string;
+  objective?: string;
+  taskOutcomes?: Array<{
+    taskId: string;
+    outcome: string;
+    summary?: string;
+    verification?: string;
+    turns?: number;
+  }>;
 }
 
 interface AutoTopic {
@@ -280,6 +298,8 @@ export class LearningManager {
     status?: string;
     goal: string;
     summary: string;
+    /** Phase 20 Move 4: the goal the task served, for goal-attributable lessons. */
+    goalId?: string;
   }): boolean {
     this.refreshConfig();
     if (!this.config.enabled || !this.config.selfReview.enabled) return false;
@@ -291,7 +311,58 @@ export class LearningManager {
       origin: 'task',
       taskId: task.taskId,
       taskKind: task.kind,
-      taskStatus: task.status
+      taskStatus: task.status,
+      goalId: task.goalId
+    });
+    if (this.pendingReviews.length > 20) {
+      this.pendingReviews = this.pendingReviews.slice(-20);
+    }
+    this.savePendingReviews();
+    return true;
+  }
+
+  /**
+   * Phase 20 Move 6 — queue a GOAL-level retrospective. Called when the LAST
+   * linked task of an auto-completed goal finishes (the autonomous loop's
+   * Complete stage): the review spans the goal's task set (every linked task
+   * outcome, not just the final one) and the extracted lesson links to the
+   * goal id — the loop's Learn stage is attributable to the Goal that
+   * produced it. Same approval pipeline + config gate as queueTaskReview.
+   */
+  queueGoalReview(goal: {
+    goalId: string;
+    sessionId?: string;
+    title: string;
+    objective?: string;
+    status?: string;
+    taskOutcomes?: Array<{
+      taskId: string;
+      outcome: string;
+      summary?: string;
+      verification?: string;
+      turns?: number;
+    }>;
+  }): boolean {
+    this.refreshConfig();
+    if (!this.config.enabled || !this.config.selfReview.enabled) return false;
+    const outcomes = Array.isArray(goal.taskOutcomes) ? goal.taskOutcomes : [];
+    const contextLines = [
+      `Goal: ${goal.title}`,
+      goal.objective ? `Objective: ${goal.objective}` : '',
+      `Status: ${goal.status || 'completed'}`,
+      `Linked tasks: ${outcomes.length}`,
+      ...outcomes.map((o) => `- ${o.outcome} ${o.taskId}${o.turns !== undefined ? ` (${o.turns} turns)` : ''}${o.verification ? `: ${o.verification}` : ''}${o.summary ? ` — ${String(o.summary).slice(0, 160)}` : ''}`)
+    ].filter(Boolean).join('\n');
+    this.pendingReviews.push({
+      sessionId: goal.sessionId || 'default',
+      userText: contextLines,
+      assistantText: contextLines,
+      createdAt: Date.now(),
+      origin: 'goal',
+      goalId: goal.goalId,
+      goalTitle: goal.title,
+      objective: goal.objective,
+      taskOutcomes: outcomes
     });
     if (this.pendingReviews.length > 20) {
       this.pendingReviews = this.pendingReviews.slice(-20);
@@ -563,11 +634,30 @@ export class LearningManager {
     try {
       const parsed = JSON.parse(fs.readFileSync(this.reviewsPath, 'utf-8'));
       this.pendingReviews = Array.isArray(parsed)
-        ? parsed.filter(item => item && typeof item === 'object').map(item => ({
+        ? parsed.filter(item => item && typeof item === 'object').map((item): ReviewTask => ({
             sessionId: String(item.sessionId || ''),
             userText: this.redactSecrets(String(item.userText || '')),
             assistantText: this.redactSecrets(String(item.assistantText || '')),
-            createdAt: Number(item.createdAt) || Date.now()
+            createdAt: Number(item.createdAt) || Date.now(),
+            // Phase 20 Move 4 (G4): round-trip the task-review provenance
+            // (previously dropped on restart) so a queued lesson keeps its
+            // task/goal attribution.
+            origin: item.origin === 'task' || item.origin === 'goal' ? item.origin : undefined,
+            taskId: item.taskId ? String(item.taskId) : undefined,
+            taskKind: item.taskKind ? String(item.taskKind) : undefined,
+            taskStatus: item.taskStatus ? String(item.taskStatus) : undefined,
+            goalId: item.goalId ? String(item.goalId) : undefined,
+            goalTitle: item.goalTitle ? String(item.goalTitle) : undefined,
+            objective: item.objective ? String(item.objective) : undefined,
+            taskOutcomes: Array.isArray(item.taskOutcomes)
+              ? item.taskOutcomes.map((o: any) => ({
+                  taskId: String(o?.taskId || ''),
+                  outcome: String(o?.outcome || '?'),
+                  summary: o?.summary ? String(o.summary) : undefined,
+                  verification: o?.verification ? String(o.verification) : undefined,
+                  turns: Number.isFinite(Number(o?.turns)) ? Number(o.turns) : undefined
+                })).filter((o: any) => o.taskId)
+              : undefined
           })).filter(item => item.sessionId && item.userText && item.assistantText).slice(-20)
         : [];
     } catch {
@@ -947,16 +1037,24 @@ export class LearningManager {
       ].join(' ');
 
       // Move 5: task-outcome reviews prompt over the canonical Task instead
-      // of an interactive user/assistant exchange.
+      // of an interactive user/assistant exchange. Phase 20 Move 6: a
+      // GOAL-level retrospective (origin 'goal') prompts over the completed
+      // goal's task set — every linked task outcome — and links the extracted
+      // lesson to the goal id.
       const isTaskReview = task.origin === 'task';
+      const isGoalReview = task.origin === 'goal';
       const contextBlock = isTaskReview
-        ? `Task goal: ${task.userText}\nTask status: ${task.taskStatus || '?'}\n\nOutcome:\n${task.assistantText}`
-        : `User: ${task.userText}\n\nAssistant: ${task.assistantText}`;
+        ? `Task goal: ${task.userText}\nTask status: ${task.taskStatus || '?'}${task.goalId ? `\nGoal id: ${task.goalId}` : ''}\n\nOutcome:\n${task.assistantText}`
+        : isGoalReview
+          ? `Goal retrospective (${task.goalId || 'no id'}):\n\n${task.userText}`
+          : `User: ${task.userText}\n\nAssistant: ${task.assistantText}`;
 
       const prompt = [
         isTaskReview
           ? 'Review this completed task outcome and extract improvements.'
-          : 'Review the assistant response and extract improvements.',
+          : isGoalReview
+            ? 'Review this completed goal and its full task set; extract lessons for the next goal.'
+            : 'Review the assistant response and extract improvements.',
         `Learning mode: ${profile.mode}.`,
         `Return at most ${profile.reviewMaxImprovements} improvements.`,
         'Return JSON: {"issueSummary":"","improvements":["..."],"lesson":""}',
@@ -994,10 +1092,13 @@ export class LearningManager {
         sessionId: task.sessionId,
         title: isTaskReview
           ? `Task self-review: ${task.taskKind || 'task'} ${task.taskStatus || ''}`.trim()
-          : 'Self-review feedback',
+          : isGoalReview
+            ? `Goal retrospective: ${(task.goalTitle || 'completed goal').slice(0, 80)}`
+            : 'Self-review feedback',
         summary,
         improvements: improvementsText,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        goalId: task.goalId
       });
 
       this.state.lastReviewAt[task.sessionId] = Date.now();
@@ -1261,6 +1362,7 @@ export class LearningManager {
         entryTitle: entry.title,
         summary: entry.summary,
         action: line,
+        goalId: entry.goalId,
         goal
       });
       if (!this.approvalsEnabled()) this.approvePendingLearningAction(pending.id, entry.sessionId);
@@ -1305,7 +1407,8 @@ export class LearningManager {
           sourceType: entry.type,
           action,
           summary: entry.summary,
-          ordinal: index
+          ordinal: index,
+          ...(entry.goalId ? { goalId: entry.goalId } : {})
         }
       });
     });
@@ -1449,6 +1552,7 @@ export class LearningManager {
       entryTitle: entry.title,
       summary: entry.summary,
       action: selected.join('\n'),
+      goalId: entry.goalId,
       target,
       sectionTitle,
       lines: selected

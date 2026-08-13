@@ -24,7 +24,7 @@ export class ShellSkill implements Skill {
   };
 
   async execute(params: any): Promise<any> {
-    const { command: requestedCommand, __sessionId, __stream, __workspacePath } = params;
+    const { command: requestedCommand, __sessionId, __stream, __workspacePath, __signal: signalRef } = params;
 
     if (!requestedCommand) {
       return { error: 'Command is required' };
@@ -75,11 +75,14 @@ export class ShellSkill implements Skill {
       streamFn(`${header}\n`);
 
       return await new Promise((resolve) => {
+        // signalRef lets a user stop kill a long-running command mid-flight:
+        // Node terminates the child (SIGTERM -> SIGKILL) when the signal aborts.
         const child = spawn(plan.executable, plan.args, {
           cwd: plan.cwd,
           env: plan.env,
           shell: false,
-          windowsHide: true
+          windowsHide: true,
+          signal: signalRef
         });
         let stdout = '';
         let stderr = '';
@@ -116,6 +119,22 @@ export class ShellSkill implements Skill {
         });
 
         child.on('error', (err: any) => {
+          // On abort Node emits 'error' (AbortError) instead of 'close' for a
+          // signal-interrupted child — report it as an interrupt, not a failure.
+          if (signalRef?.aborted) {
+            finalize({
+              interrupted: true,
+              error: 'Command interrupted by user stop.',
+              stdout: stdout.trim(),
+              stderr: stderr.trim(),
+              exitCode: null,
+              cwd: plan.displayCwd,
+              backend: plan.backend,
+              elevated: elevatedManager.getLevel(sessionId),
+              streamed: true
+            }, true);
+            return;
+          }
           const message = err?.message || String(err);
           if (message) {
             streamFn(`\n# error\n${message}\n`);
@@ -132,7 +151,22 @@ export class ShellSkill implements Skill {
           }, false);
         });
 
-        child.on('close', (code) => {
+        child.on('close', (code, closeSignal) => {
+          const interrupted = signalRef?.aborted || Boolean(closeSignal);
+          if (interrupted) {
+            finalize({
+              interrupted: true,
+              error: 'Command interrupted by user stop.',
+              stdout: stdout.trim(),
+              stderr: stderr.trim(),
+              exitCode: typeof code === 'number' ? code : null,
+              cwd: plan.displayCwd,
+              backend: plan.backend,
+              elevated: elevatedManager.getLevel(sessionId),
+              streamed: true
+            }, true);
+            return;
+          }
           const exitCode = typeof code === 'number' ? code : 0;
           const payload: any = {
             stdout: stdout.trim(),
@@ -156,7 +190,8 @@ export class ShellSkill implements Skill {
         cwd: plan.cwd,
         env: plan.env,
         windowsHide: true,
-        maxBuffer: 20 * 1024 * 1024
+        maxBuffer: 20 * 1024 * 1024,
+        signal: signalRef
       } as any);
 
       return {
@@ -169,6 +204,19 @@ export class ShellSkill implements Skill {
         streamed: false
       };
     } catch (error: any) {
+      if (signalRef?.aborted) {
+        return {
+          interrupted: true,
+          error: 'Command interrupted by user stop.',
+          stdout: String(error?.stdout || '').trim(),
+          stderr: String(error?.stderr || '').trim(),
+          exitCode: null,
+          cwd: plan.displayCwd,
+          backend: plan.backend,
+          elevated: elevatedManager.getLevel(sessionId),
+          streamed: false
+        };
+      }
       return {
         error: error.message,
         stdout: error.stdout?.trim(),

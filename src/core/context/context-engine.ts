@@ -24,8 +24,25 @@
 
 import { TaskEventBus, taskEventBus } from '../task/task-events';
 import { analyzeChangeImpact, ChangeImpact, ChangeImpactOptions, emptyChangeImpact } from './change-impact';
+import {
+  findCallers,
+  findCallees,
+  findImplementations,
+  symbolIntelligenceEvidence as measureSymbolIntelligence,
+  SymbolCallee,
+  SymbolIntelligenceEvidence,
+  SymbolReference,
+  SymbolUsageOptions
+} from './symbols';
+import {
+  ArchitectureProfile,
+  ArchitectureRenderOptions,
+  discoverArchitecture,
+  renderArchitectureProfile
+} from './architecture';
 import { buildContextPackage, ContextMemory, ContextPackage, ContextSourceInput, ContextTool } from './context-builder';
 import { estimateTokens, truncateChars } from './context-budget';
+import { emptyMinimalContext, MinimalContext, MinimalContextOptions, renderMinimalContext, selectMinimalContext } from './minimal-context';
 import { Summarizer } from './summarizer';
 import { selectRelevant } from './relevance';
 import {
@@ -54,7 +71,7 @@ export interface ContextEngineConfig {
   /** Token budget for the assembled context. Default 32000. */
   maxTokens?: number;
   /** Repository context: surfaced when enabled and a workspace exists. */
-  repository?: { enabled?: boolean; persistent?: boolean; maxFiles?: number; maxDepth?: number; maxListed?: number; dataRoot?: string; goalHints?: { enabled?: boolean; maxFiles?: number }; warm?: { enabled?: boolean; throttleMs?: number }; telemetry?: { enabled?: boolean } };
+  repository?: { enabled?: boolean; persistent?: boolean; maxFiles?: number; maxDepth?: number; maxListed?: number; dataRoot?: string; goalHints?: { enabled?: boolean; maxFiles?: number }; minimal?: { enabled?: boolean; maxBytes?: number; maxFiles?: number }; warm?: { enabled?: boolean; throttleMs?: number }; telemetry?: { enabled?: boolean } };
   /** Summarize long sections via an injectable model. */
   summarize?: { enabled?: boolean; maxChars?: number };
   /** Cap history render truncation (chars per memory). Default 20000. */
@@ -347,7 +364,12 @@ export class ContextEngine {
   /**
    * Rendered repository context block for a workspace + goal. When goal hints
    * are enabled (the default once the repository section is on), the plain
-   * path-matched file list is replaced by the per-goal symbol-aware hint.
+   * path-matched file list is replaced — for PERSISTENT indexes by the Phase
+   * 18 Move 7b minimal dependency-closed context (the smallest budgeted
+   * closure: seeds → imported/importing modules → tests), falling back to the
+   * per-goal symbol-aware hint for lightweight indexes, no matches, or when
+   * the `minimal.enabled === false` opt-out is set. `goalHints.maxFiles`
+   * seeds the context; `minimal.maxBytes` / `minimal.maxFiles` cap it.
    */
   repositorySection(root: string, goal: string): string {
     const index = this.indexRepository(root);
@@ -357,10 +379,31 @@ export class ContextEngine {
       return renderRepositoryContext(index, goal, { maxListed: cfg.maxListed ?? 40 });
     }
     const staticText = renderRepositoryContext(index, goal, { relevantFiles: [], maxListed: cfg.maxListed ?? 40 });
-    const hints = this.goalFilesSection(root, goal);
-    return hints ? `${staticText}
+    const hints =
+      isPersistentIndex(index) && cfg.minimal?.enabled !== false
+        ? this.minimalContextSection(root, goal, this.minimalContextOptions(cfg))
+        : this.goalFilesSection(root, goal);
+    return hints ? `${staticText}\n\n${hints}` : staticText;
+  }
 
-${hints}` : staticText;
+  /** Map the repository config onto the minimal-context selector options. */
+  private minimalContextOptions(cfg: NonNullable<ContextEngineConfig['repository']>): MinimalContextOptions {
+    return {
+      seedLimit: cfg.goalHints?.maxFiles ?? 6,
+      maxBytes: cfg.minimal?.maxBytes,
+      maxFiles: cfg.minimal?.maxFiles
+    };
+  }
+
+  /**
+   * Phase 18 Move 7b — the rendered minimal dependency-closed context for a
+   * goal: seeds, imported/importing modules, and related tests under the
+   * byte/file budget, with the closure status. Persistent indexes only;
+   * '' when the index is lightweight or nothing matches (callers fall back
+   * to the plain goal-file hints).
+   */
+  minimalContextSection(root: string, goal: string, options: MinimalContextOptions = {}): string {
+    return renderMinimalContext(this.minimalContext(root, goal, options));
   }
 
   /**
@@ -407,6 +450,85 @@ ${hints}` : staticText;
     const index = this.indexRepository(root);
     if (!index || !isPersistentIndex(index)) return emptyChangeImpact(target);
     return analyzeChangeImpact(index, target, options);
+  }
+
+  /**
+   * Phase 18 Move 5 — convention-based architecture discovery for a
+   * workspace: entry points, services/APIs, workers/queues, databases,
+   * test infrastructure, integrations, and config surfaces — classified
+   * from the persistent index (paths, isTest/isConfig, exported symbols).
+   * Undefined for lightweight indexes.
+   */
+  architecture(root: string): ArchitectureProfile | undefined {
+    const index = this.indexRepository(root);
+    if (!index || !isPersistentIndex(index)) return undefined;
+    return discoverArchitecture(index);
+  }
+
+  /** Rendered architecture overview for a workspace ('' when no index). */
+  architectureSection(root: string, options: ArchitectureRenderOptions = {}): string {
+    const profile = this.architecture(root);
+    return profile ? renderArchitectureProfile(profile, options) : '';
+  }
+
+  /**
+   * Phase 18 Move 7b — the minimal dependency-closed context for a goal:
+   * goal → symbols (seeds) → importing/imported modules (both directions of
+   * the dependency closure) → related tests, bounded by a byte budget +
+   * file cap with smallest-first admission. `closed` is true only when the
+   * budget let the closure finish; bare packages are reported as external
+   * leaves. Empty for lightweight indexes.
+   */
+  minimalContext(root: string, goal: string, options: MinimalContextOptions = {}): MinimalContext {
+    const index = this.indexRepository(root);
+    if (!index || !isPersistentIndex(index)) return emptyMinimalContext(goal);
+    return selectMinimalContext(index, goal, options);
+  }
+
+  /**
+   * Phase 18 Move 6 — files that call/reference a symbol (external callers,
+   * excluding files that define it). The persisted `symbolReferences` map
+   * (bounded word-boundary identifier references). Empty for lightweight
+   * indexes or unknown symbols.
+   */
+  callersOf(root: string, symbol: string, options: SymbolUsageOptions = {}): SymbolReference[] {
+    const index = this.indexRepository(root);
+    if (!index || !isPersistentIndex(index)) return [];
+    return findCallers(index, symbol, options);
+  }
+
+  /**
+   * Phase 18 Move 6 — symbols a file references that are defined elsewhere
+   * (its callees). Each entry carries the defining files. Empty for
+   * lightweight indexes or unknown files.
+   */
+  calleesOf(root: string, filePath: string, options: SymbolUsageOptions = {}): SymbolCallee[] {
+    const index = this.indexRepository(root);
+    if (!index || !isPersistentIndex(index)) return [];
+    return findCallees(index, filePath, options);
+  }
+
+  /**
+   * Phase 18 Move 6 — files that implement or extend a symbol
+   * (`implements X` / `extends Y`), repo-defined symbols only. Empty for
+   * lightweight indexes or unknown symbols.
+   */
+  implementationsOf(root: string, symbol: string, options: SymbolUsageOptions = {}): SymbolReference[] {
+    const index = this.indexRepository(root);
+    if (!index || !isPersistentIndex(index)) return [];
+    return findImplementations(index, symbol, options);
+  }
+
+  /**
+   * Phase 18 Move 6 — the evidence pass that decided parser vs
+   * usage-reference map for this workspace (per-family density, dominance,
+   * parser availability, and the decision + rationale). Undefined for
+   * lightweight indexes.
+   */
+  symbolIntelligenceEvidence(root: string): SymbolIntelligenceEvidence | undefined {
+    const index = this.indexRepository(root);
+    if (!index || !isPersistentIndex(index)) return undefined;
+    return measureSymbolIntelligence(index);
   }
 
   /** Relevant files for the goal: symbol-aware when the index is persistent. */

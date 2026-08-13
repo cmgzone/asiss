@@ -146,6 +146,7 @@ export type TaskVerificationKind =
   | 'build'
   | 'runtime'
   | 'security'
+  | 'criteria'
   | 'custom';
 
 export type TaskVerificationStatus = 'RUNNING' | 'PASSED' | 'FAILED' | 'SKIPPED';

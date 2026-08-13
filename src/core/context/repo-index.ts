@@ -12,6 +12,15 @@
  * The extraction is deliberately dependency-free, regex-based and tolerant:
  * it is a scoring signal for context selection, not a compiler. It never
  * throws on unreadable or huge files (they just carry no symbols).
+ *
+ * Phase 18 Move 6 (deeper symbol intelligence) extends the same discipline:
+ * each file carries a bounded `identifiers` list (the usage-reference signal)
+ * and its `implementedSymbols`; finalize derives the index-level
+ * `symbolReferences` (symbol -> files that reference it) and `implementations`
+ * (symbol -> files that implement/extends it) maps. The evidence-based
+ * decision between a real parser and this usage-reference map is documented
+ * in symbols.ts — the map won because it covers every language family with
+ * zero new dependencies and stays incremental-refresh compatible.
  */
 
 import crypto from 'crypto';
@@ -43,6 +52,10 @@ export interface IndexedFileDetail extends IndexedFile {
   imports: string[];
   /** Named things pulled in (defaults + named imports) — matching signal. */
   importedNames: string[];
+  /** Distinct identifiers in content (bounded) — the Phase 18 Move 6 usage-reference signal. */
+  identifiers: string[];
+  /** Symbols this file implements/extends (implements X / extends Y, bounded). */
+  implementedSymbols: string[];
   isTest: boolean;
   isConfig: boolean;
   /** File mtime, used for incremental refresh. */
@@ -56,6 +69,10 @@ export interface PersistentRepositoryIndex extends RepositoryIndex {
   exportedSymbols: Record<string, string[]>;
   /** Module specifier -> file paths that import it. */
   importers: Record<string, string[]>;
+  /** Symbol name -> file paths that reference it (external, excluding definers). */
+  symbolReferences: Record<string, string[]>;
+  /** Symbol name -> file paths that implement/extends it (repo-defined symbols only). */
+  implementations: Record<string, string[]>;
 }
 
 export interface PersistentIndexOptions extends RepositoryContextOptions {
@@ -72,6 +89,24 @@ const PY_FAMILY = new Set(['.py', '.pyw']);
 const GO_FAMILY = new Set(['.go']);
 const RS_FAMILY = new Set(['.rs']);
 const JVM_DOTNET = new Set(['.java', '.kt', '.kts', '.cs', '.scala']);
+
+/** The language family an extension belongs to (evidence / grouping). */
+export function symbolFamily(extension: string): string {
+  if (TS_FAMILY.has(extension)) return 'typescript';
+  if (PY_FAMILY.has(extension)) return 'python';
+  if (GO_FAMILY.has(extension)) return 'go';
+  if (RS_FAMILY.has(extension)) return 'rust';
+  if (JVM_DOTNET.has(extension)) return 'jvm-dotnet';
+  return 'other';
+}
+
+/**
+ * Persistent index format version. Bumped when the derived shape changes
+ * (Phase 18 Move 6 added identifiers/implementedSymbols per file and the
+ * symbolReferences/implementations maps) — old persisted indexes fail the
+ * load check and are rebuilt once, the index's existing invalidation path.
+ */
+const INDEX_VERSION = 2;
 
 function lineOf(content: string, index: number): number {
   let line = 1;
@@ -144,6 +179,67 @@ export function extractSymbols(content: string, extension: string): SymbolRef[] 
   }
   // Generic fallback: any language using fn/func/def/function.
   return collectMatches(content, [/\b(?:fn|func|def|function)\s+([A-Za-z_]\w*)/], 'function');
+}
+
+/** ------------------------------------------------------------------ */
+/* Usage-reference signals — Phase 18 Move 6.                           */
+/** ------------------------------------------------------------------ */
+
+const MAX_IDENTIFIERS_PER_FILE = 512;
+const MAX_IMPLEMENTED_PER_FILE = 16;
+
+/**
+ * True when `key` is a DIRECT own property of a plain-object record map.
+ * The maps use `{}` so inherited Object.prototype members (constructor,
+ * toString, hasOwnProperty, ...) are reachable via plain `map[key]` — a
+ * repo can legitimately mention such identifiers, so membership checks
+ * must not treat inherited members as real entries. Exposed for the query
+ * layer (symbols.ts) to use the same guard.
+ */
+export function hasOwnKey(map: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(map, key);
+}
+
+/** Distinct word-boundary identifiers in content (bounded, deduped). */
+export function collectIdentifiers(content: string): string[] {
+  if (!content) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const re = /[A-Za-z_$][\w$]*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    if (seen.has(m[0])) continue;
+    seen.add(m[0]);
+    out.push(m[0]);
+    if (out.length >= MAX_IDENTIFIERS_PER_FILE) break;
+  }
+  return out;
+}
+
+/**
+ * Symbols a file implements/extends (`implements X` / `extends Y`), for the
+ * TS and JVM/.NET families where the syntax is meaningful. Bounded and
+ * tolerant like the rest of the extraction (generic constraints like
+ * `extends string` are captured and filtered later by the index's own
+ * exportedSymbols keys).
+ */
+export function extractImplemented(content: string, extension: string): string[] {
+  if (!content) return [];
+  if (!TS_FAMILY.has(extension) && !JVM_DOTNET.has(extension)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const re = /\b(?:implements|extends)\s+([A-Za-z_$][\w$]*(?:\s*,\s*[A-Za-z_$][\w$]*)*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    for (const name of m[1].split(',')) {
+      const n = name.trim();
+      if (!n || seen.has(n)) continue;
+      seen.add(n);
+      out.push(n);
+      if (out.length >= MAX_IMPLEMENTED_PER_FILE) return out;
+    }
+  }
+  return out;
 }
 
 /** Extract imported module specifiers (module graph) + imported names. */
@@ -272,12 +368,61 @@ function detailOf(file: IndexedFile, root: string, maxFileBytes: number): Indexe
   return {
     ...file,
     symbols: extractSymbols(content, file.extension),
+    identifiers: collectIdentifiers(content),
+    implementedSymbols: extractImplemented(content, file.extension),
     imports,
     importedNames,
     isTest: isTestFile(file.path, content),
     isConfig: isConfigFile(file.path),
     mtimeMs
   };
+}
+
+/**
+ * External usage-reference map — Phase 18 Move 6. Symbol -> files that
+ * reference it (word-boundary identifier occurrences in OTHER files,
+ * excluding files that define it), intersected with the index's own
+ * exportedSymbols keys so only repo-defined symbols count (external
+ * packages never pollute the map). Derived from each file's bounded
+ * `identifiers` list, so incremental refresh reuses unchanged files' data
+ * wholesale — same semantics as the importers graph.
+ */
+export function buildSymbolReferences(
+  files: IndexedFileDetail[],
+  exportedSymbols: Record<string, string[]>
+): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const file of files) {
+    if (!file.identifiers || file.identifiers.length === 0) continue;
+    const own = new Set(file.symbols.map((s) => s.name));
+    for (const id of file.identifiers) {
+      if (own.has(id) || !hasOwnKey(exportedSymbols, id)) continue;
+      const list = hasOwnKey(out, id) ? out[id] : (out[id] = []);
+      if (!list.includes(file.path)) list.push(file.path);
+    }
+  }
+  return out;
+}
+
+/**
+ * Implementation map — Phase 18 Move 6. Symbol -> files that implement or
+ * extend it (`implements X` / `extends Y`), kept only for symbols the repo
+ * itself defines (external bases like React.Component are filtered).
+ */
+export function buildImplementations(
+  files: IndexedFileDetail[],
+  exportedSymbols: Record<string, string[]>
+): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const file of files) {
+    if (!file.implementedSymbols || file.implementedSymbols.length === 0) continue;
+    for (const name of file.implementedSymbols) {
+      if (!hasOwnKey(exportedSymbols, name)) continue;
+      const list = hasOwnKey(out, name) ? out[name] : (out[name] = []);
+      if (!list.includes(file.path)) list.push(file.path);
+    }
+  }
+  return out;
 }
 
 function finalize(root: string, files: IndexedFileDetail[], indexedAt: number, version: number): PersistentRepositoryIndex {
@@ -289,11 +434,11 @@ function finalize(root: string, files: IndexedFileDetail[], indexedAt: number, v
     languages[file.extension] = (languages[file.extension] || 0) + 1;
     totalBytes += file.size;
     for (const sym of file.symbols) {
-      const list = exportedSymbols[sym.name] || (exportedSymbols[sym.name] = []);
+      const list = hasOwnKey(exportedSymbols, sym.name) ? exportedSymbols[sym.name] : (exportedSymbols[sym.name] = []);
       if (!list.includes(file.path)) list.push(file.path);
     }
     for (const imp of file.imports) {
-      const list = importers[imp] || (importers[imp] = []);
+      const list = hasOwnKey(importers, imp) ? importers[imp] : (importers[imp] = []);
       if (!list.includes(file.path)) list.push(file.path);
     }
   }
@@ -306,7 +451,9 @@ function finalize(root: string, files: IndexedFileDetail[], indexedAt: number, v
     indexedAt,
     version,
     exportedSymbols,
-    importers
+    importers,
+    symbolReferences: buildSymbolReferences(files, exportedSymbols),
+    implementations: buildImplementations(files, exportedSymbols)
   };
 }
 
@@ -315,7 +462,7 @@ export function buildPersistentIndex(root: string, options: PersistentIndexOptio
   const base = indexWorkspace(root, options);
   const maxBytes = options.maxFileBytes ?? 512 * 1024;
   const files = base.files.map((f) => detailOf(f, root, maxBytes));
-  return finalize(root, files, Date.now(), 1);
+  return finalize(root, files, Date.now(), INDEX_VERSION);
 }
 
 /** Re-parse only files whose mtime/size changed; drop files that vanished. */
@@ -374,7 +521,7 @@ export function loadRepositoryIndex(root: string, dataRoot?: string): Persistent
   try {
     if (!fs.existsSync(filePath)) return undefined;
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as PersistentRepositoryIndex;
-    if (parsed.version !== 1 || !Array.isArray(parsed.files) || parsed.root !== root) return undefined;
+    if (parsed.version !== INDEX_VERSION || !Array.isArray(parsed.files) || parsed.root !== root) return undefined;
     return parsed;
   } catch {
     return undefined;
@@ -456,19 +603,25 @@ function isPersistent(index: RepositoryIndex): index is PersistentRepositoryInde
 }
 
 /**
- * True when a file has real goal signal beyond the index's depth bonus —
- * a path/symbol/import stem hit. Prevents hint noise for unrelated goals.
+ * True when a single file carries real goal signal beyond the index's
+ * depth bonus — a path/symbol/imported-name/import stem hit. Shared by the
+ * hint renderer (whole-index) and the Move 7b minimal-context selector
+ * (per-seed), so depth-bonus-only noise never enters either.
  */
-function hasGoalSignal(index: PersistentRepositoryIndex, goal: string): boolean {
+export function hasGoalSignalForFile(file: IndexedFileDetail, goal: string): boolean {
   const tokens = significantTokens(goal);
   if (tokens.length === 0) return false;
-  return index.files.some(
-    (file) =>
-      stemOverlap(goal, file.path) > 0 ||
-      file.symbols.some((s) => stemOverlap(goal, s.name) > 0) ||
-      file.importedNames.some((n) => stemOverlap(goal, n) > 0) ||
-      file.imports.some((i) => stemOverlap(goal, i) > 0)
+  return (
+    stemOverlap(goal, file.path) > 0 ||
+    file.symbols.some((s) => stemOverlap(goal, s.name) > 0) ||
+    file.importedNames.some((n) => stemOverlap(goal, n) > 0) ||
+    file.imports.some((i) => stemOverlap(goal, i) > 0)
   );
+}
+
+/** True when any file in the index carries real goal signal. */
+function hasGoalSignal(index: PersistentRepositoryIndex, goal: string): boolean {
+  return index.files.some((file) => hasGoalSignalForFile(file, goal));
 }
 
 /**
@@ -557,7 +710,7 @@ export interface Dependent {
 }
 
 /** Strip extension and /index suffix -> comparable normalized path. */
-function normPath(relPath: string): string {
+export function normPath(relPath: string): string {
   return relPath.replace(/\.[^.\\/]+$/, '').replace(/\/index$/, '');
 }
 
@@ -567,7 +720,7 @@ function normPath(relPath: string): string {
  * collapsed). Bare specifiers (packages/aliases) return null — they are
  * matched tolerantly by `bareMatches` instead.
  */
-function resolveSpecifier(importingPath: string, specifier: string): string | null {
+export function resolveImportTarget(importingPath: string, specifier: string): string | null {
   if (!specifier.startsWith('./') && !specifier.startsWith('../')) return null;
   const dir = path.posix.dirname(importingPath);
   const joined = path.posix.normalize(path.posix.join(dir, specifier));
@@ -601,7 +754,7 @@ export function findDependents(
   for (const [specifier, importingPaths] of Object.entries(index.importers)) {
     for (const importingPath of importingPaths) {
       if (direct.has(importingPath)) continue;
-      const resolved = resolveSpecifier(importingPath, specifier);
+      const resolved = resolveImportTarget(importingPath, specifier);
       const matches = resolved
         ? resolved === targetNorm || resolved === `${targetNorm}/index`
         : bareMatches(specifier, target);
@@ -644,7 +797,7 @@ export function resolveSymbols(index: PersistentRepositoryIndex, goal: string, l
   const lowerKeys = new Map<string, string[]>();
   const out: SymbolResolution[] = [];
   for (const name of goalSymbols(goal)) {
-    const direct = index.exportedSymbols[name];
+    const direct = hasOwnKey(index.exportedSymbols, name) ? index.exportedSymbols[name] : undefined;
     let keys = direct ? [name] : lowerKeys.get(name.toLowerCase());
     if (!direct && !keys) {
       keys = [];

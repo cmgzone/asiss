@@ -62,7 +62,7 @@ export class DiscordChannel implements ChannelAdapter {
         // userId in our system maps to the user ID, but to reply we usually need the channel ID.
         // For DMs, we can fetch the user and send.
         // For Guild channels, we'd need to track the channelId in the session context.
-        // simplified approach: try to find a user and DM, OR if we have context (TODO) reply to channel.
+        // simplified approach: try to find a user and DM; replying to a guild channel instead of a DM is not handled (would need the channelId from session context).
         // For now, let's assume userId is the User ID and we send a DM.
         const user = await this.client.users.fetch(userId);
         if (user) {

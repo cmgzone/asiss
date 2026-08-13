@@ -22,7 +22,7 @@ export interface MediaPayload {
   filename?: string;
 }
 
-export type StreamEventType = 'assistant_start' | 'assistant_delta' | 'assistant_done' | 'assistant_error' | 'assistant_update' | 'tool_start' | 'tool_delta' | 'tool_done' | 'approval_required' | 'approval_granted' | 'approval_denied' | 'repository_refreshed' | 'recovery';
+export type StreamEventType = 'assistant_start' | 'assistant_delta' | 'assistant_done' | 'assistant_error' | 'assistant_update' | 'assistant_stopped' | 'mission_start' | 'mission_end' | 'tool_start' | 'tool_delta' | 'tool_done' | 'approval_required' | 'approval_granted' | 'approval_denied' | 'repository_refreshed' | 'recovery';
 
 export interface StreamEventPayload {
   type: StreamEventType;

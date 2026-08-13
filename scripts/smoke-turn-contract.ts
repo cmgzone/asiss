@@ -35,10 +35,19 @@
  *       verification; fail -> repair (recover to EXECUTING, attempts+1) and
  *       re-run at the next completion point; fail until the turn budget
  *       exhausts -> FAILED (terminal, feeds failure memory)
+ *   17. (Phase 19 Move 7) deterministic acceptance-criteria evaluation —
+ *       criteria that look like assertions (file-contains / test-command)
+ *       are evaluated; uncheckable criteria are reported, never silently
+ *       passed; the completion gate records each as 'criteria'
+ *       TaskVerification evidence and a failing criterion repairs
  */
 
 import assert from 'assert';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { TaskEngine, TaskEventBus, TaskEvent, TaskStore, TaskDiagnoser, TaskTurnVerdict } from '../src/core/task';
+import { evaluateAcceptanceCriteria } from '../src/core/context';
 
 function setup() {
   const store = new TaskStore({ filePath: '' });
@@ -514,7 +523,179 @@ async function main() {
     console.log('16. terminal verification gate (pass/repair/exhaust) ok');
   }
 
-  console.log(JSON.stringify({ success: true, sections: 16 }));
+  // ---- 17. Phase 19 Move 7 — deterministic acceptance-criteria evaluation ----
+  {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'criteria-check-'));
+    try {
+      fs.writeFileSync(path.join(tmp, 'notes.txt'), 'hello world\nsecond line\n', 'utf8');
+
+      // 17a. the deterministic evaluator itself.
+      const results = await evaluateAcceptanceCriteria(
+        ["the file notes.txt should contain 'hello'", "notes.txt contains 'nope'"],
+        tmp
+      );
+      assert.strictEqual(results.length, 2, 'two criteria -> two results');
+      assert.strictEqual(results[0].kind, 'file-contains', 'file-contains classification');
+      assert.strictEqual(results[0].passed, true, 'present needle passes');
+      assert.strictEqual(results[1].kind, 'file-contains', 'second file-contains classification');
+      assert.strictEqual(results[1].passed, false, 'absent needle fails');
+
+      const results2 = await evaluateAcceptanceCriteria(
+        [
+          "the file missing.txt should contain 'x'",
+          'run node --version',
+          'run node --no-such-flag-xyz',
+          'make the UI more beautiful',
+          'the command `node --version` passes'
+        ],
+        tmp
+      );
+      assert.strictEqual(results2.length, 5, 'five criteria -> five results');
+      assert.strictEqual(results2[0].passed, false, 'missing file fails');
+      assert.ok(String(results2[0].detail).includes('not found'), 'missing-file detail explains why');
+      assert.strictEqual(results2[1].kind, 'test-command', 'run <cmd> classified as test-command');
+      assert.strictEqual(results2[1].passed, true, 'exit-0 command passes');
+      assert.strictEqual(results2[2].kind, 'test-command', 'failing command still test-command');
+      assert.strictEqual(results2[2].passed, false, 'exit-1 command fails');
+      assert.strictEqual(results2[3].kind, 'uncheckable', 'plain prose is uncheckable');
+      assert.strictEqual(results2[3].passed, null, 'uncheckable is never silently passed');
+      assert.strictEqual(results2[4].kind, 'test-command', 'backtick-quoted command classified');
+      assert.strictEqual(results2[4].passed, true, 'backtick-quoted command runs and passes');
+
+      // 17b. the gate integration (runner-verifier shape): each criterion is
+      // recorded as 'criteria' TaskVerification evidence; a failing criterion
+      // fails the gate and repairs; all-pass (incl. uncheckable -> SKIPPED)
+      // completes.
+      const { engine: e4 } = setup();
+      const task4 = await mission(e4, 'write a file');
+      const gate4 = await e4.runMission(task4.id, {
+        iterate: async () => ({ content: 'done.', verdict: { type: 'verify', reason: 'completion gate' } }),
+        verifier: async (task, eng) => {
+          const crs = await evaluateAcceptanceCriteria(
+            ["the file notes.txt should contain 'hello'", 'make the UI more beautiful'],
+            tmp
+          );
+          let allPassed = true;
+          for (const cr of crs) {
+            const status = cr.passed === null ? 'SKIPPED' : cr.passed ? 'PASSED' : 'FAILED';
+            await eng.recordVerification(task.id, 'criteria', status, `[${cr.kind}] ${cr.detail}`);
+            if (cr.passed === false) allPassed = false;
+          }
+          return { passed: allPassed, detail: 'criteria evaluated' };
+        },
+        budget: { maxTurns: 3 }
+      });
+      assert.strictEqual(gate4.action, 'complete', 'all-pass criteria completes the mission');
+      assert.strictEqual(gate4.task.status, 'COMPLETED', 'task COMPLETED on criteria pass');
+      assert.ok(
+        gate4.task.verification.some(v => v.kind === 'criteria' && v.status === 'PASSED'),
+        'criteria PASSED evidence recorded'
+      );
+      assert.ok(
+        gate4.task.verification.some(v => v.kind === 'criteria' && v.status === 'SKIPPED'),
+        'uncheckable criterion recorded as SKIPPED, not silently passed'
+      );
+
+      // failing criterion -> gate fails -> repairs -> second pass completes.
+      const { engine: e5 } = setup();
+      const task5 = await mission(e5, 'write a file');
+      let calls5 = 0;
+      const iterations5: string[] = [];
+      const gate5 = await e5.runMission(task5.id, {
+        iterate: async ({ turn }) => {
+          iterations5.push(`t${turn}`);
+          return { content: turn === 1 ? 'repairing' : 'fixed.', verdict: { type: 'verify', reason: 'completion gate' } };
+        },
+        verifier: async (task, eng) => {
+          calls5 += 1;
+          const needle = calls5 === 1 ? 'MISSING' : 'hello';
+          const crs = await evaluateAcceptanceCriteria([`the file notes.txt should contain '${needle}'`], tmp);
+          const passed = crs.every(c => c.passed !== false);
+          await eng.recordVerification(task.id, 'criteria', passed ? 'PASSED' : 'FAILED', `criterion call ${calls5}`);
+          return { passed, detail: passed ? 'criterion passed' : 'criterion failed' };
+        },
+        budget: { maxTurns: 3 }
+      });
+      assert.strictEqual(gate5.action, 'complete', 'repair completes after the criterion passes');
+      assert.deepStrictEqual(iterations5, ['t1', 't2'], 'criterion failure consumed a repair iteration');
+      assert.strictEqual(calls5, 2, 'gate ran twice (fail then pass)');
+      assert.strictEqual(gate5.task.status, 'COMPLETED', 'task COMPLETED after repair');
+      assert.ok(gate5.task.timing.attempts >= 2, 'criterion failure bumped attempts (recovery)');
+      assert.ok(
+        gate5.task.verification.some(v => v.kind === 'criteria' && v.status === 'FAILED'),
+        'criteria FAILED evidence recorded for the first gate run'
+      );
+      assert.ok(
+        gate5.task.verification.some(v => v.kind === 'criteria' && v.status === 'PASSED'),
+        'criteria PASSED evidence recorded after repair'
+      );
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+
+    console.log('17. deterministic acceptance-criteria evaluation ok');
+  }
+
+  // ---- 18. Phase 20 Move 7 — live plan-step status ----
+  {
+    const { engine } = setup();
+    const task = await engine.create({ goal: 'Fix the bug and verify', kind: 'mission' });
+    await engine.analyze(task.id);
+    await engine.plan(task.id, [
+      { id: 's1', title: 'Understand the goal and current state', status: 'PENDING' },
+      { id: 's2', title: 'Run `npm test`', status: 'PENDING' },
+      { id: 's3', title: 'Verify completion', status: 'PENDING' }
+    ]);
+    await engine.start(task.id);
+
+    // Tool-kind derivation: a successful MUTATION starts the first step.
+    const ex1 = await engine.recordToolExecution(task.id, { name: 'apply_patch', status: 'STARTED', startedAt: Date.now() });
+    await engine.completeToolExecution(task.id, ex1.id, { status: 'COMPLETED' });
+    await engine.recordToolKind(task.id, ex1.id, 'mutation');
+    let plan = engine.get(task.id)!.plan!;
+    assert.strictEqual(plan[0].status, 'IN_PROGRESS', 'mutation starts the first step');
+    assert.strictEqual(plan[1].status, 'PENDING', 'later steps stay pending');
+    assert.strictEqual(plan[2].status, 'PENDING', 'later steps stay pending');
+
+    // A successful VERIFICATION completes the in-progress step + starts next.
+    const ex2 = await engine.recordToolExecution(task.id, { name: 'shell', status: 'STARTED', startedAt: Date.now() });
+    await engine.completeToolExecution(task.id, ex2.id, { status: 'COMPLETED' });
+    await engine.recordToolKind(task.id, ex2.id, 'verification');
+    plan = engine.get(task.id)!.plan!;
+    assert.strictEqual(plan[0].status, 'COMPLETED', 'verification completes the in-progress step');
+    assert.strictEqual(plan[1].status, 'IN_PROGRESS', 'verification starts the next step');
+    assert.strictEqual(plan[2].status, 'PENDING', 'third step stays pending');
+
+    // Failed tools do not advance the plan.
+    const ex3 = await engine.recordToolExecution(task.id, { name: 'shell', status: 'STARTED', startedAt: Date.now() });
+    await engine.completeToolExecution(task.id, ex3.id, { status: 'FAILED', error: 'boom' });
+    await engine.recordToolKind(task.id, ex3.id, 'verification');
+    plan = engine.get(task.id)!.plan!;
+    assert.strictEqual(plan[1].status, 'IN_PROGRESS', 'a failed verification does not advance the plan');
+
+    // Progress records map percent onto equal slices (monotonic forward).
+    await engine.recordProgress(task.id, 40);
+    plan = engine.get(task.id)!.plan!;
+    assert.strictEqual(plan[0].status, 'COMPLETED', 'progress completes crossed slices');
+    assert.strictEqual(plan[1].status, 'IN_PROGRESS', 'progress keeps the current slice in progress');
+    assert.strictEqual(plan[2].status, 'PENDING', 'future slice stays pending');
+
+    // Explicit markPlanStep: validated, monotonic (a COMPLETED step never reverts).
+    await engine.markPlanStep(task.id, 's1', 'IN_PROGRESS');
+    assert.strictEqual(engine.get(task.id)!.plan![0].status, 'COMPLETED', 'completed steps never revert');
+    await engine.markPlanStep(task.id, 's2', 'COMPLETED');
+    plan = engine.get(task.id)!.plan!;
+    assert.strictEqual(plan[1].status, 'COMPLETED', 'explicit mark completes a step');
+    assert.ok(engine.planSteps(task.id) === plan, 'planSteps exposes the current plan');
+
+    // Terminal completion finishes every remaining step.
+    await engine.complete(task.id, { status: 'SUCCESS' });
+    plan = engine.get(task.id)!.plan!;
+    assert.ok(plan.every((s) => s.status === 'COMPLETED'), 'completed task finishes the whole plan');
+    console.log('18. live plan-step status                       ok');
+  }
+
+  console.log(JSON.stringify({ success: true, sections: 18 }));
 }
 
 main().then(() => process.exit(0)).catch((err) => {

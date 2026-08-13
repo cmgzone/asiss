@@ -230,6 +230,32 @@ async function main() {
   assert.ok(mission.timing.attempts >= 2, `recovery counted attempts (got ${mission.timing.attempts})`);
   assert.strictEqual(typeof mission.timing.durationMs, 'number', 'completed task records duration');
   assert.strictEqual(mission.model, fakeModel.id, 'ModelEngine records the selected provider on the canonical Task');
+  // Phase 20 (AUDIT_11): the loop is one connected chain — the mission task
+  // carries the goal id, the plan is a real artifact on the task, the goal
+  // records the linked task + its outcome evidence, and the plan renders into
+  // the mission prompt.
+  assert.ok(
+    typeof mission.metadata?.goalId === 'string',
+    'mission task carries the session goal id (goal -> task linkage)'
+  );
+  assert.ok(
+    Array.isArray(mission.plan) && mission.plan.length > 0,
+    `mission task carries a real plan (got ${mission.plan?.length || 0} steps)`
+  );
+  assert.ok(
+    systemPrompts.some((sp) => sp.includes('Mission plan (derived from the goal')),
+    'the recorded plan renders into the mission system prompt'
+  );
+  const { mainGoalManager } = await import('../src/core/main-goal');
+  const completedGoal = mainGoalManager.getRecent('runtime-session').find((g) => g.status === 'completed');
+  assert.ok(completedGoal, 'the auto-origin goal was completed after the mission');
+  assert.ok(
+    completedGoal!.linkedTaskIds.includes(mission.id),
+    'the goal records the linked mission task'
+  );
+  const goalOutcome = (completedGoal!.taskOutcomes || []).find((o) => o.taskId === mission.id);
+  assert.ok(goalOutcome, 'the goal records the mission task outcome (complete -> goal evidence)');
+  assert.strictEqual(goalOutcome!.outcome, 'SUCCESS', 'completed mission records SUCCESS evidence on the goal');
   assert.ok(
     mission.decisions.some((decision) => decision.summary.includes(`ModelEngine selected '${fakeModel.id}'`)),
     'ModelEngine stores its explainable selection decision on the Task'

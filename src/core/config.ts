@@ -235,10 +235,12 @@ export function validateConfig(raw: unknown): ConfigValidationResult {
       { key: 'repository', kind: 'object', nested: [
         ...CONTEXT_REPOSITORY_FIELDS,
         { key: 'goalHints', kind: 'object', nested: [{ key: 'enabled', kind: 'boolean' }, { key: 'maxFiles', kind: 'number' }] },
+        { key: 'minimal', kind: 'object', nested: [{ key: 'enabled', kind: 'boolean' }, { key: 'maxBytes', kind: 'number' }, { key: 'maxFiles', kind: 'number' }] },
         { key: 'warm', kind: 'object', nested: [{ key: 'enabled', kind: 'boolean' }, { key: 'throttleMs', kind: 'number' }] },
         { key: 'telemetry', kind: 'object', nested: [{ key: 'enabled', kind: 'boolean' }] }
       ] },
-      { key: 'summarize', kind: 'object', nested: [{ key: 'enabled', kind: 'boolean' }, { key: 'maxChars', kind: 'number' }] }
+      { key: 'summarize', kind: 'object', nested: [{ key: 'enabled', kind: 'boolean' }, { key: 'maxChars', kind: 'number' }] },
+      { key: 'plan', kind: 'object', nested: [{ key: 'enabled', kind: 'boolean' }] }
     ]);
     errors.push(...context.errors);
     invalidKeys.push(...context.invalidKeys);

@@ -48,6 +48,17 @@ export class Gateway {
   private async handleMessage(msg: Message) {
     console.log(`[Gateway] Received from ${msg.channel}: ${msg.content}`);
 
+    // User Stop (Web UI): abort the in-flight mission for this session. The
+    // session must already exist — a stop for an idle sender is a no-op.
+    if (msg.metadata?.control === 'stop') {
+      const existingSession = this.findSession(msg.senderId, msg.channel);
+      if (existingSession) {
+        console.log(`[Gateway] Stop requested for session ${existingSession}`);
+        this.agentRunner.stopSession(existingSession);
+      }
+      return;
+    }
+
     let sessionId = this.findSession(msg.senderId, msg.channel);
     if (!sessionId) {
       sessionId = this.createSession(msg.senderId, msg.channel);
@@ -322,6 +333,11 @@ export class Gateway {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
     return Boolean(this.channels.get(session.channel)?.sendStreamEvent);
+  }
+
+  /** Ask the agent runner to stop the in-flight mission for a session. */
+  stopSession(sessionId: string) {
+    this.agentRunner.stopSession(sessionId);
   }
 
   listSessionIds(): string[] {

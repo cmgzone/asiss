@@ -66,7 +66,10 @@ export class TaskLessonBridge {
       kind: task.kind,
       status: task.status,
       goal: task.goal,
-      summary
+      summary,
+      // Phase 20 Move 4 (G4): the lesson is attributable to the goal the
+      // task served — the mission Task carries it via metadata.goalId.
+      goalId: typeof task.metadata?.goalId === 'string' ? task.metadata.goalId : undefined
     });
   }
 }

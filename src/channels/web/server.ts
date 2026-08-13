@@ -1,4 +1,5 @@
 import { ChannelAdapter, Message, StreamEventPayload } from '../../core/types';
+import { buildDemoPage } from './demo';
 import express from 'express';
 import { Server } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
@@ -36,6 +37,8 @@ import { checkpointManager } from '../../core/checkpoint-manager';
 import { hookManager } from '../../core/hooks';
 import { executionBackendManager } from '../../core/execution-backend';
 import { attachmentStore } from '../../core/attachment-store';
+import { mainGoalManager } from '../../core/main-goal';
+import { taskEngine } from '../../core/task';
 
 interface ApiCapture {
   messages: string[];
@@ -136,6 +139,22 @@ export class WebChannel implements ChannelAdapter {
           .replace('</head>', '<link rel="stylesheet" href="/layout-fix.css"><link rel="stylesheet" href="/chat-progress.css"></head>')
           .replace('</body>', '<script src="/chat-progress.js"></script></body>');
         res.type('html').send(html);
+      });
+      // Hidden render-demo: replays the recorded delta stream against the real
+      // (throttled vs unthrottled) render pipeline. Not linked from the UI.
+      let demoPage: string | null = null;
+      this.app.get('/demo', (_req, res) => {
+        try {
+          if (demoPage === null) {
+            demoPage = buildDemoPage(
+              path.join(publicDir, 'index.html'),
+              path.join(publicDir, 'demo-recording.json')
+            );
+          }
+          res.type('html').send(demoPage);
+        } catch (err) {
+          res.status(500).send('Demo page failed to build: ' + (err as Error).message);
+        }
       });
       this.app.use(express.static(publicDir));
     } else {
@@ -1046,6 +1065,50 @@ export class WebChannel implements ChannelAdapter {
       }
     });
 
+    // ===== AUTONOMOUS LOOP API (Phase 20) =====
+    // Goal <-> Task linkage for the web trace panel: goals carry their linked
+    // task ids + terminal task outcomes (GoalTaskEvidence); tasks carry the
+    // goal id they served (metadata.goalId) + their canonical evidence. The
+    // UI renders both sides with navigation between them.
+    this.app.get('/api/loop', (_req, res) => {
+      try {
+        const limit = Number((_req as any).query?.limit) || 80;
+        const goals = mainGoalManager.snapshot().map((entry) => ({
+          sessionId: entry.sessionId,
+          current: entry.current,
+          recent: entry.recent
+        }));
+        const tasks = taskEngine
+          .list()
+          .sort((a, b) => (b.timing?.createdAt || 0) - (a.timing?.createdAt || 0))
+          .slice(0, limit)
+          .map((t) => ({
+            id: t.id,
+            goalId: typeof t.metadata?.goalId === 'string' ? t.metadata.goalId : undefined,
+            kind: t.kind,
+            status: t.status,
+            goal: String(t.goal || '').slice(0, 240),
+            outcome: t.outcome?.status,
+            stopped: t.metadata?.stoppedByUser === true,
+            summary: t.outcome?.summary ? String(t.outcome.summary).slice(0, 300) : undefined,
+            verification: (t.verification || []).slice(-6).map((v) => ({
+              kind: v.kind,
+              status: v.status,
+              detail: v.detail ? String(v.detail).slice(0, 120) : undefined
+            })),
+            // Phase 20 Move 7: the plan with live per-step status.
+            plan: (t.plan || []).map((s) => ({ id: s.id, title: s.title, status: s.status })),
+            turns: t.timing?.turns,
+            attempts: t.timing?.attempts,
+            toolCalls: (t.toolExecutions || []).length,
+            completedAt: t.timing?.completedAt
+          }));
+        res.json({ goals, tasks });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    });
+
     // ===== ANALYTICS API =====
 
     this.app.get('/api/analytics/summary', (_req, res) => {
@@ -1554,6 +1617,43 @@ export class WebChannel implements ChannelAdapter {
             }
           };
           this.handler(msg);
+        }
+      });
+
+      socket.on('stop', (payload: any) => {
+        if (!this.auth.isAuthenticated(socket.id)) {
+          socket.emit('error', 'Authentication required.');
+          return;
+        }
+        // Resolve the same chat scope a normal message would use so the stop
+        // lands on the session that is actually running the mission.
+        const user = this.auth.getUserBySession(socket.id);
+        const stableUserId = user?.id || socket.data.userId || socket.id;
+        const projectId = typeof payload?.projectId === 'string' ? payload.projectId.trim() : '';
+        const projectContext = projectId ? this.resolveProjectContext(projectId) : undefined;
+        const requestedConversationId = typeof payload?.conversationId === 'string'
+          ? payload.conversationId.trim()
+          : '';
+        const conversation = !projectContext && requestedConversationId
+          ? conversationManager.getOwned(requestedConversationId, stableUserId)
+          : undefined;
+        const scopedUserId = projectContext?.id
+          ? `${stableUserId}:project:${projectContext.id}`
+          : `${stableUserId}:conversation:${conversation?.id || requestedConversationId}`;
+        if (this.handler) {
+          this.handler({
+            id: uuidv4(),
+            channel: 'web',
+            senderId: scopedUserId,
+            content: '__stop__',
+            timestamp: Date.now(),
+            metadata: {
+              control: 'stop',
+              baseUserId: stableUserId,
+              projectId: projectContext?.id,
+              conversationId: conversation?.id
+            }
+          });
         }
       });
 
