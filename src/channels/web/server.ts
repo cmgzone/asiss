@@ -55,6 +55,12 @@ export class WebChannel implements ChannelAdapter {
   private io: SocketIOServer;
   private handler: ((msg: Message) => void | Promise<void>) | null = null;
   private apiCaptures = new Map<string, ApiCapture>();
+  // Live per-scope mission replay buffer (execution resync). Every event that
+  // carries an executionId is retained for the scoped user (the same key the
+  // socket room uses) so a reconnecting / reloading client can rebuild its
+  // executionStore from the server-side trajectory. Reset when a new mission
+  // starts; bounded so a pathological mission cannot grow memory without limit.
+  private missionEventBuffers = new Map<string, StreamEventPayload[]>();
   private isStarted = false;
   private port = 3000;
   private startTime: number;
@@ -128,7 +134,14 @@ export class WebChannel implements ChannelAdapter {
 
     const publicDir = resolvePublicDir();
     this.app.get('/vendor/marked.js', (_req, res) => {
-      res.sendFile(path.join(process.cwd(), 'node_modules', 'marked', 'lib', 'marked.umd.js'));
+      // Resolve module-relative first so the app keeps working when launched
+      // from a different cwd (desktop shells); fall back to the cwd layout.
+      const candidates = [
+        path.resolve(__dirname, '..', '..', '..', 'node_modules', 'marked', 'lib', 'marked.umd.js'),
+        path.join(process.cwd(), 'node_modules', 'marked', 'lib', 'marked.umd.js')
+      ];
+      const vendor = candidates.find(p => { try { fs.statSync(p); return true; } catch { return false; } }) || candidates[0];
+      res.sendFile(vendor);
     });
     if (publicDir) {
       this.app.get('/', (_req, res) => {
@@ -1657,6 +1670,37 @@ export class WebChannel implements ChannelAdapter {
         }
       });
 
+      // Execution resync: a client that reconnected or reloaded mid-mission
+      // asks for the server-side trajectory of the mission running in its
+      // current scope. Resolve the scope exactly like a message/stop would,
+      // then replay the buffered events so the client can rebuild its
+      // executionStore (executionId + per-call tool ids are preserved).
+      socket.on('execution_resync', (payload: any) => {
+        if (!this.auth.isAuthenticated(socket.id)) return;
+        const user = this.auth.getUserBySession(socket.id);
+        const stableUserId = user?.id || socket.data.userId || socket.id;
+        const projectId = typeof payload?.projectId === 'string' ? payload.projectId.trim() : '';
+        const projectContext = projectId ? this.resolveProjectContext(projectId) : undefined;
+        const requestedConversationId = typeof payload?.conversationId === 'string'
+          ? payload.conversationId.trim()
+          : '';
+        const conversation = !projectContext && requestedConversationId
+          ? conversationManager.getOwned(requestedConversationId, stableUserId)
+          : undefined;
+        const scopedUserId = projectContext?.id
+          ? `${stableUserId}:project:${projectContext.id}`
+          : `${stableUserId}:conversation:${conversation?.id || requestedConversationId}`;
+        const rawEvents = this.missionEventBuffers.get(scopedUserId) || [];
+        // Scope each event exactly like the live emission does, so the client's
+        // contextMatches gate accepts the replay for its current scope.
+        const scope = this.extractChatScope(scopedUserId);
+        socket.emit('execution_snapshot', {
+          events: rawEvents.map(e => ({ ...e, ...scope })),
+          active: rawEvents.some(e => e.type === 'mission_start') && !rawEvents.some(e => e.type === 'mission_end'),
+          ...scope
+        });
+      });
+
       socket.on('disconnect', () => {
         this.auth.endSession(socket.id);
         console.log('[WebChannel] Client disconnected:', socket.id);
@@ -1726,6 +1770,22 @@ export class WebChannel implements ChannelAdapter {
     if (capture) {
       capture.events.push(event);
       try { capture.onEvent?.(event); } catch { /* Client disconnects must not stop the agent. */ }
+    }
+    // Execution resync: retain every mission-scoped event so a reconnecting /
+    // reloading client can replay the current mission (executionId anchor). A
+    // new mission_start resets the buffer; everything else appends (bounded).
+    if (event.executionId) {
+      if (event.type === 'mission_start') {
+        this.missionEventBuffers.set(userId, [event]);
+      } else {
+        const buffer = this.missionEventBuffers.get(userId);
+        if (buffer) {
+          buffer.push(event);
+          if (buffer.length > 2000) buffer.splice(0, buffer.length - 2000);
+        } else {
+          this.missionEventBuffers.set(userId, [event]);
+        }
+      }
     }
     this.io.to(userId).emit(event.type, {
       ...event,

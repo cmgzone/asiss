@@ -29,7 +29,7 @@
 All of the following was verified against source at HEAD `07e2410`:
 
 - **Strict typecheck** — `tsconfig.json`: `strict: true`, `forceConsistentCasingInFileNames`, `esModuleInterop`; `tsc --noEmit` is the project's de-facto per-phase check and is clean at this HEAD.
-- **A real smoke surface** — 29 `scripts/smoke-*.ts` registered in `package.json`: baseline, terminal-paths, context, config, tools, policy, turn-contract, scheduler, agent-engine, agent-execution, agent-task-profile, memory-unified, repo-index (26 sections), phase16 (permanent Phase 16/17 gates), phase18 (7 gates), runtime (e2e), delegation, checkpoints, model-engine, model-resilience, executable-skills, execution-backends, learning, execute-workflow, web-api, casual, repetition. Two permanent **comment-aware architectural gates** exist and are green (`smoke-phase16`, `smoke-phase18` — comments stripped so prose can neither trip nor soothe a sweep).
+- **A real smoke surface** — 30 `scripts/smoke-*.ts` registered in `package.json`: baseline, terminal-paths, context, config, tools, policy, turn-contract, execution-store, scheduler, agent-engine, agent-execution, agent-task-profile, memory-unified, repo-index (26 sections), phase16 (permanent Phase 16/17 gates), phase18 (7 gates), runtime (e2e), delegation, checkpoints, model-engine, model-resilience, executable-skills, execution-backends, learning, execute-workflow, web-api, casual, repetition. Two permanent **comment-aware architectural gates** exist and are green (`smoke-phase16`, `smoke-phase18` — comments stripped so prose can neither trip nor soothe a sweep).
 - **Completion verification** — `task-engine.ts:runCompletionVerificationGate` (Phase 17): EXECUTING → VERIFYING → verifier (goal-matched tests via `verify-then-retry.ts` `matchedTestFiles`/`detectTestCommand`/`runGoalTests`, bounded 45 s / 4 KB) → PASSED → COMPLETED with evidence; FAILED → repair (attempts+1, `TaskRetrying`) while the turn budget allows; budget-exhausted → terminal FAILED feeding episodic capture.
 - **In-mission recovery evidence** — `task-engine.ts:diagnose` records `TestStarted`/`TestPassed`/`TestFailed` as `TaskVerification` and emits `TaskVerified`/`TaskVerificationFailed`/`TaskRecovered`.
 - **Criteria as data** — `main-goal.ts` (`acceptanceCriteria` merge/unique, last-30 slice), runner prompt render (`Done means: …`), `expectedOutput`/`reviewCriteria` on `AgentResult` and delegated child tasks, review-prompt feed.
@@ -169,13 +169,13 @@ assertions.
 ## Move 3 — the battery runner (done, G1/G7/F3)
 
 `scripts/run-battery.ts` (`npm test` / `npm run battery`) replaces the stub
-test gate with one command for the deterministic battery: the 22 in-battery
+test gate with one command for the deterministic battery: the 23 in-battery
 smokes in canonical order — fast static gates first (baseline,
 terminal-paths, phase16, phase18, gates), then config / context / tools /
-policy / turn-contract / scheduler / agent-engine / agent-task-profile /
-agent-execution / memory-unified / repo-index / checkpoints / model-engine /
-executable-skills / execution-backends / delegation — with the e2e runtime
-last. Each smoke runs in its own child process (true isolation — a crash or
+policy / turn-contract / execution-store / scheduler / agent-engine /
+agent-task-profile / agent-execution / memory-unified / repo-index /
+checkpoints / model-engine / executable-skills / execution-backends /
+delegation — with the e2e runtime last. Each smoke runs in its own child process (true isolation — a crash or
 hang can't take down the runner) under a bounded timeout (300 s default,
 600 s for the e2e) so a hung smoke is an `error`, not a silent hang.
 Results are aggregated per script (pass/fail/error + duration + exit code +

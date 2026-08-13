@@ -2,12 +2,12 @@
   "channels": [
     "Web Interface (Chat)"
   ],
-  "model": "opencode",
-  "aiModel": "big-pickle",
+  "model": "OpenRouter",
+  "aiModel": "poolside/laguna-xs-2.1:free",
   "createdAt": "2026-07-03T10:21:09.886Z",
   "llm": {
-    "provider": "opencode",
-    "model": "big-pickle"
+    "provider": "OpenRouter",
+    "model": "poolside/laguna-xs-2.1:free"
   },
   "modelResilience": {
     "enabled": true,

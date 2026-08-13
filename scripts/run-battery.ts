@@ -12,7 +12,7 @@
  * fast static gates first (failure-fast), heaviest e2e last:
  *
  *   baseline, render-bench, terminal-paths, phase16, phase18, phase19, phase20, config,
- *   context, tools, policy, turn-contract, scheduler, agent-engine,
+ *   context, tools, policy, turn-contract, execution-store, scheduler, agent-engine,
  *   agent-task-profile, agent-execution, memory-unified, repo-index,
  *   checkpoints, model-engine, executable-skills, execution-backends,
  *   delegation, runtime
@@ -57,6 +57,7 @@ export const CANONICAL_BATTERY: BatteryEntry[] = [
   { name: 'tools', timeoutMs: 300_000 },
   { name: 'policy', timeoutMs: 300_000 },
   { name: 'turn-contract', timeoutMs: 300_000 },
+  { name: 'execution-store', timeoutMs: 300_000 },
   { name: 'scheduler', timeoutMs: 300_000 },
   { name: 'agent-engine', timeoutMs: 300_000 },
   { name: 'agent-task-profile', timeoutMs: 300_000 },

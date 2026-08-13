@@ -1,6 +1,37 @@
 # LEARNING.md
 
-Updated: 2026-08-10T11:20:35.435Z
+Updated: 2026-08-13T17:25:48.625Z
+
+## 13/08/2026, 20:25:48 - Task self-review: background COMPLETED
+Type: self_review
+
+- Lesson: Success criteria for learned skills should include comprehensive documentation and clear callable interfaces
+
+Improvements:
+- Add usage examples and parameter documentation to the skill definition for better maintainability
+- Consider versioning strategy for learned skills to track updates and iterations
+
+## 13/08/2026, 20:09:49 - Goal retrospective: create a online store with backend dashbord and admin panel
+Type: self_review
+
+- Issue: complete
+- Lesson: Successful goal completion requires detailed progress documentation with factual evidence and comprehensive coverage of all deliverables. Vague success markers like 'SUCCESS' combined with minimal detail make assessments difficult. Future retrospective summaries should include specific metrics, file structures, and feature lists to demonstrate thorough completion.
+
+Improvements:
+- Use structured document format with consistent headers (## ##) instead of inconsistent markdown formatting
+- Include concrete evidence and specific details in completion summaries (e.g., actual file counts, directory structure), not just status indicators
+- Expand completion summaries to cover all major deliverables including frontend components, backend services, and admin panel features
+
+## 13/08/2026, 19:53:51 - Task self-review: mission COMPLETED
+Type: self_review
+
+- Issue: Project structure created but implementation blocked by model provider rate limiting (429 errors), preventing dependency installation, codebase development, and database setup
+- Lesson: When task completion depends on external services with rate limits, prepare implementation artifacts (dependency lists, stub code, error handling patterns) in advance to minimize idle time during provider downtime
+
+Improvements:
+- Prepare dependency installation backlog in parallel - research and document exact package versions to install when rate limits reset
+- Create stub implementation files with TODO markers to enable faster development once unblocked
+- Implement exponential backoff strategy for API calls to prevent cascading failures when providers are rate limited
 
 ## 10/08/2026, 14:20:35 - Self-review feedback
 Type: self_review

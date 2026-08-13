@@ -83,6 +83,7 @@ import { modelRouter } from '../core/model-router';
 import { modelEngine } from '../core/model';
 import { chainOfThought } from '../core/chain-of-thought';
 import { proactiveEngine } from '../core/proactive-engine';
+import { stripShellStreamMarker } from '../core/stream-markers';
 import { executionStateManager } from '../core/execution-state';
 import { hookManager } from '../core/hooks';
 import { installTaskEventProjections, taskEngine, taskEventBus, taskMemory } from '../core/task';
@@ -894,6 +895,20 @@ export class AgentRunner {
     return [...counts.entries()].map(([k, n]) => `${k} ${n}`).join('; ');
   }
 
+  /** Phase 2 execution contract — human label for a tool_start event. */
+  private toolLabelFor(name: string): string {
+    const n = String(name || '').toLowerCase();
+    if (n.includes('shell')) return 'Running commands';
+    if (n.includes('patch') || n.includes('write_file')) return 'Editing files';
+    if (n.includes('playwright')) return 'Checking the page';
+    if (n.includes('search') || n.includes('research') || n.includes('brave') || n.includes('serper')) return 'Searching sources';
+    if (n.includes('delegate') || n.includes('agent')) return 'Coordinating agents';
+    if (n.includes('read_file')) return 'Reading files';
+    if (n.includes('memory')) return 'Updating memory';
+    if (n.includes('project')) return 'Updating the project';
+    return `Using ${name || 'tool'}`;
+  }
+
   /**
    * Phase 17 Move 2 — shared goal-matched-test evidence, used by BOTH the
    * failure diagnoser (verify-then-retry) and the completion verifier gate.
@@ -1204,14 +1219,16 @@ export class AgentRunner {
     runId: string,
     messageId: string,
     completed: boolean = true,
-    reasoning?: string
+    reasoning?: string,
+    executionId?: string
   ) {
     const finalText = executionStateManager.prepareAssistantResponse(sessionId, draft, { final: completed });
     if (!finalText.trim()) return;
     if (this.gateway.supportsStructuredStreaming?.(sessionId)) {
-      await this.gateway.sendStreamEvent(sessionId, { type: 'assistant_start', runId, messageId });
-      await this.gateway.sendStreamEvent(sessionId, { type: 'assistant_delta', runId, messageId, text: finalText });
-      await this.gateway.sendStreamEvent(sessionId, { type: 'assistant_done', runId, messageId, finalText, reasoning, ok: completed });
+      const scope = executionId ? { executionId } : {};
+      await this.gateway.sendStreamEvent(sessionId, { type: 'assistant_start', runId, messageId, ...scope });
+      await this.gateway.sendStreamEvent(sessionId, { type: 'assistant_delta', runId, messageId, text: finalText, ...scope });
+      await this.gateway.sendStreamEvent(sessionId, { type: 'assistant_done', runId, messageId, finalText, reasoning, ok: completed, ...scope });
       return;
     }
     await this.gateway.sendResponse(sessionId, finalText);
@@ -2381,6 +2398,54 @@ export class AgentRunner {
     let explorationBatches = 0;
     // Phase 12 Move 3 — verification-pending state is engine-owned
     let missionVerificationPending = false;
+    // Phase 2 execution contract — terminal status for mission_end:
+    // completed | failed | cancelled | blocked.
+    let missionStatus: 'completed' | 'failed' | 'cancelled' | 'blocked' = 'completed';
+    // Per-tool live output (tool_delta) is throttled: chunks accumulate per
+    // toolCallId and flush at most once per 150 ms so a noisy process cannot
+    // flood the socket with an event per chunk.
+    const toolDeltaBuffer = new Map<string, { name: string; runId: string; messageId: string; chunks: string[] }>();
+    let toolDeltaTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushToolDeltas = (): void => {
+      toolDeltaTimer = null;
+      for (const [toolCallId, entry] of toolDeltaBuffer) {
+        if (!entry.chunks.length) continue;
+        const output = entry.chunks.map(chunk => stripShellStreamMarker(chunk).chunk).join('');
+        entry.chunks.length = 0;
+        void this.gateway.sendStreamEvent(sessionId, {
+          type: 'tool_delta',
+          executionId: missionMarker,
+          runId: entry.runId,
+          messageId: entry.messageId,
+          toolCallId,
+          name: entry.name,
+          output,
+          progressPct: missionProgressPct()
+        });
+      }
+    };
+    // Mission-level progress (0-100) for the ExecutionCard's progress bar.
+    // The canonical source is the mission Task's recorded progress: the engine
+    // advances it via recordProgress after each tool batch (capped at 90 so the
+    // bar has room to fill) and pins it to 100 on completion. Falls back to a
+    // tool-budget estimate when no Task was created.
+    const missionProgressPct = (): number => {
+      const task = missionTaskId ? taskEngine.get(missionTaskId) : undefined;
+      if (task && typeof task.progress === 'number' && Number.isFinite(task.progress)) {
+        return Math.max(0, Math.min(100, Math.round(task.progress)));
+      }
+      return Math.min(90, 10 + Math.round((totalToolCalls / Math.max(1, maxToolCalls)) * 80));
+    };
+    const emitToolDelta = (toolCallId: string, name: string, runId: string, messageId: string, chunk: string): void => {
+      if (!chunk) return;
+      let entry = toolDeltaBuffer.get(toolCallId);
+      if (!entry) {
+        entry = { name, runId, messageId, chunks: [] };
+        toolDeltaBuffer.set(toolCallId, entry);
+      }
+      entry.chunks.push(chunk);
+      if (!toolDeltaTimer) toolDeltaTimer = setTimeout(flushToolDeltas, 150);
+    };
 
     const initialMemories = this.memory.getAll(sessionId);
     await this.autoCompactSessionIfNeeded(sessionId, config, initialMemories);
@@ -2410,8 +2475,10 @@ export class AgentRunner {
     this.sessionSignals.set(sessionId, missionSignal);
     void this.gateway.sendStreamEvent(sessionId, {
       type: 'mission_start',
+      executionId: missionMarker,
       runId: missionMarker,
-      messageId: missionMarker
+      messageId: missionMarker,
+      progressPct: 0
     });
     try {
       const missionResult = await taskEngine.runMission(missionTaskId, {
@@ -2434,6 +2501,20 @@ export class AgentRunner {
         if (this.stoppedSessions.has(sessionId)) {
           this.stoppedSessions.delete(sessionId);
           throw new MissionStoppedError();
+        }
+        // Phase 2 execution contract — recovery narration: a turn that begins
+        // right after a failed tool batch is the diagnosis turn (the model's
+        // streamed text carries the actual diagnosis).
+        if (lastBatchHadFailure) {
+          void this.gateway.sendStreamEvent(sessionId, {
+            type: 'recovery',
+            executionId: missionMarker,
+            runId: uuidv4(),
+            messageId: uuidv4(),
+            phase: 'diagnosing',
+            text: 'A step failed — diagnosing the cause and choosing the fix.',
+            progressPct: missionProgressPct()
+          });
         }
         const i = turn - 1;
         iterationPresentation = undefined;
@@ -2688,9 +2769,9 @@ export class AgentRunner {
             if (this.gateway.supportsStructuredStreaming?.(sessionId)) {
               if (!liveStreamed) {
                 liveStreamed = true;
-                void this.gateway.sendStreamEvent(sessionId, { type: 'assistant_start', runId: turnRunId, messageId: turnMessageId });
+                void this.gateway.sendStreamEvent(sessionId, { type: 'assistant_start', executionId: missionMarker, runId: turnRunId, messageId: turnMessageId });
               }
-              void this.gateway.sendStreamEvent(sessionId, { type: 'assistant_delta', runId: turnRunId, messageId: turnMessageId, text: chunk });
+              void this.gateway.sendStreamEvent(sessionId, { type: 'assistant_delta', executionId: missionMarker, runId: turnRunId, messageId: turnMessageId, text: chunk });
             }
           }, attachments), 'StreamGenerate');
           if (fullStreamContent.trim() && !response?.content) {
@@ -2744,6 +2825,7 @@ export class AgentRunner {
           if (liveStreamed && fullStreamContent.trim()) {
             void this.gateway.sendStreamEvent(sessionId, {
               type: 'assistant_done',
+              executionId: missionMarker,
               runId: turnRunId,
               messageId: turnMessageId,
               finalText: fullStreamContent.trim(),
@@ -2965,20 +3047,32 @@ export class AgentRunner {
           );
           await this.gateway.sendStreamEvent(sessionId, {
             type: 'assistant_update',
+            executionId: missionMarker,
             runId: turnRunId,
             messageId: `${missionMarker}:progress`,
-            text: progressUpdate
+            text: progressUpdate,
+            progressPct: missionProgressPct()
           });
 
           const parallelDelegation = response.toolCalls.length > 1
             && response.toolCalls.every(call => call.name === 'delegate_agent');
           console.log(`[AgentRunner] Executing ${response.toolCalls.length} tools ${parallelDelegation ? 'in parallel' : 'in dependency order'}...`);
           await this.gateway.sendResponse(sessionId, `${DEBUG_PREFIX} 🛠️ Executing ${response.toolCalls.length} tools...`);
-          // Emit structured tool_start event
-          void this.gateway.sendStreamEvent(sessionId, {
-            type: 'tool_start', runId: turnRunId, messageId: batchMessageId,
-            name: response.toolCalls.map(c => c.name).join(', ')
-          });
+          // Phase 2 execution contract — the recovery narration: when the
+          // previous batch failed, this turn is the repair attempt, so say so
+          // before the tools run. Per-call tool_start events follow (one per
+          // call, unique toolCallId) inside executeToolCall.
+          if (lastBatchHadFailure) {
+            void this.gateway.sendStreamEvent(sessionId, {
+              type: 'recovery',
+              executionId: missionMarker,
+              runId: turnRunId,
+              messageId: batchMessageId,
+              phase: 'fixing',
+              text: 'Applying the fix and verifying it.',
+              progressPct: missionProgressPct()
+            });
+          }
 
           // Track tool execution state
           executionStateManager.markToolExecutionStarted(
@@ -2996,8 +3090,23 @@ export class AgentRunner {
           const executeToolCall = async (call: any) => {
             try {
               if (this.sessionSignals.get(sessionId)?.signal.aborted) {
-                return { success: false, call, error: 'Stopped by user.' };
+                return { success: false, call, toolCallId: '', error: 'Stopped by user.' };
               }
+              // Phase 2 execution contract — one unique id per call, carried
+              // through tool_start -> tool_delta -> tool_done so the UI can
+              // update the same card. A batch of N tools now yields N
+              // tool_start events instead of one batch-level event.
+              const toolCallId = uuidv4();
+              void this.gateway.sendStreamEvent(sessionId, {
+                type: 'tool_start',
+                executionId: missionMarker,
+                runId: turnRunId,
+                messageId: batchMessageId,
+                toolCallId,
+                name: call.name,
+                label: this.toolLabelFor(call.name),
+                progressPct: missionProgressPct()
+              });
               const projectWorkspacePath = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
               const projectId = typeof msg.metadata?.projectId === 'string'
                 ? msg.metadata.projectId.trim()
@@ -3016,7 +3125,11 @@ export class AgentRunner {
                   config: this.loadConfig(),
                   signal: this.sessionSignals.get(sessionId)?.signal,
                   stream: (chunk: string) => {
-                    if (chunk) void this.gateway.sendStreamChunk(sessionId, chunk);
+                    if (chunk) {
+                      void this.gateway.sendStreamChunk(sessionId, chunk);
+                      // tool_delta is throttled per toolCallId (150 ms flush).
+                      emitToolDelta(toolCallId, call.name, turnRunId, batchMessageId, chunk);
+                    }
                   }
                 }
               );
@@ -3046,12 +3159,14 @@ export class AgentRunner {
                 return {
                   success: false,
                   call: call,
+                  toolCallId,
                   error: result.error
                 };
               }
               return {
                 success: true,
                 call: call,
+                toolCallId,
                 output: result.output
               };
             } catch (err: any) {
@@ -3059,6 +3174,7 @@ export class AgentRunner {
               return {
                 success: false,
                 call: call,
+                toolCallId: '',
                 error: err.message
               };
             }
@@ -3178,17 +3294,41 @@ export class AgentRunner {
             results.some(r => !r.success) ? undefined : undefined
           );
 
-          // Emit structured tool_done events for each tool result
+          // Emit structured tool_done events for each tool result — the same
+          // unique toolCallId that tool_start used, so the UI resolves the card.
           for (const result of results) {
+            // Flush any buffered live output for this call before the terminal
+            // event so the card shows the final delta before the status flips.
+            if (result.toolCallId) {
+              const buffered = toolDeltaBuffer.get(result.toolCallId);
+              if (buffered?.chunks.length) {
+                const output = buffered.chunks.map(chunk => stripShellStreamMarker(chunk).chunk).join('');
+                buffered.chunks.length = 0;
+                void this.gateway.sendStreamEvent(sessionId, {
+                  type: 'tool_delta',
+                  executionId: missionMarker,
+                  runId: turnRunId,
+                  messageId: batchMessageId,
+                  toolCallId: result.toolCallId,
+                  name: result.call.name,
+                  output,
+                  progressPct: missionProgressPct()
+                });
+              }
+              toolDeltaBuffer.delete(result.toolCallId);
+            }
             void this.gateway.sendStreamEvent(sessionId, {
               type: 'tool_done',
+              executionId: missionMarker,
               runId: turnRunId,
               messageId: batchMessageId,
-              toolCallId: result.call.name,
+              toolCallId: result.toolCallId || result.call.name,
               name: result.call.name,
+              label: this.toolLabelFor(result.call.name),
               output: result.success ? String(result.output).slice(0, 3000) : undefined,
               status: result.success ? 'completed' : 'failed',
-              error: result.success ? undefined : String(result.error || '')
+              error: result.success ? undefined : String(result.error || ''),
+              progressPct: missionProgressPct()
             });
           }
 
@@ -3521,6 +3661,24 @@ export class AgentRunner {
             }
             const sanitized = presentation?.sanitize ? guardrailManager.sanitizeOutput(finalDraft) : undefined;
             const cleanContent = sanitized?.sanitized || finalDraft;
+            // Phase 2 execution contract — the terminal mission status.
+            missionStatus = completed ? 'completed'
+              : turnResult.action === 'blocked' ? 'blocked'
+              : 'failed';
+            if (completed) {
+              const verificationEvidence = this.taskVerificationSummary(taskEngine.get(missionTaskId));
+              if (verificationEvidence) {
+                void this.gateway.sendStreamEvent(sessionId, {
+                  type: 'recovery',
+                  executionId: missionMarker,
+                  runId: presentation?.runId || uuidv4(),
+                  messageId: presentation?.messageId || uuidv4(),
+                  phase: 'verified',
+                  text: `Verification passed: ${verificationEvidence}`,
+                  progressPct: 100
+                });
+              }
+            }
             this.memory.add(sessionId, {
               role: 'assistant',
               content: cleanContent,
@@ -3533,7 +3691,8 @@ export class AgentRunner {
               presentation?.runId || uuidv4(),
               presentation?.messageId || uuidv4(),
               completed,
-              presentation?.reasoning
+              presentation?.reasoning,
+              missionMarker
             );
             if (presentation?.recordLearning && !isBackgroundMessage) {
               void this.learning.recordInteraction(sessionId, msg.content, cleanContent);
@@ -3612,6 +3771,7 @@ export class AgentRunner {
       // CANCELLED, and no failure is surfaced.
       if (error instanceof MissionStoppedError) {
         this.stoppedSessions.delete(sessionId);
+        missionStatus = 'cancelled';
         const stoppedText = '⏹ Stopped.';
         try {
           // Record the distinct user-stop state: the canonical Task transitions
@@ -3648,6 +3808,7 @@ export class AgentRunner {
         if (this.gateway.supportsStructuredStreaming?.(sessionId)) {
           await this.gateway.sendStreamEvent(sessionId, {
             type: 'assistant_stopped',
+            executionId: missionMarker,
             runId: uuidv4(),
             messageId: uuidv4(),
             finalText: stoppedText
@@ -3657,6 +3818,7 @@ export class AgentRunner {
         }
         return;
       }
+      missionStatus = 'failed';
       const errorText = `The mission stopped because the execution driver failed: ${error?.message || String(error)}`;
       try {
         const currentTask = taskEngine.get(missionTaskId);
@@ -3673,13 +3835,19 @@ export class AgentRunner {
         role: 'assistant', content: errorText, timestamp: Date.now(),
         metadata: { final: true, completed: false, missionDriverFailed: true }
       });
-      await this.deliverFinalResponse(sessionId, errorText, uuidv4(), uuidv4(), false);
+      await this.deliverFinalResponse(sessionId, errorText, uuidv4(), uuidv4(), false, undefined, missionMarker);
     } finally {
       this.sessionSignals.delete(sessionId);
+      if (toolDeltaTimer) clearTimeout(toolDeltaTimer);
+      toolDeltaTimer = null;
+      toolDeltaBuffer.clear();
       void this.gateway.sendStreamEvent(sessionId, {
         type: 'mission_end',
+        executionId: missionMarker,
         runId: missionMarker,
-        messageId: missionMarker
+        messageId: missionMarker,
+        status: missionStatus,
+        progressPct: missionStatus === 'completed' ? 100 : missionProgressPct()
       });
     }
   }
