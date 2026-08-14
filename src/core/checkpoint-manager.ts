@@ -5,6 +5,7 @@ import path from 'path';
 import { execFileSync } from 'child_process';
 import { workspaceManager } from './workspace-manager';
 import { hookManager } from './hooks';
+import { atomicWriteJsonSync } from './atomic-write';
 
 export interface WorkspaceCheckpoint {
   id: string;
@@ -171,9 +172,10 @@ export class CheckpointManager {
   }
 
   private write(data: CheckpointData): void {
-    const temp = `${this.metadataPath}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify(data, null, 2));
-    fs.renameSync(temp, this.metadataPath);
+    // Phase 22 — resilient atomic write (retry + copy fallback + warn, never
+    // throw): a transient OneDrive lock on checkpoint metadata must not
+    // abort a rollback or checkpoint creation.
+    atomicWriteJsonSync(this.metadataPath, data);
   }
 }
 

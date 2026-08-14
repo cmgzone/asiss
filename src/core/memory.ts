@@ -1,5 +1,6 @@
 import path from 'path';
 import fs from 'fs';
+import { bestEffortRenameSync } from './atomic-write';
 
 type BetterSqliteModule = typeof import('better-sqlite3');
 type BetterSqliteDatabase = import('better-sqlite3').Database;
@@ -135,8 +136,11 @@ export class MemoryManager {
 
         transaction(data);
         console.log('[MemoryManager] Migration complete.');
-        // Rename old file to backup
-        fs.renameSync(this.jsonPath, this.jsonPath + '.bak');
+        // Rename old file to backup (Phase 22: best-effort — a transient
+        // OneDrive lock on the old JSON must not fail the migration).
+        if (!bestEffortRenameSync(this.jsonPath, this.jsonPath + '.bak')) {
+          console.warn('[MemoryManager] Could not back up legacy memory file; migration itself succeeded.');
+        }
       } catch (e) {
         console.error('[MemoryManager] Migration failed:', e);
       }

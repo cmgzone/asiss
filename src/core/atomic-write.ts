@@ -10,7 +10,7 @@ import path from 'path';
  * `Gitu Data` under `C:\Users\Admin\OneDrive\`). A transient lock during a
  * mission's state save then bubbled up and ABORTED the whole mission.
  *
- * This helper makes persistence best-effort and non-fatal:
+ * These helpers make persistence best-effort and non-fatal:
  *   1. write to `<file>.tmp`
  *   2. retry the atomic rename a few times with a short backoff (the lock is
  *      usually released within tens of ms)
@@ -22,9 +22,14 @@ import path from 'path';
  */
 export function atomicWriteJsonSync(filePath: string, data: unknown): void {
   if (!filePath) return;
+  atomicWriteStringSync(filePath, JSON.stringify(data, null, 2));
+}
+
+/** String variant for non-JSON payloads (same retry/fallback contract). */
+export function atomicWriteStringSync(filePath: string, payload: string): void {
+  if (!filePath) return;
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const temp = `${filePath}.tmp`;
-  const payload = JSON.stringify(data, null, 2);
   fs.writeFileSync(temp, payload);
 
   const renameAttempts = 4;
@@ -41,8 +46,7 @@ export function atomicWriteJsonSync(filePath: string, data: unknown): void {
       }
       // Backoff: 20ms -> 40ms -> 80ms — long enough for a sync-engine
       // handle to release, short enough to not stall a mission.
-      const waited = sleepSync(20 * Math.pow(2, attempt));
-      if (!waited) break;
+      sleepSync(20 * Math.pow(2, attempt));
     }
   }
 
@@ -63,6 +67,26 @@ export function atomicWriteJsonSync(filePath: string, data: unknown): void {
       `(${error?.message || error}); kept ${path.basename(temp)} — will retry on the next save.`
     );
   }
+}
+
+/**
+ * Best-effort rename for non-atomic use (e.g. creating a `.bak` backup during
+ * a migration): retries the transient codes, then quietly gives up — the
+ * caller treats the backup as expendable.
+ */
+export function bestEffortRenameSync(source: string, dest: string): boolean {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      fs.renameSync(source, dest);
+      return true;
+    } catch (error: any) {
+      const code = String(error?.code || '');
+      const transient = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+      if (!transient) return false;
+      sleepSync(20 * Math.pow(2, attempt));
+    }
+  }
+  return false;
 }
 
 // One pending deferred retry per file path (keyed in a module-level Set) so a

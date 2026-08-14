@@ -20,6 +20,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { atomicWriteJsonSync } from '../atomic-write';
 import type { PersistentRepositoryIndex } from '../context/repo-index';
 import {
   type MemoryProvider,
@@ -147,15 +148,9 @@ export class ProjectMemoryStore {
   }
 
   save(): void {
-    try {
-      fs.mkdirSync(path.dirname(this.dataPath), { recursive: true });
-      const payload = JSON.stringify({ entries: [...this.entries.values()] }, null, 2);
-      const tmp = `${this.dataPath}.tmp`;
-      fs.writeFileSync(tmp, payload);
-      fs.renameSync(tmp, this.dataPath);
-    } catch (err: any) {
-      console.warn('[ProjectMemoryStore] save failed:', err?.message || err);
-    }
+    // Phase 22 — resilient atomic write (retry + copy fallback + warn, never
+    // throw): a transient OneDrive lock must not lose project facts.
+    atomicWriteJsonSync(this.dataPath, { entries: [...this.entries.values()] });
   }
 
   private load(): void {

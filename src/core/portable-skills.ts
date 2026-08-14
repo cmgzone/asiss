@@ -1,6 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { atomicWriteJsonSync } from './atomic-write';
 
 export interface PortableSkillRecord {
   name: string;
@@ -169,9 +170,9 @@ export class PortableSkillsManager {
   }
 
   private writeManifest(manifest: PortableManifest): void {
-    const temp = `${this.manifestPath}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify(manifest, null, 2));
-    fs.renameSync(temp, this.manifestPath);
+    // Phase 22 — resilient atomic write: a transient OneDrive lock on the
+    // skills manifest must not lose registered portable skills.
+    atomicWriteJsonSync(this.manifestPath, manifest);
   }
 }
 

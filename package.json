@@ -58,6 +58,7 @@
     "smoke:execution-store": "ts-node scripts/smoke-execution-store.ts",
     "smoke:webui-cards": "ts-node scripts/smoke-webui-execution-cards.ts",
     "smoke:phase22": "ts-node scripts/smoke-phase22.ts",
+    "smoke:webui-e2e": "node scripts/smoke-webui-e2e.cjs",
     "smoke:phase16": "ts-node scripts/smoke-phase16.ts",
     "battery": "ts-node scripts/run-battery.ts",
     "typecheck": "tsc --noEmit",

@@ -8,6 +8,7 @@ import path from 'path';
 import fs from 'fs';
 import { scratchpad } from '../core/scratchpad';
 import { stripShellStreamMarker } from '../core/stream-markers';
+import { atomicWriteJsonSync } from '../core/atomic-write';
 
 export const buildStableSessionId = (userId: string, channel: string): string => {
   const digest = crypto
@@ -114,9 +115,8 @@ export class Gateway {
           }
 
           // Atomic write so a crash mid-save cannot corrupt config.json
-          const tmpPath = 'config.json.tmp';
-          fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
-          fs.renameSync(tmpPath, 'config.json');
+          // (Phase 22: resilient — retry + copy fallback, never throws).
+          atomicWriteJsonSync('config.json', config);
           await this.sendResponse(sessionId, `✅ Filesystem mode set to **${mode}**.\n\n⚠️ **Restart Required**: Please restart the application to apply changes.`);
         } catch (e: any) {
           await this.sendResponse(sessionId, `❌ Failed to update config: ${e.message}`);

@@ -19,6 +19,7 @@ import { ModelLevel, ModelProvider, LEVEL_RANK } from '../models';
 import { providerLevel } from '../model-level';
 import { modelResilienceManager } from '../resilient-model';
 import { costTracker } from '../cost-tracker';
+import { atomicWriteJsonSync } from '../atomic-write';
 import {
   BuildModelTaskProfileInput,
   ModelCostSnapshot,
@@ -342,15 +343,9 @@ export class ModelEngine {
 
   private save(): void {
     if (!this.filePath) return;
-    try {
-      const directory = path.dirname(this.filePath);
-      if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true });
-      const temporary = `${this.filePath}.tmp`;
-      fs.writeFileSync(temporary, JSON.stringify(this.metrics, null, 2));
-      fs.renameSync(temporary, this.filePath);
-    } catch (error: any) {
-      console.warn('[ModelEngine] Could not save model metrics:', error?.message || error);
-    }
+    // Phase 22 — resilient atomic write (retry + copy fallback + warn, never
+    // throw): a transient OneDrive lock must not lose model metrics.
+    atomicWriteJsonSync(this.filePath, this.metrics);
   }
 }
 

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { atomicWriteJsonSync } from './atomic-write';
 
 // Node.js clamps setTimeout delays above this value (2^31-1 ms ~ 24.8 days) to 1 ms,
 // which would make far-future jobs fire immediately. Keep every delay under it.
@@ -54,13 +55,9 @@ export class SchedulerManager {
   }
 
   private save() {
-    try {
-      const tmpPath = `${this.filePath}.tmp`;
-      fs.writeFileSync(tmpPath, JSON.stringify(this.jobs, null, 2));
-      fs.renameSync(tmpPath, this.filePath);
-    } catch (e) {
-      console.error('[Scheduler] Failed to save jobs:', e);
-    }
+    // Phase 22 — resilient atomic write (retry + copy fallback). A transient
+    // OneDrive lock on scheduler.json must not lose a scheduled job.
+    atomicWriteJsonSync(this.filePath, this.jobs);
   }
 
   start() {

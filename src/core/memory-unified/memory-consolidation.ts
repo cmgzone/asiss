@@ -19,6 +19,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { atomicWriteJsonSync } from '../atomic-write';
 import {
   relevanceOf,
   scoreRecords,
@@ -176,17 +177,11 @@ export class MemoryConsolidation {
     return this.overlays.get(id);
   }
 
-  /** Persist the overlay (atomic tmp + rename). */
+  /** Persist the overlay (resilient atomic write — Phase 22). */
   save(): void {
-    try {
-      fs.mkdirSync(path.dirname(this.dataPath), { recursive: true });
-      const payload = JSON.stringify({ records: Object.fromEntries(this.overlays) }, null, 2);
-      const tmp = `${this.dataPath}.tmp`;
-      fs.writeFileSync(tmp, payload);
-      fs.renameSync(tmp, this.dataPath);
-    } catch (err: any) {
-      console.warn('[MemoryConsolidation] save failed:', err?.message || err);
-    }
+    // Retry + copy fallback + warn, never throw: a transient OneDrive lock
+    // must not lose consolidation overlays or break the memory pipeline.
+    atomicWriteJsonSync(this.dataPath, { records: Object.fromEntries(this.overlays) });
   }
 
   // ---------------------------------------------------- consolidated view

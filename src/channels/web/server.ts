@@ -8,6 +8,7 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthManager } from '../../core/auth';
+import { atomicWriteStringSync } from '../../core/atomic-write';
 import multer from 'multer';
 import { sttService } from '../../core/stt';
 import { ttsService } from '../../core/tts';
@@ -1926,9 +1927,9 @@ export class WebChannel implements ChannelAdapter {
   }
 
   private atomicWriteFile(filePath: string, data: string) {
-    const tmpPath = `${filePath}.${process.pid}.tmp`;
-    fs.writeFileSync(tmpPath, data);
-    fs.renameSync(tmpPath, filePath);
+    // Phase 22 — resilient atomic write (retry + copy fallback): a transient
+    // OneDrive lock must not lose settings/config saves.
+    atomicWriteStringSync(filePath, data);
   }
 
   private writeJsonFile(filename: string, data: any) {

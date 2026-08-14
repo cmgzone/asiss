@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { atomicWriteJsonSync } from './atomic-write';
 
 export interface User {
     id: string;
@@ -50,14 +51,9 @@ export class AuthManager {
     }
 
     private save() {
-        try {
-            const data = Array.from(this.users.values());
-            const tmpPath = `${this.filePath}.tmp`;
-            fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
-            fs.renameSync(tmpPath, this.filePath);
-        } catch (e) {
-            console.error('[AuthManager] Failed to save users:', e);
-        }
+        // Phase 22 — resilient atomic write: a transient OneDrive lock on
+        // users.json must not fail the save or reject a login/registration.
+        atomicWriteJsonSync(this.filePath, Array.from(this.users.values()));
     }
 
     private hashPassword(password: string): string {

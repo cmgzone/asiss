@@ -15,7 +15,7 @@
  *   context, tools, policy, turn-contract, execution-store, scheduler, agent-engine,
  *   agent-task-profile, agent-execution, memory-unified, repo-index,
  *   checkpoints, model-engine, executable-skills, execution-backends,
- *   delegation, runtime
+ *   delegation, runtime, phase22, webui-e2e
  *
  * Out of battery by documented decision (AUDIT_9/AUDIT_10): smoke:learning,
  * smoke:model-resilience, smoke:execute-workflow (pre-existing failures
@@ -60,6 +60,7 @@ export const CANONICAL_BATTERY: BatteryEntry[] = [
   { name: 'execution-store', timeoutMs: 300_000 },
   { name: 'webui-cards', timeoutMs: 300_000 },
   { name: 'phase22', timeoutMs: 120_000 },
+  { name: 'webui-e2e', timeoutMs: 180_000 },
   { name: 'scheduler', timeoutMs: 300_000 },
   { name: 'agent-engine', timeoutMs: 300_000 },
   { name: 'agent-task-profile', timeoutMs: 300_000 },

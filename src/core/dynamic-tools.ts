@@ -1,6 +1,7 @@
 import { Skill, SkillRegistry } from './skills';
 import fs from 'fs';
 import path from 'path';
+import { atomicWriteJsonSync } from './atomic-write';
 
 // ---------------------------------------------------------------------------
 // DynamicToolManager
@@ -89,13 +90,9 @@ export class DynamicToolManager {
   }
 
   private save(): void {
-    try {
-      const tmp = `${this.storePath}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ tools: Array.from(this.records.values()) }, null, 2));
-      fs.renameSync(tmp, this.storePath);
-    } catch {
-      // Non-fatal: dynamic tools are best-effort persistence.
-    }
+    // Phase 22 — resilient atomic write. Dynamic tools are best-effort
+    // persistence; a transient lock must never throw out of a tool call.
+    atomicWriteJsonSync(this.storePath, { tools: Array.from(this.records.values()) });
   }
 
   // Re-register persisted aliases whose target skills exist. Called at startup

@@ -130,7 +130,28 @@ function main() {
   console.log('12. full lock: warn-and-keep-tmp, never throws            ok');
 
   fs.rmSync(dir, { recursive: true, force: true });
-  console.log('phase22: sanitizer + persistence hardening contract holds (12 gates)');
+
+  // §3 — static sweep: every persistence site in src must route through the
+  // resilient helper; the raw tmp+rename pattern may only live inside
+  // atomic-write.ts itself (its own retry/fallback implementation).
+  const srcDir = path.join(__dirname, '..', 'src');
+  const offenders: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== 'node_modules' && entry.name !== 'dist') walk(full); continue; }
+      if (!/\.ts$/.test(entry.name)) continue;
+      const content = fs.readFileSync(full, 'utf8');
+      if (/\.tmp/.test(content) && /renameSync/.test(content)) offenders.push(full);
+    }
+  };
+  walk(srcDir);
+  const allowed = path.join(srcDir, 'core', 'atomic-write.ts');
+  const remaining = offenders.filter(f => path.resolve(f) !== path.resolve(allowed));
+  assert.strictEqual(remaining.length, 0, `raw tmp+renameSync persistence outside atomic-write.ts: ${remaining.join(', ')}`);
+  console.log('13. sweep: no raw tmp+renameSync persistence sites remain  ok');
+
+  console.log('phase22: sanitizer + persistence hardening contract holds (13 gates)');
 }
 
 try {
