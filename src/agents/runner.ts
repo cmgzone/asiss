@@ -1,4 +1,5 @@
 import { Message, StreamEventPayload } from '../core/types';
+import { sanitizeConversationalText } from '../core/protocol-sanitizer';
 import { ModelAttachment, ModelProvider, ModelRegistry } from '../core/models';
 import { SkillRegistry } from '../core/skills';
 import { Memory, MemoryManager } from '../core/memory';
@@ -1222,7 +1223,9 @@ export class AgentRunner {
     reasoning?: string,
     executionId?: string
   ) {
-    const finalText = executionStateManager.prepareAssistantResponse(sessionId, draft, { final: completed });
+    const finalText = sanitizeConversationalText(
+      executionStateManager.prepareAssistantResponse(sessionId, draft, { final: completed })
+    );
     if (!finalText.trim()) return;
     if (this.gateway.supportsStructuredStreaming?.(sessionId)) {
       const scope = executionId ? { executionId } : {};
@@ -2010,7 +2013,9 @@ export class AgentRunner {
     text: string,
     options: { final?: boolean; fallbackNow?: string; fallbackNext?: string } = {}
   ) {
-    const finalText = executionStateManager.prepareAssistantResponse(sessionId, text, options);
+    const finalText = sanitizeConversationalText(
+      executionStateManager.prepareAssistantResponse(sessionId, text, options)
+    );
     if (!finalText || !finalText.trim()) return;
     await this.gateway.sendResponse(sessionId, finalText);
   }
@@ -2765,13 +2770,19 @@ export class AgentRunner {
         if (currentModel.generateStream) {
           response = await withModelRetry(() => currentModel.generateStream!(prompt, finalSystemPrompt, modelTools, (chunk) => {
             if (!chunk) return;
-            fullStreamContent += chunk;
+            // Phase 22 — sanitize the raw model stream BEFORE it reaches the
+            // conversation: text-mode tool protocol (<tool_call>/<arg_key>)
+            // must never render in the chat bubble.
+            const cleanChunk = sanitizeConversationalText(chunk);
+            fullStreamContent += cleanChunk;
             if (this.gateway.supportsStructuredStreaming?.(sessionId)) {
               if (!liveStreamed) {
                 liveStreamed = true;
                 void this.gateway.sendStreamEvent(sessionId, { type: 'assistant_start', executionId: missionMarker, runId: turnRunId, messageId: turnMessageId });
               }
-              void this.gateway.sendStreamEvent(sessionId, { type: 'assistant_delta', executionId: missionMarker, runId: turnRunId, messageId: turnMessageId, text: chunk });
+              if (cleanChunk) {
+                void this.gateway.sendStreamEvent(sessionId, { type: 'assistant_delta', executionId: missionMarker, runId: turnRunId, messageId: turnMessageId, text: cleanChunk });
+              }
             }
           }, attachments), 'StreamGenerate');
           if (fullStreamContent.trim() && !response?.content) {
@@ -3039,11 +3050,13 @@ export class AgentRunner {
           }
 
           const batchMessageId = `${turnMessageId}:tool:${continuationBatch}:${i}`;
-          const progressUpdate = this.buildConversationalProgressUpdate(
-            response.content || '',
-            response.toolCalls,
-            lastBatchHadFailure,
-            missionVerificationPending
+          const progressUpdate = sanitizeConversationalText(
+            this.buildConversationalProgressUpdate(
+              response.content || '',
+              response.toolCalls,
+              lastBatchHadFailure,
+              missionVerificationPending
+            )
           );
           await this.gateway.sendStreamEvent(sessionId, {
             type: 'assistant_update',
@@ -3097,6 +3110,9 @@ export class AgentRunner {
               // update the same card. A batch of N tools now yields N
               // tool_start events instead of one batch-level event.
               const toolCallId = uuidv4();
+              const agentName = call.name === 'delegate_agent'
+                ? String(call.arguments?.agentId || call.arguments?.name || '').trim() || undefined
+                : undefined;
               void this.gateway.sendStreamEvent(sessionId, {
                 type: 'tool_start',
                 executionId: missionMarker,
@@ -3105,6 +3121,7 @@ export class AgentRunner {
                 toolCallId,
                 name: call.name,
                 label: this.toolLabelFor(call.name),
+                agentName,
                 progressPct: missionProgressPct()
               });
               const projectWorkspacePath = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
@@ -3681,7 +3698,7 @@ export class AgentRunner {
             }
             this.memory.add(sessionId, {
               role: 'assistant',
-              content: cleanContent,
+              content: sanitizeConversationalText(cleanContent),
               timestamp: Date.now(),
               metadata: presentation?.metadata || { final: true, completed, reasoning: presentation?.reasoning }
             });
@@ -5037,21 +5054,23 @@ export class AgentRunner {
       let fullStreamContent = '';
       response = await currentModel.generateStream(prompt, finalSystemPrompt, [], (chunk) => {
         if (!chunk) return;
+        const cleanChunk = sanitizeConversationalText(chunk);
         streamedAnyChunk = true;
-        fullStreamContent += chunk;
-        void this.gateway.sendStreamChunk(sessionId, chunk);
+        fullStreamContent += cleanChunk;
+        void this.gateway.sendStreamChunk(sessionId, cleanChunk);
         void this.gateway.sendStreamEvent(sessionId, {
-          type: 'assistant_delta', runId: reportRunId, messageId: reportMessageId, text: chunk
+          type: 'assistant_delta', runId: reportRunId, messageId: reportMessageId, text: cleanChunk
         });
       });
+      const reportFinal = sanitizeConversationalText(streamedAnyChunk ? fullStreamContent : response?.content || '');
       void this.gateway.sendStreamEvent(sessionId, {
         type: 'assistant_done',
         runId: reportRunId,
         messageId: reportMessageId,
-        finalText: streamedAnyChunk ? fullStreamContent : response?.content || ''
+        finalText: reportFinal
       });
       if (!streamedAnyChunk && response?.content) {
-        await this.gateway.sendResponse(sessionId, response.content);
+        await this.gateway.sendResponse(sessionId, reportFinal);
       }
     } else {
       response = await currentModel.generate(prompt, finalSystemPrompt, []);

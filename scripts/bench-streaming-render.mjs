@@ -23,6 +23,11 @@ const src = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const mStart = src.indexOf('function markdown(');
 const mEnd = src.indexOf('\n    ', mStart + 20); // end of the single-line function
 const markdownFn = src.slice(mStart, mEnd);
+// Phase 22: markdown() routes through stripToolProtocol — pull it too so the
+// bench evals the REAL renderer (multi-line fn: ends at the markdown() anchor).
+const sStart = src.indexOf('function stripToolProtocol(');
+const markdownAnchor = src.indexOf('function markdown(');
+const stripFn = src.slice(sStart, markdownAnchor);
 globalThis.window = { marked: true };
 globalThis.marked = marked;
 globalThis.esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]));
@@ -39,6 +44,7 @@ const fakeBox = () => {
   return box;
 };
 globalThis.document = { createElement: fakeBox };
+globalThis.stripToolProtocol = eval('(' + stripFn + ')');
 const markdown = eval('(' + markdownFn + ')');
 
 // ---- corpus: a realistic long answer (~20k chars) ---------------------------

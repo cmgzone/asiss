@@ -102,3 +102,78 @@ the "View execution" modal — all read the same records. Rendering is
 rAF-throttled and per-card (version-based dirty tracking), so a busy
 execution never re-renders its neighbors, and assistant streaming keeps its
 60 ms markdown throttle untouched.
+
+## 17. Phase 22 - Unified live agent experience
+
+### 17.1 The two pipelines are separate - permanently
+
+`
+model stream (raw text + tool protocol)
+        |
+        +-- execution pipeline:  runner.ts emits lifecycle events
+        |       (mission_start / assistant_update / tool_start / tool_delta /
+        |        tool_done / recovery / mission_end)
+        |           -> execution-store.js (PURE reducer, per-execution version)
+        |           -> execution card (in-place animated trace)
+        |
+        +-- conversation pipeline:  sanitizeConversationalText() at the SOURCE
+                (stream chunks, deliverFinalResponse, progress updates,
+                 persisted memory)
+                -> markdown() (stripToolProtocol defense-in-depth for restored
+                   history, then esc-first, then marked.parse)
+                -> chat DOM (assistant messages only)
+`
+
+**The rule:** an execution event is NEVER turned into a chat message. The
+generic *update* message kind is gone: `assistant_update` folds into the
+trace + the adopted thinking message's work label; `assistant_done` always
+finalizes a real assistant message (the `convertToProgress` detour was
+deleted).
+
+### 17.2 Protocol sanitizer (server + client)
+
+The model can emit DeepSeek-style text-mode tool protocol
+(`<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`).
+Nothing in src parsed it - it leaked into the chat as raw markup. Now:
+
+- `src/core/protocol-sanitizer.ts` - PURE `sanitizeConversationalText()`:
+  removes full blocks (multiline/nested/self-closing), stray fragments,
+  chain-of-thought tags and lone "Tool call: X" narration lines; preserves
+  prose; 3-pass with early exit. Applied in runner.ts at every point where
+  model text reaches the conversation (live stream chunks, deliverFinalResponse,
+  progress updates, persisted memory, report streaming).
+- `index.html` `stripToolProtocol()` - the renderer strips before
+  escaping, so even pre-sanitizer history can never show raw markup.
+
+### 17.3 Resilient persistence (the EPERM mission-killer is dead)
+
+Writes under OneDrive (`C:\Users\Admin\OneDrive\Gitu Data\...`) failed with
+`EPERM: rename 'tasks.json.tmp' -> 'tasks.json'` because OneDrive holds the
+target open; the throw propagated to runner.ts and ABORTED the mission.
+`src/core/atomic-write.ts` now: retries the rename (4 attempts, 20/40/80ms
+backoff) on EPERM/EACCES/EBUSY -> falls back to copy+unlink -> degrades to
+warn-and-keep-tmp with a deferred retry. It NEVER throws, so a transient file
+lock can never kill a mission. Used by task-store `save()` and
+conversation-manager `write()`.
+
+### 17.4 Trace UX
+
+- Sub-agents: `delegate_agent` tool_start carries `agentName`; the store
+  builds real agent records (`agents` + first-seen `agentOrder`), the card
+  renders named agent chips (Explorer/Coder/...) that settle with the tool
+  lifecycle.
+- Smart scroll: when the user scrolls up during activity, a sticky
+  "? New activity" pill appears instead of force-jumping; click jumps to the
+  live bottom, scrolling back hides it.
+- Everything else (one card per execution, unique toolCallIds, esc-first
+  hostile-payload safety, per-execution dirty rendering) carried over from
+  Phase 21 and regression-locked by the smoke gates.
+
+### 17.5 Gates
+
+- `smoke:webui-cards` now 21 gates: sanitizer + no event->chat-message
+  paths, parallel interleave isolation, five consecutive turns -> five
+  distinct cards (div-leak regression), sub-agent lifecycle, hostile tool
+  payloads stay inert.
+- `smoke:phase22`: 12 gates on the sanitizer contract + the persistence
+  contract (retry, copy fallback, warn-never-throw) under simulated EPERM.

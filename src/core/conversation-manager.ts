@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { workspaceManager } from './workspace-manager';
+import { atomicWriteJsonSync } from './atomic-write';
 
 export interface StoredConversationMessage {
   kind: string;
@@ -175,9 +176,10 @@ class ConversationManager {
   }
 
   private write(data: ConversationData): void {
-    const tempPath = `${this.filePath}.tmp`;
-    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
-    fs.renameSync(tempPath, this.filePath);
+    // Phase 22 — resilient atomic write (retry + copy fallback + deferred
+    // retry). A transient OneDrive lock on conversations.json must not abort
+    // the save path or reject the caller's conversation update.
+    atomicWriteJsonSync(this.filePath, data);
   }
 }
 

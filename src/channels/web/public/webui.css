@@ -399,6 +399,58 @@
   padding: 5px 9px;
 }
 
+/* ---- Phase 22: sub-agent rows -------------------------------------- */
+.exec-agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 6px;
+}
+.exec-agent-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid #1f2533;
+  border-radius: 99px;
+  font-size: 10.5px;
+  color: #7e8799;
+  background: rgba(255, 255, 255, .02);
+}
+.exec-agent-ico { font-size: 9.5px; color: #596276; }
+.exec-agent-row.running { border-color: rgba(139, 124, 255, .32); color: var(--soft); }
+.exec-agent-row.running .exec-agent-ico { color: var(--accent); animation: work-pulse 1.5s ease-in-out infinite; }
+.exec-agent-row.completed .exec-agent-ico { color: var(--accent2); }
+.exec-agent-row.failed { border-color: rgba(255, 107, 122, .32); }
+.exec-agent-row.failed .exec-agent-ico { color: var(--danger); }
+.exec-agent-label {
+  color: #596276;
+  font-size: 9.5px;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+/* ---- Phase 22: "↓ New activity" smart-scroll pill ------------------- */
+.new-activity-pill {
+  position: sticky;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: -30px auto 6px;
+  padding: 7px 16px;
+  border: 1px solid rgba(139, 124, 255, .45);
+  border-radius: 99px;
+  background: #171b26;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .45);
+  z-index: 40;
+  animation: rise .25s ease both;
+}
+.new-activity-pill:hover { background: #1e2330; }
+
 /* ---- Motion: subtle, purposeful, state-driven ------------------- */
 @keyframes work-pulse {
   50% { opacity: .45; transform: scale(.82); }

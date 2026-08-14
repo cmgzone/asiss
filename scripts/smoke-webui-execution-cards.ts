@@ -228,7 +228,99 @@ function main() {
   assert.ok(!executionStore.executions.get('exec-1')!.runIds.includes('stop-uuid'), 'stop runId never recorded on a neighbor');
   console.log('16. summary binding runIds scoped per execution            ok');
 
-  console.log('webui-cards: message->execution contract holds (16 gates, 40+ assertions)');
+  // §17 — Phase 22 protocol sanitizer: the renderer strips agent-protocol
+  // markup (defense-in-depth for restored history) and the generic progress
+  // message helpers are GONE (no event may become a chat message).
+  const stripMatch = inline.match(/function stripToolProtocol\(text\)\{[\s\S]*?\n    \}/);
+  assert.ok(stripMatch, 'stripToolProtocol present in the inline script');
+  const stripModule: { exports: Partial<Record<string, unknown>> } = { exports: {} };
+  // eslint-disable-next-line no-new-func
+  new Function('module', 'exports', `const esc=null;\n${stripMatch[0]}\nmodule.exports={stripToolProtocol};`)(stripModule, stripModule.exports);
+  const stripToolProtocol = (stripModule.exports as any).stripToolProtocol as (t: string) => string;
+  const rawProtocol = 'Working on it...\n<tool_call>read_file<arg_key>path</arg_key><arg_value>src/a.ts</arg_value></tool_call>\n<tool_call>read_file<arg_key>path</arg_key><arg_value>src/b.ts</arg_value></tool_call>\nDone.';
+  const stripped = stripToolProtocol(rawProtocol);
+  assert.ok(!/tool_call|arg_key|arg_value/.test(stripped), 'whole tool_call blocks removed: ' + stripped);
+  assert.ok(stripped.includes('Working on it...') && stripped.includes('Done.'), 'surrounding prose preserved');
+  assert.ok(!/tool_call|arg_key|arg_value/.test(stripToolProtocol('stray <tool_call> and <arg_key>k</arg_key> bits')), 'stray protocol fragments removed');
+  assert.ok(!/tool_call|arg_key|arg_value/.test(stripToolProtocol('<tool_call self_close="1"/> alone')), 'self-closing tool_call removed');
+  assert.ok(inline.includes('markdown(text){const safe=esc(stripToolProtocol(text))'), 'markdown() routes through stripToolProtocol');
+  assert.ok(!inline.includes('function addProgressUpdate'), 'addProgressUpdate helper deleted');
+  assert.ok(!inline.includes('function convertToProgress'), 'convertToProgress helper deleted');
+  const socketJs = fs.readFileSync(path.join(ROOT, 'src', 'channels', 'web', 'public', 'js', 'socket.js'), 'utf8');
+  assert.ok(!socketJs.includes('addProgressUpdate'), 'socket.js never creates generic progress messages');
+  assert.ok(!socketJs.includes('convertToProgress'), 'socket.js never converts assistant turns into update messages');
+  assert.ok(/socket\.on\('assistant_update'[\s\S]*?scheduleExecutionRender\(\)/.test(socketJs), 'assistant_update folds into the trace, never a chat message');
+  console.log('17. protocol sanitizer + no event->chat-message paths      ok');
+
+  // §18 — Phase 22 parallel interleave: interleaved events from three live
+  // missions keep every card's timeline private (no cross-card contamination
+  // even when toolCallIds collide by NAME).
+  const inter: StoreShape = { executions: new Map(), currentId: null };
+  for (let i = 0; i <= 4; i++) {
+    for (const exId of ['p1', 'p2', 'p3']) {
+      applyExecutionEvent(inter, { type: i === 0 ? 'mission_start' : 'tool_start', executionId: exId, runId: `pr-${exId}`, messageId: `pm-${exId}`, toolCallId: `${exId}-t${i}`, name: 'shell', label: 'Running tests', progressPct: i * 5 });
+    }
+  }
+  for (const exId of ['p1', 'p2', 'p3']) {
+    const h = cardHtmlForExecution(inter.executions.get(exId), {});
+    for (let i = 1; i <= 4; i++) {
+      assert.ok(h.includes(`data-tool="${exId}-t${i}"`), `${exId} keeps tool row ${i}`);
+    }
+    for (const other of ['p1', 'p2', 'p3'].filter(x => x !== exId)) {
+      assert.ok(!h.includes(`data-tool="${other}-t1"`), `${exId} card never carries ${other}'s rows`);
+    }
+    assert.ok(h.includes(`data-exec="${exId}"`), `${exId} card carries its own identity`);
+  }
+  console.log('18. parallel interleave keeps every timeline private       ok');
+
+  // §19 — Phase 22 repeated messages: five consecutive assistant turns each
+  // get their OWN execution + card (div-leak regression — no shared element).
+  const five: StoreShape = { executions: new Map(), currentId: null };
+  for (let i = 0; i < 5; i++) {
+    const exId = `turn-${i}`;
+    applyExecutionEvent(five, { type: 'mission_start', executionId: exId, runId: `r-${i}`, messageId: `m-${i}` });
+    applyExecutionEvent(five, { type: 'tool_start', executionId: exId, runId: `r-${i}`, messageId: `m-${i}`, toolCallId: `t-${i}`, name: 'read_file' });
+  }
+  assert.strictEqual(five.executions.size, 5, 'five turns -> five executions in the store');
+  const cardIds = [...five.executions.keys()].map((id: string) => executionCardId(id));
+  assert.strictEqual(new Set(cardIds).size, 5, 'five turns -> five DISTINCT card identities');
+  for (let i = 0; i < 5; i++) {
+    const h = cardHtmlForExecution(five.executions.get(`turn-${i}`), {});
+    assert.ok(h.includes(`data-exec="turn-${i}"`) && h.includes(`data-tool="t-${i}"`), `turn ${i} card is its own`);
+  }
+  console.log('19. five consecutive turns -> five distinct cards (no leak) ok');
+
+  // §20 — Phase 22 sub-agents: a delegate_agent call renders a named agent
+  // row that settles with the tool lifecycle; the snapshot keeps it.
+  const swarm: StoreShape = { executions: new Map(), currentId: null };
+  applyExecutionEvent(swarm, { type: 'mission_start', executionId: 'swarm-1', runId: 'sr', messageId: 'sm' });
+  applyExecutionEvent(swarm, { type: 'tool_start', executionId: 'swarm-1', runId: 'sr', messageId: 'sm', toolCallId: 'd-1', name: 'delegate_agent', label: 'Coordinating agents', agentName: 'Explorer' });
+  const swarmHtml = cardHtmlForExecution(swarm.executions.get('swarm-1'), {});
+  assert.ok(swarmHtml.includes('exec-agent-row'), 'delegation renders an agent row');
+  assert.ok(swarmHtml.includes('>Explorer'), 'agent row carries the delegated agent name');
+  assert.ok(swarmHtml.includes('exec-agent-row running'), 'agent row starts running');
+  applyExecutionEvent(swarm, { type: 'tool_done', executionId: 'swarm-1', runId: 'sr', messageId: 'sm', toolCallId: 'd-1', name: 'delegate_agent', status: 'completed' });
+  const swarmDoneHtml = cardHtmlForExecution(swarm.executions.get('swarm-1'), {});
+  assert.ok(swarmDoneHtml.includes('exec-agent-row completed'), 'agent row settles completed');
+  assert.ok(!swarmDoneHtml.includes('exec-agent-row running'), 'no running pulse after completion');
+  const swarmSnap = executionSnapshotFor(swarm.executions.get('swarm-1'));
+  assert.ok(swarmSnap!.agents.some((a: any) => a.name === 'Explorer' && a.status === 'completed'), 'snapshot persists the agent row');
+  console.log('20. sub-agent rows track the delegation lifecycle          ok');
+
+  // §21 — Phase 22 html-safety regression: even a hostile execution (markup
+  // inside tool names/labels/output) cannot escape card HTML (CARD_ESC first).
+  const hostile: StoreShape = { executions: new Map(), currentId: null };
+  applyExecutionEvent(hostile, { type: 'mission_start', executionId: 'x1', runId: 'x', messageId: 'xm' });
+  applyExecutionEvent(hostile, { type: 'tool_start', executionId: 'x1', runId: 'x', messageId: 'xm', toolCallId: 'x-t', name: 'read_file"><script>alert(1)</script>', label: '<img src=x onerror=alert(1)>' });
+  applyExecutionEvent(hostile, { type: 'tool_delta', executionId: 'x1', runId: 'x', messageId: 'xm', toolCallId: 'x-t', output: '<svg onload=alert(2)></svg>' });
+  const hostileHtml = cardHtmlForExecution(hostile.executions.get('x1'), {});
+  assert.ok(!hostileHtml.includes('<script>'), 'no raw script tag in card HTML');
+  assert.ok(!/<img[^>]*onerror/i.test(hostileHtml), 'no raw event-handler attribute in card HTML');
+  assert.ok(!/<svg[^>]*onload/i.test(hostileHtml), 'no raw svg payload in card HTML');
+  assert.ok(hostileHtml.includes('&lt;script&gt;'), 'hostile payload escaped, never executed');
+  console.log('21. hostile tool payloads stay inert (esc first, never run) ok');
+
+  console.log('webui-cards: message->execution contract holds (21 gates, 60+ assertions)');
 }
 
 try {

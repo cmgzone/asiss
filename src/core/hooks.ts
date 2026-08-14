@@ -46,7 +46,19 @@ class HookManager {
 
   async emit(name: HookEventName, data: Record<string, unknown>, sessionId?: string): Promise<void> {
     const event: HookEvent = { name, timestamp: Date.now(), sessionId, data: this.sanitize(data) };
-    fs.appendFileSync(this.auditPath, `${JSON.stringify(event)}\n`);
+    // Phase 22 — best-effort audit write. A transient OneDrive lock on
+    // events.jsonl (EBUSY/EPERM) must never throw into a mission's checkpoint
+    // path; the audit line is recoverable, the mission is not.
+    try {
+      fs.appendFileSync(this.auditPath, `${JSON.stringify(event)}\n`);
+    } catch (error: any) {
+      const code = String(error?.code || '');
+      if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') {
+        console.warn(`[Hooks] audit append deferred (${code}) — skipping events.jsonl line for ${name}`);
+      } else {
+        throw error;
+      }
+    }
     for (const handler of this.handlers.get(name) || []) {
       try {
         await handler(event);

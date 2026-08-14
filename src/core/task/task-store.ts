@@ -15,6 +15,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { Task, TaskStatus } from './task-types';
+import { atomicWriteJsonSync } from '../atomic-write';
 
 export interface TaskStoreOptions {
   /** JSON file path for persistence. Omit (or pass '') for a memory-only store. */
@@ -144,10 +145,10 @@ export class TaskStore {
 
   save(): void {
     if (!this.filePath) return;
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-    const temp = `${this.filePath}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify({ tasks: this.list() }, null, 2));
-    fs.renameSync(temp, this.filePath);
+    // Phase 22 — resilient atomic write: transient file locks (OneDrive sync
+    // holding the target open, EPERM on rename) must never abort the mission.
+    // See src/core/atomic-write.ts for the retry/fallback contract.
+    atomicWriteJsonSync(this.filePath, { tasks: this.list() });
   }
 
   load(): void {

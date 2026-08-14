@@ -57,6 +57,7 @@ interface ExecutionRecord {
   artifacts: { caption: string }[];
   activeToolId: string | null;
   latestError?: string;
+  version?: number;
 }
 interface ExecutionStore {
   executions: Map<string, ExecutionRecord>;
@@ -80,12 +81,20 @@ function main() {
     /\/\/ ===== Phase 3 — ephemeral execution store \(PURE — no DOM\) =====([\s\S]*?)\/\/ ===== \/execution store =====/
   );
   assert.ok(block, 'execution store block found in js/execution-store.js');
-  const src = block[1] + '\nfunction scheduleExecutionRender(){}\nmodule.exports={executionStore,createExecution,reduceExecution,applyExecutionEvent};';
-  const moduleObj: { exports: Partial<{ executionStore: ExecutionStore; applyExecutionEvent: (store: ExecutionStore, event: Record<string, unknown>) => void }> } = { exports: {} };
+  const cardBlock = html.match(
+    /\/\/ ===== Phase 21 \u2014 per-execution chat cards \(PURE identity\/HTML\) =====([\s\S]*?)\/\/ ===== \/per-execution cards \(PURE\) =====/
+  );
+  assert.ok(cardBlock, 'Phase 21 card block found in the inline script');
+  const src = block[1]
+    + '\n' + cardBlock[1]
+    + '\nfunction scheduleExecutionRender(){}\n'
+    + 'module.exports={executionStore,createExecution,reduceExecution,applyExecutionEvent,cardHtmlForExecution};';
+  const moduleObj: { exports: Partial<{ executionStore: ExecutionStore; applyExecutionEvent: (store: ExecutionStore, event: Record<string, unknown>) => void; cardHtmlForExecution: (ex: any, opts?: Record<string, unknown>) => string }> } = { exports: {} };
   // eslint-disable-next-line no-new-func
   new Function('module', 'exports', src)(moduleObj, moduleObj.exports);
-  const { executionStore, applyExecutionEvent } = moduleObj.exports;
+  const { executionStore, applyExecutionEvent, cardHtmlForExecution } = moduleObj.exports;
   assert.ok(typeof applyExecutionEvent === 'function', 'applyExecutionEvent exported by the store block');
+  assert.ok(typeof cardHtmlForExecution === 'function', 'cardHtmlForExecution exported for the perf gate');
   assert.ok(executionStore && executionStore.executions instanceof Map, 'executionStore exported with executions Map');
   console.log('2. store block extracted and self-contained               ok');
   // §3 — happy path: mission -> tools (incl. delegate) -> recovery -> completion.
@@ -184,7 +193,51 @@ function main() {
   assert.strictEqual(executionStore!.executions.size, sizeBefore, 'chat-only events never touch the store');
   console.log('6. no-executionId events ignored                          ok');
 
-  console.log('execution-store: reducer contract holds (13 happy-path + 3 state + 1 progress-lifecycle assertions)');
+  // §7 — Phase 22 performance contract: the reducer stays cheap at mission
+  // scale (100/500/1000 events across parallel executions), and card HTML
+  // stays bounded (the renderer slices, never renders every row).
+  const perfStart = Date.now();
+  const perfStore: ExecutionStore = { executions: new Map(), currentId: null };
+  const TOTAL = 1000;
+  for (let i = 0; i < TOTAL; i++) {
+    const exId = `perf-${i % 3}`;
+    const ev = i < 3
+      ? { type: 'mission_start', executionId: exId, runId: `pr-${exId}`, messageId: `pm-${exId}`, progressPct: 0 }
+      : (i % 4 === 0
+        ? { type: 'tool_start', executionId: exId, runId: `pr-${exId}`, messageId: `pm-${exId}`, toolCallId: `t-${i}`, name: 'shell', label: 'Running tests', progressPct: (i % 100) }
+        : i % 4 === 1
+          ? { type: 'tool_delta', executionId: exId, runId: `pr-${exId}`, messageId: `pm-${exId}`, toolCallId: `t-${i - 1}`, output: 'stream', progressPct: (i % 100) }
+          : i % 4 === 2
+            ? { type: 'tool_done', executionId: exId, runId: `pr-${exId}`, messageId: `pm-${exId}`, toolCallId: `t-${i - 1}`, status: 'completed', progressPct: (i % 100) }
+            : { type: 'assistant_update', executionId: exId, runId: `pr-${exId}`, messageId: `pm-${exId}`, text: `Progress step ${i}`, progressPct: (i % 100) });
+    applyExecutionEvent(perfStore, ev as any);
+  }
+  const perfMs = Date.now() - perfStart;
+  assert.strictEqual(perfStore.executions.size, 3, 'three parallel executions after 1000 events');
+  assert.ok(perfMs < 2000, `1000 events reduced in ${perfMs}ms (must stay interactive)`);
+  for (let i = 0; i < 3; i++) {
+    const ex = perfStore.executions.get(`perf-${i}`)!;
+    assert.ok((ex.version || 0) >= 333, `perf-${i} bumped version across the burst (${ex.version})`);
+  }
+  console.log(`7. performance: 1000 events across 3 executions in ${perfMs}ms ok`);
+
+  // §8 — Phase 22 perf bound on the render path: HTML derives from a slice,
+  // so a 1000-tool execution still renders a bounded card.
+  const big: ExecutionStore = { executions: new Map(), currentId: null };
+  applyExecutionEvent(big, { type: 'mission_start', executionId: 'big', runId: 'r', messageId: 'm' });
+  for (let i = 0; i < 1000; i++) {
+    applyExecutionEvent(big, { type: 'tool_start', executionId: 'big', runId: 'r', messageId: 'm', toolCallId: `t-${i}`, name: 'read_file' });
+    applyExecutionEvent(big, { type: 'tool_done', executionId: 'big', runId: 'r', messageId: 'm', toolCallId: `t-${i}`, status: 'completed' });
+  }
+  const bigStart = Date.now();
+  const bigHtml = cardHtmlForExecution(big.executions.get('big')!, {});
+  const bigMs = Date.now() - bigStart;
+  assert.ok(bigMs < 200, `1000-tool card rendered in ${bigMs}ms`);
+  const rows = (bigHtml.match(/class="exec-tool-row/g) || []).length;
+  assert.ok(rows <= 12, `card renders at most 12 rows (got ${rows}) — bounded, never 1000`);
+  console.log(`8. performance: 1000-tool execution renders ${rows} rows in ${bigMs}ms ok`);
+
+  console.log('execution-store: reducer contract holds (13 happy-path + 3 state + 1 progress-lifecycle + 2 perf assertions)');
 }
 
 try {

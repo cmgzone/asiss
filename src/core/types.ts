@@ -53,6 +53,10 @@ export interface StreamEventPayload {
   toolCallId?: string;
   /** Human label for a tool call, e.g. 'Reading repository'. */
   label?: string;
+  /** Delegation identity: the sub-agent's display name (tool_start). */
+  agentName?: string;
+  /** Hierarchy: the execution this one was spawned from. */
+  parentExecutionId?: string;
   name?: string;
   output?: string;
   status?: string;

@@ -7,7 +7,7 @@
     // version bumps on every applied event so the render layer can skip cards
     // whose execution has not changed (per-card dirty tracking instead of
     // re-rendering every mounted card on every socket event).
-    function createExecution(id,event){return{id,scope:{projectId:String(event?.projectId||''),conversationId:String(event?.conversationId||'')},status:'running',startedAt:Date.now(),endedAt:null,currentTask:'',activeToolId:null,tools:[],agents:[],progress:null,artifacts:[],terminal:'',latestError:null,recoveryPhase:null,recoveryPhases:[],version:0,lastEventAt:Date.now(),runIds:[]}}
+    function createExecution(id,event){return{id,scope:{projectId:String(event?.projectId||''),conversationId:String(event?.conversationId||'')},status:'running',startedAt:Date.now(),endedAt:null,currentTask:'',currentActivity:'',activeToolId:null,tools:[],agents:[],agentOrder:[],progress:null,artifacts:[],terminal:'',latestError:null,recoveryPhase:null,recoveryPhases:[],version:0,lastEventAt:Date.now(),runIds:[]}}
     function findTool(execution,toolCallId){return execution.tools.find(t=>t.id===toolCallId)}
     // Human work status for ONE execution — derived ONLY from real lifecycle
     // events (mission/tool/status), never from invented model reasoning.
@@ -47,7 +47,15 @@
         if(t){t.status='running';if(event.label)t.label=event.label}
         else{execution.tools.push({id:event.toolCallId,name:event.name,label:event.label||event.name,status:'running',output:'',error:null,startedAt:Date.now(),endedAt:null})}
         execution.activeToolId=event.toolCallId;
-        if(String(event.name||'').toLowerCase().includes('delegate')){execution.agents.push({id:event.toolCallId,name:event.name,status:'running'})}
+        execution.currentActivity=String(event.label||event.name||'').slice(0,80);
+        if(String(event.name||'').toLowerCase().includes('delegate')){
+          const existing=execution.agents.find(a=>a.id===event.toolCallId);
+          if(!existing){
+            const agent={id:event.toolCallId,name:event.agentName||event.name,label:event.label||'Coordinating agents',status:'running',parentExecutionId:event.parentExecutionId||null,startedAt:Date.now(),endedAt:null};
+            execution.agents.push(agent);
+            if(!execution.agentOrder.includes(agent.id))execution.agentOrder.push(agent.id);
+          }
+        }
         return execution;
       }
       if(event.type==='tool_delta'){
@@ -59,9 +67,9 @@
         const t=findTool(execution,event.toolCallId);
         if(t){t.status=event.status==='failed'?'failed':'completed';t.error=event.error||null;t.endedAt=Date.now();if(event.output)t.output=(t.output?t.output+'\n\n':'')+String(event.output).slice(0,3000)}
         if(event.status==='failed')execution.latestError=String(event.error||`${event.name||'tool'} failed`);
-        if(execution.activeToolId===event.toolCallId)execution.activeToolId=null;
+        if(execution.activeToolId===event.toolCallId){execution.activeToolId=null;execution.currentActivity=''}
         const agent=execution.agents.find(a=>a.id===event.toolCallId);
-        if(agent)agent.status=event.status==='failed'?'failed':'completed';
+        if(agent){agent.status=event.status==='failed'?'failed':'completed';agent.endedAt=Date.now()}
         return execution;
       }
       return execution;
