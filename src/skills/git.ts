@@ -3,6 +3,8 @@ import { execFile } from 'child_process';
 import util from 'util';
 import fs from 'fs';
 import path from 'path';
+import { isPathInsideWorkspace } from '../core/project-context';
+import { projectContextFromParams } from './workspace-guard';
 
 const execFileAsync = util.promisify(execFile);
 
@@ -92,9 +94,34 @@ export class GitSkill implements Skill {
   }
 
   private resolveRepo(params: any): string | null {
+    // Phase 23 — when bound to a project, the git repository must live inside
+    // the active workspace; process.cwd() (the ENGINE_ROOT) is never a repo
+    // candidate for a bound call.
+    const ctx = projectContextFromParams(params);
+    if (ctx) {
+      const candidates = [
+        typeof params?.repo === 'string' ? params.repo.trim() : '',
+        ctx.workspaceRoot
+      ].filter(Boolean);
+      for (const candidate of candidates) {
+        let dir = path.resolve(candidate);
+        if (!isPathInsideWorkspace(dir, ctx.workspaceRoot)) continue;
+        for (let i = 0; i < 8; i++) {
+          try {
+            if (fs.existsSync(path.join(dir, '.git'))) return dir;
+          } catch { /* ignore */ }
+          const parent = path.dirname(dir);
+          if (parent === dir) break;
+          dir = parent;
+        }
+      }
+      return null;
+    }
+
     const candidates = [
       typeof params?.repo === 'string' ? params.repo.trim() : '',
       typeof params?.__workspacePath === 'string' ? params.__workspacePath : '',
+      // phase23-ok: unbound fallback only (no attached project -> no workspace to violate)
       process.cwd()
     ].filter(Boolean);
 

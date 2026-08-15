@@ -1,6 +1,8 @@
 import { Skill } from '../core/skills';
 import fs from 'fs';
 import path from 'path';
+import { assertWorkspacePath } from '../core/project-context';
+import { projectContextFromParams, boundaryErrorResult } from './workspace-guard';
 
 interface PatchResult {
     operation: 'add' | 'update' | 'delete' | 'move';
@@ -38,13 +40,38 @@ export class ApplyPatchSkill implements Skill {
         const input = String(params?.input || '');
         const projectId = typeof params?.__projectId === 'string' ? params.__projectId.trim() : '';
         const workspacePath = typeof params?.__workspacePath === 'string' ? params.__workspacePath.trim() : '';
+        // Phase 23 — when bound to a project, the patch may only touch the
+        // active workspace. The workspace root comes from the canonical
+        // ProjectContext (never process.cwd()), and every block path is
+        // asserted inside it before any filesystem mutation.
+        const projectContext = projectContextFromParams(params);
+        if (projectContext) {
+            const root = projectContext.workspaceRoot;
+            if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+                return {
+                    error: 'Project workspace required. Open Projects, then choose Create workspace or Browse folders.'
+                };
+            }
+            if (projectContext.projectId !== 'general') {
+                try {
+                    const base = assertWorkspacePath(params?.basePath || root, projectContext);
+                    return this.applyPatch(input, base, projectContext, Boolean(params?.dryRun));
+                } catch (err: any) {
+                    return boundaryErrorResult(err, 'apply_patch');
+                }
+            }
+        }
         if (projectId && (!workspacePath || !fs.existsSync(workspacePath) || !fs.statSync(workspacePath).isDirectory())) {
             return {
                 error: 'Project workspace required. Open Projects, then choose Create workspace or Browse folders.'
             };
         }
+        // phase23-ok: unbound fallback (no attached project -> no workspace to violate)
         const basePath = projectId ? workspacePath : String(params?.basePath || process.cwd());
-        const dryRun = Boolean(params?.dryRun);
+        return this.applyPatch(input, basePath, undefined, Boolean(params?.dryRun));
+    }
+
+    private async applyPatch(input: string, basePath: string, projectContext: any, dryRun: boolean): Promise<any> {
 
         if (!input.includes('*** Begin Patch') || !input.includes('*** End Patch')) {
             return { error: 'Patch must contain *** Begin Patch and *** End Patch markers' };
@@ -59,7 +86,7 @@ export class ApplyPatchSkill implements Skill {
 
         for (const block of blocks) {
             try {
-                const result = await this.processBlock(block, basePath, dryRun);
+                const result = await this.processBlock(block, basePath, dryRun, projectContext);
                 results.push(result);
             } catch (err: any) {
                 results.push({
@@ -140,11 +167,18 @@ export class ApplyPatchSkill implements Skill {
     private async processBlock(
         block: { operation: 'add' | 'update' | 'delete' | 'move'; path: string; newPath?: string; content: string },
         basePath: string,
-        dryRun: boolean
+        dryRun: boolean,
+        projectContext?: any
     ): Promise<PatchResult> {
         const resolvedBase = path.resolve(basePath);
         const resolveInsideBase = (candidate: string) => {
-            const resolved = path.resolve(resolvedBase, candidate);
+            let resolved = path.resolve(resolvedBase, candidate);
+            // Phase 23 — when bound to a project, every patch target goes
+            // through the canonical workspace boundary (blocks `..` escapes and
+            // absolute paths outside the workspace with a structured violation).
+            if (projectContext) {
+                resolved = assertWorkspacePath(resolved, projectContext);
+            }
             const relative = path.relative(resolvedBase, resolved);
             if (relative.startsWith('..') || path.isAbsolute(relative)) {
                 throw new Error(`Patch path escapes the workspace: ${candidate}`);

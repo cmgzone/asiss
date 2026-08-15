@@ -7,7 +7,7 @@
     // version bumps on every applied event so the render layer can skip cards
     // whose execution has not changed (per-card dirty tracking instead of
     // re-rendering every mounted card on every socket event).
-    function createExecution(id,event){return{id,scope:{projectId:String(event?.projectId||''),conversationId:String(event?.conversationId||'')},status:'running',startedAt:Date.now(),endedAt:null,currentTask:'',currentActivity:'',activeToolId:null,tools:[],agents:[],agentOrder:[],progress:null,artifacts:[],terminal:'',latestError:null,recoveryPhase:null,recoveryPhases:[],version:0,lastEventAt:Date.now(),runIds:[]}}
+    function createExecution(id,event){return{id,scope:{projectId:String(event?.projectId||''),conversationId:String(event?.conversationId||'')},status:'running',startedAt:Date.now(),endedAt:null,currentTask:'',currentActivity:'',activeToolId:null,tools:[],agents:[],agentOrder:[],progress:null,artifacts:[],terminal:'',latestError:null,recoveryPhase:null,recoveryPhases:[],plan:[],diffs:[],activeStepId:null,version:0,lastEventAt:Date.now(),runIds:[]}}
     function findTool(execution,toolCallId){return execution.tools.find(t=>t.id===toolCallId)}
     // Human work status for ONE execution — derived ONLY from real lifecycle
     // events (mission/tool/status), never from invented model reasoning.
@@ -36,6 +36,15 @@
       if(event.progressPct!=null)execution.progress=Math.max(0,Math.min(100,Number(event.progressPct)));
       if(event.type==='mission_start'){execution.status='running';execution.startedAt=Date.now();return execution}
       if(event.type==='mission_end'){execution.status=event.status==='cancelled'?'cancelled':event.status==='failed'?'failed':event.status==='blocked'?'blocked':'completed';execution.endedAt=Date.now();return execution}
+      if(event.type==='plan_update'){if(Array.isArray(event.plan))execution.plan=event.plan;if(event.activeStepId)execution.activeStepId=event.activeStepId;return execution}
+      if(event.type==='file_diff'){
+        if(event.file){
+          const existing=execution.diffs.find(d=>d.file===event.file);
+          if(existing){existing.diff=event.diff||''}
+          else{execution.diffs.push({file:event.file,diff:event.diff||''})}
+        }
+        return execution;
+      }
       if(event.type==='assistant_update'){if(event.text)execution.currentTask=String(event.text).slice(0,160);return execution}
       if(event.type==='assistant_error'){execution.latestError=String(event.error||event.text||'Unexpected error');execution.status='failed';return execution}
       if(event.type==='assistant_stopped'){execution.status='cancelled';execution.endedAt=Date.now();return execution}

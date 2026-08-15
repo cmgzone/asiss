@@ -1,5 +1,5 @@
 import { Message, StreamEventPayload } from '../core/types';
-import { sanitizeConversationalText } from '../core/protocol-sanitizer';
+import { sanitizeConversationalText, extractStructuredToolCalls } from '../core/protocol-sanitizer';
 import { ModelAttachment, ModelProvider, ModelRegistry } from '../core/models';
 import { SkillRegistry } from '../core/skills';
 import { Memory, MemoryManager } from '../core/memory';
@@ -93,6 +93,14 @@ import { loadHermesConfig } from '../core/config';
 import { ApprovalCoordinator, PolicyEngine } from '../core/policy';
 import { buildGoalPlan, ContextEngine, evaluateAcceptanceCriteria, matchedTestFiles, runGoalTests, warmOnToolEvents } from '../core/context';
 import { ToolEngine, normalizeToolRequest } from '../core/tools';
+import {
+  ProjectContext,
+  GENERAL_PROJECT_ID,
+  engineRoot,
+  projectContextFromParts,
+  projectContextRegistry,
+  validateProjectContext
+} from '../core/project-context';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -249,11 +257,12 @@ export class AgentRunner {
       listMcpTools: () => this.mcpManager.listTools(),
       toolEngine: this.toolEngine,
       taskEngine,
-      // Phase 16 Move 4 (D5): child missions retrieve unified memory through
-      // the consolidation layer (dedupe/merge + lifecycle applied, archived/
-      // expired excluded) per the child agent's memoryPolicy. AgentEngine
-      // never sees how memory is stored.
-      retrieveMemory: (query, opts) => this.memoryConsolidation.retrieve(query, opts),
+      // Phase 16 Move 4 (D5) + Phase 23 §6: child missions retrieve unified
+      // memory through the consolidation layer (dedupe/merge + lifecycle
+      // applied, archived/expired excluded) per the child agent's
+      // memoryPolicy, scoped by the canonical ProjectContext so a child never
+      // retrieves another project's memory.
+      retrieveMemory: (projectContext, query, opts) => this.memoryConsolidation.retrieve(query, { ...opts, projectContext }),
       // Phase 18 Move 4 (G3): child missions render the repository section
       // when the agent's contextPolicy includes 'repo' (AUDIT_7 D2 closed).
       contextEngine: this.contextEngine
@@ -809,6 +818,39 @@ export class AgentRunner {
   }
 
   /**
+   * Phase 23 §3 — the canonical ProjectContext for a message. Resolution
+   * order:
+   *   1. conversation binding (conversationId -> projectId in the registry),
+   *   2. message metadata projectId + projectWorkspacePath,
+   *   3. nothing (unbound general chat).
+   * The active project is NEVER inferred from process.cwd() or the last
+   * project used. Returns undefined when the message carries no project.
+   */
+  private resolveMessageProjectContext(msg: Message): ProjectContext | undefined {
+    const conversationId = typeof msg.metadata?.conversationId === 'string' && msg.metadata.conversationId.trim()
+      ? msg.metadata.conversationId.trim()
+      : undefined;
+    const bound = conversationId
+      ? projectContextRegistry.projectForConversation(conversationId)
+      : undefined;
+    if (bound) return bound;
+
+    const workspacePath = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
+    const built = projectContextFromParts({
+      projectId: msg.metadata?.projectId,
+      projectName: msg.metadata?.projectName,
+      workspacePath,
+      conversationId
+    });
+    if (!built) return undefined;
+    try {
+      return validateProjectContext(built);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Builds the repository-aware diagnoser the engine runs for the mission's
    * verification authority (Phase 12 Move 3). The host only wires the
    * ContextEngine + verify-then-retry evidence; the engine owns what the
@@ -850,6 +892,36 @@ export class AgentRunner {
       const workspace = taskWorkspace || this.getValidWorkspacePath(workspacePathValue) || '';
       if (!workspace) return { passed: true, detail: 'No workspace — completion trusted.' };
       try {
+        // Physical file creation/modification verification
+        const creationRequested = /\b(create|build|implement|make|write|generate)\b[\s\S]*?\b(website|app|page|file|index\.html|html|css|js)\b/i.test(taskGoal);
+        if (creationRequested && fs.existsSync(workspace)) {
+          let foundFiles: string[] = [];
+          try {
+            const listDir = (dir: string): string[] => {
+              const entries = fs.readdirSync(dir, { withFileTypes: true });
+              let files: string[] = [];
+              for (const entry of entries) {
+                if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  files = files.concat(listDir(fullPath));
+                } else {
+                  files.push(fullPath);
+                }
+              }
+              return files;
+            };
+            foundFiles = listDir(workspace);
+          } catch { /* ignore read errors */ }
+
+          if (foundFiles.length === 0) {
+            return {
+              passed: false,
+              detail: `Physical verification failed: Workspace '${workspace}' contains no created files. Task requested creation but no files exist on disk.`
+            };
+          }
+        }
+
         const evidence = await this.goalTestEvidence(workspace, taskGoal);
         const tests = evidence.tests || [];
         const detailParts: string[] = [];
@@ -1010,25 +1082,31 @@ export class AgentRunner {
     }
   }
 
-  private buildProjectPrompt(metadata: any): string {
-    const projectId = typeof metadata?.projectId === 'string' ? metadata.projectId.trim() : '';
+  private buildProjectPrompt(metadata: any, projectContext?: ProjectContext): string {
+    const projectId = projectContext?.projectId || (typeof metadata?.projectId === 'string' ? metadata.projectId.trim() : '');
     if (!projectId) return '';
 
-    const name = typeof metadata?.projectName === 'string' && metadata.projectName.trim()
-      ? metadata.projectName.trim()
-      : projectId;
+    const name = projectContext?.projectName
+      || (typeof metadata?.projectName === 'string' && metadata.projectName.trim() ? metadata.projectName.trim() : '')
+      || projectId;
     const description = typeof metadata?.projectDescription === 'string' ? metadata.projectDescription.trim() : '';
-    const workspacePath = typeof metadata?.projectWorkspacePath === 'string' ? metadata.projectWorkspacePath.trim() : '';
-    const workspaceExists = Boolean(metadata?.projectWorkspaceExists);
+    const workspacePath = projectContext?.workspaceRoot || (typeof metadata?.projectWorkspacePath === 'string' ? metadata.projectWorkspacePath.trim() : '');
+    const workspaceExists = workspacePath ? this.getValidWorkspacePath(workspacePath) !== undefined : false;
 
     const lines = [
-      'Active project context:',
-      `- Project ID: ${projectId}`,
-      `- Project name: ${name}`,
-      description ? `- Project description: ${description}` : '',
-      workspacePath ? `- Local workspace folder: ${workspacePath}` : '- Local workspace folder: not attached',
-      workspacePath ? `- Workspace folder exists: ${workspaceExists ? 'yes' : 'no'}` : '',
-      'Treat this chat as scoped to this project. Prefer project-specific history, decisions, files, tasks, and workspace paths when answering or using tools.'
+      'ACTIVE PROJECT:',
+      name,
+      '',
+      `PROJECT_ID:`,
+      projectId,
+      '',
+      'WORKSPACE:',
+      workspacePath || 'not attached',
+      '',
+      description ? `Project description: ${description}` : '',
+      `Engine root (the assistant's own code — NOT your workspace): ${engineRoot()}`,
+      'Do not access another project unless explicitly authorized.',
+      'Treat this chat as scoped to this project. Prefer project-specific history, decisions, files, tasks, and workspace paths when answering or using tools. Filesystem operations are enforced to stay inside the workspace above.'
     ].filter(Boolean);
 
     return `\n\n${lines.join('\n')}\n`;
@@ -2082,6 +2160,20 @@ export class AgentRunner {
     /** Phase 16 Move 3b — the designated default AgentProfile, when resolved. */
     defaultAgent?: Agent;
   }): Promise<string | null> {
+    // Phase 23 — a mission with a workspace must carry a validated project
+    // identity; a malformed context aborts the mission before any tool runs.
+    if (input.workspacePath && !input.projectId) {
+      try {
+        validateProjectContext({
+          projectId: GENERAL_PROJECT_ID,
+          projectName: 'General Workspace',
+          workspaceRoot: input.workspacePath
+        });
+      } catch (error: any) {
+        console.error(`[AgentRunner] mission workspace invalid: ${error?.message || error}`);
+        return null;
+      }
+    }
     try {
       const agentCfg = input.config?.agent || {};
       const maxTurns = Number.isFinite(Number(agentCfg.maxTurns)) ? Math.max(1, Math.floor(Number(agentCfg.maxTurns))) : undefined;
@@ -2268,12 +2360,15 @@ export class AgentRunner {
     // persona + instructions in the prompt. No designated default -> the
     // mission is byte-identical to before (zero behavior change).
     const defaultAgent = agentEngine.resolveDefaultAgent();
+    // Phase 23 — one canonical ProjectContext per message; the mission Task,
+    // every tool call and the system prompt all bind to it.
+    const projectContext = this.resolveMessageProjectContext(msg);
     const missionTaskId = await this.beginMissionTask({
       sessionId,
       channel: msg.channel,
       content: msg.content,
-      projectId: typeof msg.metadata?.projectId === 'string' ? msg.metadata.projectId.trim() : undefined,
-      workspacePath: this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath),
+      projectId: projectContext?.projectId || (typeof msg.metadata?.projectId === 'string' ? msg.metadata.projectId.trim() : undefined),
+      workspacePath: projectContext?.workspaceRoot || this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath),
       config,
       background: isBackgroundMessage,
       defaultAgent
@@ -2577,7 +2672,7 @@ export class AgentRunner {
         const lastUserMsg = [...allMemories].reverse().find(m => m.role === "user");
         const username = lastUserMsg?.metadata?.username || msg.metadata?.username || "User";
         const userLine = `You are speaking with ${username}.`;
-        const projectPrompt = this.buildProjectPrompt(msg.metadata);
+        const projectPrompt = this.buildProjectPrompt(msg.metadata, projectContext);
 
         // Phase 7 opt-in: surface the files most relevant to the goal from the
         // attached workspace (indexed on demand). Off by default.
@@ -2587,10 +2682,12 @@ export class AgentRunner {
           const repoWorkspace = this.getValidWorkspacePath(msg.metadata?.projectWorkspacePath);
           if (repoWorkspace) {
             try {
-              // Phase 9: warm the index on demand so per-goal hints and the
-              // symbol skill never read a stale index during the mission.
-              // Telemetry attributes the refresh to this session + task.
-              this.contextEngine.refreshRepository(repoWorkspace, {
+              // Phase 9 + Phase 23: warm the index on demand so per-goal hints
+              // and the symbol skill never read a stale index during the
+              // mission — scoped to the canonical ProjectContext so the index
+              // ownership check applies. Telemetry attributes the refresh to
+              // this session + task.
+              this.contextEngine.refreshRepository(projectContext || repoWorkspace, {
                 sessionId,
                 taskId: missionTaskId || undefined
               });
@@ -2798,9 +2895,25 @@ export class AgentRunner {
           ? (currentModel as any).getLastUsedProviderId() || selection?.provider.id || currentModel.id
           : selection?.provider.id || currentModel.id;
         modelEngine.recordModelOutcome(actualProviderId, { success: true, latencyMs: Date.now() - modelStartedAt });
-        } catch (modelError) {
+        } catch (modelError: any) {
           modelEngine.recordModelOutcome(selection?.provider.id || currentModel.id, { success: false, latencyMs: Date.now() - modelStartedAt });
-          throw modelError;
+          const errorMsg = `Model provider error: ${modelError?.message || String(modelError)}`;
+          console.error(`[AgentRunner] ${errorMsg}`);
+          executionStateManager.markBlocked(sessionId, errorMsg);
+          iterationPresentation = {
+            text: errorMsg,
+            runId: turnRunId,
+            messageId: turnMessageId,
+            metadata: { final: true, completed: false, error: true }
+          };
+          return {
+            content: errorMsg,
+            verdict: { type: 'fail', error: errorMsg },
+            totalToolCalls,
+            lastBatchHadFailure: true,
+            toolRequired,
+            verificationRequired
+          };
         }
         turnReasoning = (response as any)?.reasoning;
 
@@ -2832,6 +2945,18 @@ export class AgentRunner {
         } catch { /* ignore cost tracking errors */ }
 
         // Handle Tool Calls
+        if (!response.toolCalls || response.toolCalls.length === 0) {
+          const extracted = extractStructuredToolCalls(response.content || '');
+          if (extracted.length > 0) {
+            response.toolCalls = extracted.map(tc => ({
+              id: tc.id || uuidv4(),
+              name: tc.name,
+              arguments: tc.arguments
+            }));
+            response.content = sanitizeConversationalText(response.content);
+          }
+        }
+
         if (response.toolCalls && response.toolCalls.length > 0) {
           if (liveStreamed && fullStreamContent.trim()) {
             void this.gateway.sendStreamEvent(sessionId, {
@@ -3132,13 +3257,16 @@ export class AgentRunner {
               // -> execute (native skill / MCP / dynamic) -> record on the mission
               // Task (STARTED/COMPLETED/FAILED + checkpoints + telemetry). Never
               // throws for tool failures — it returns a normalized ToolResult.
+              // Phase 23: the mission's canonical ProjectContext rides with
+              // every tool call so the boundary is enforced centrally.
               const result = await this.toolEngine.execute(
                 { name: call.name, arguments: call.arguments || {} },
                 {
                   sessionId,
                   taskId: missionTaskId || undefined,
-                  projectId: projectId || undefined,
-                  workspacePath: projectWorkspacePath,
+                  projectId: projectContext?.projectId || projectId || undefined,
+                  workspacePath: projectContext?.workspaceRoot || projectWorkspacePath,
+                  projectContext,
                   config: this.loadConfig(),
                   signal: this.sessionSignals.get(sessionId)?.signal,
                   stream: (chunk: string) => {
@@ -3172,6 +3300,7 @@ export class AgentRunner {
                 });
               }
               if (!result.success) {
+                console.warn(`[Tool] ${call.name} FAILED project=${projectContext?.projectId || '?'} workspace=${projectContext?.workspaceRoot || '?'} toolCallId=${toolCallId} error=${String(result.error || '').slice(0, 300)}`);
                 await this.injectGoalRetryHint(sessionId, msg.content, msg.metadata?.projectWorkspacePath, missionTaskId || undefined);
                 return {
                   success: false,
@@ -3347,6 +3476,22 @@ export class AgentRunner {
               error: result.success ? undefined : String(result.error || ''),
               progressPct: missionProgressPct()
             });
+
+            // Capture diffs / file modifications for the Web UI Diff Viewer
+            if (result.success && ['apply_patch', 'write_file', 'write_to_file', 'patch'].includes(String(result.call.name || '').toLowerCase())) {
+              const targetPath = String(result.call.arguments?.path || result.call.arguments?.targetFile || result.call.arguments?.file || '');
+              const patchOrContent = String(result.call.arguments?.patch || result.call.arguments?.content || result.output || '');
+              if (targetPath) {
+                void this.gateway.sendStreamEvent(sessionId, {
+                  type: 'file_diff',
+                  executionId: missionMarker,
+                  runId: turnRunId,
+                  messageId: batchMessageId,
+                  file: targetPath,
+                  diff: patchOrContent
+                });
+              }
+            }
           }
 
           const normalizeOutput = (value: any) => {

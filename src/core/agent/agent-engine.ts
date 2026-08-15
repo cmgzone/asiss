@@ -44,6 +44,12 @@ import { SkillRegistry } from '../skills';
 import { ToolEngine } from '../tools';
 import { TaskEngine, taskEngine as defaultTaskEngine } from '../task';
 import type { RetrieveOptions, RetrievedMemory } from '../memory-unified/memory-catalog';
+import {
+  ProjectContext,
+  ProjectContextError,
+  validateProjectContext,
+  WorkspaceBoundaryViolationError
+} from '../project-context';
 import type {
   ModelAttachment,
   ModelProvider,
@@ -98,6 +104,13 @@ export interface ExecuteTaskOptions {  /** Canonical agent id or name. */
   sessionId?: string;
   workspacePath?: string;
   projectId?: string;
+  /**
+   * Phase 23 — the parent's canonical ProjectContext. Children MUST inherit
+   * it (never independently determine their workspace); parent/child
+   * projectId + workspaceRoot are enforced to match unless explicit
+   * cross-project authorization exists.
+   */
+  projectContext?: ProjectContext;
   /** Host linkage metadata merged onto the child Task (e.g. backgroundGoalId). */
   metadata?: Record<string, unknown>;
   /**
@@ -127,13 +140,13 @@ export interface AgentEngineRuntime {
   toolEngine: ToolEngine;
   taskEngine?: TaskEngine;
   /**
-   * Phase 16 Move 4 (D5) — unified-memory retrieval for child missions. The
-   * host wires the Phase 14 consolidation layer; AgentEngine only asks per the
-   * agent's memoryPolicy (injectLimit / minScore / minImportance / types /
-   * sources). AgentEngine has no knowledge of how memory is stored — policy
-   * decides, the memory system executes.
+   * Phase 16 Move 4 (D5) + Phase 23 — unified-memory retrieval for child
+   * missions, scoped by the canonical ProjectContext: a child may only see
+   * memory belonging to its own project (retrieval filters by projectId /
+   * workspaceRoot). The host wires the Phase 14 consolidation layer; AgentEngine
+   * only asks per the agent's memoryPolicy.
    */
-  retrieveMemory?: (query: string, opts: RetrieveOptions) => RetrievedMemory[] | Promise<RetrievedMemory[]>;
+  retrieveMemory?: (projectContext: ProjectContext | undefined, query: string, opts: RetrieveOptions) => RetrievedMemory[] | Promise<RetrievedMemory[]>;
   /**
    * Phase 18 Move 4 (G3) — repository context for child missions. When the
    * agent's contextPolicy includes 'repo' and the runtime wires a
@@ -370,6 +383,57 @@ export class AgentEngine {
       };
     }
 
+    // Phase 23 — resolve + validate the canonical ProjectContext before any
+    // child work: children inherit the parent's context; the parent Task's
+    // projectId/workspaceRoot must match the supplied context; and when a
+    // child is created under a parent Task, its project MUST equal the
+    // parent's project unless explicit cross-project authorization exists.
+    let projectContext: ProjectContext | undefined;
+    try {
+      projectContext = options.projectContext
+        ? validateProjectContext(options.projectContext)
+        : (options.workspacePath
+          ? validateProjectContext({
+              projectId: String(options.projectId || 'general').trim() || 'general',
+              projectName: String(options.projectId || 'General Workspace').trim() || 'General Workspace',
+              workspaceRoot: options.workspacePath,
+              conversationId: options.sessionId
+            })
+          : undefined);
+      if (projectContext && options.parentTaskId) {
+        const parent = (this.runtime?.taskEngine || defaultTaskEngine).get(options.parentTaskId);
+        if (parent) {
+          const blocked = assertChildProjectConsistency(
+            { projectId: parent.context?.projectId, workspacePath: parent.context?.workspacePath || parent.context?.workspaceRoot },
+            projectContext,
+            `parent task '${parent.id}'`
+          );
+          if (blocked) throw new WorkspaceBoundaryViolationError(projectContext, blocked);
+        }
+      }
+    } catch (contextError: any) {
+      if (contextError instanceof ProjectContextError || contextError instanceof WorkspaceBoundaryViolationError) {
+        return {
+          success: false,
+          attempts: 0,
+          taskIds: [],
+          result: {
+            agentId: options.agentId,
+            status: 'failed' as const,
+            summary: `Child execution blocked by project-context validation: ${contextError.message}`,
+            findings: [],
+            evidence: [],
+            artifacts: [],
+            recommendations: [],
+            unresolvedQuestions: [],
+            errorSummary: contextError.message
+          },
+          error: contextError.message
+        };
+      }
+      throw contextError;
+    }
+
     // Phase 16 Move 5 — handoffPolicy enforcement: a delegating agent can
     // only hand off to allowed roles within maxDepth. executeTask is the ONLY
     // delegation entry point, so every origin (delegation/swarm/background/
@@ -430,8 +494,10 @@ export class AgentEngine {
         },
         context: {
           sessionId: options.sessionId,
-          workspacePath: options.workspacePath,
-          projectId: options.projectId
+          workspacePath: projectContext?.workspaceRoot || options.workspacePath,
+          projectId: projectContext?.projectId || options.projectId,
+          projectName: projectContext?.projectName,
+          workspaceRoot: projectContext?.workspaceRoot
         },
         assignedAgent: agent.id,
         model: agent.modelPolicy?.modelId,
@@ -462,6 +528,7 @@ export class AgentEngine {
 
         const mission = await this.runChildMission(runtime, taskEngine, childTask.id, agent, {
           ...options,
+          projectContext,
           maxTurns,
           allowedTools: finalTools,
           allToolSchemas,
@@ -628,16 +695,16 @@ export class AgentEngine {
    */
   private buildChildRepoSection(
     runtime: AgentEngineRuntime,
-    workspace: string | undefined,
+    projectContext: ProjectContext | undefined,
     goal: string,
     taskId: string,
     sessionId?: string
   ): string {
     try {
-      if (!workspace || !runtime.contextEngine) return '';
+      if (!projectContext || !runtime.contextEngine) return '';
       const engine = runtime.contextEngine;
-      engine.refreshRepository(workspace, { sessionId, taskId });
-      return engine.repositorySection(workspace, goal);
+      engine.refreshRepository(projectContext, { sessionId, taskId });
+      return engine.repositorySection(projectContext, goal);
     } catch {
       return '';
     }
@@ -666,6 +733,7 @@ export class AgentEngine {
     childTaskId: string,
     agent: Agent,
     params: ExecuteTaskOptions & {
+      projectContext?: ProjectContext;
       maxTurns: number;
       maxAttempts: number;
       allToolSchemas: Tool[];
@@ -682,11 +750,15 @@ export class AgentEngine {
     // 'repo' (deferred in AUDIT_7 D2) now renders the warmed, goal-matched
     // repository section when the runtime wires a ContextEngine.
     const sources = new Set<string>(agent.contextPolicy?.sources || ['task', 'instructions', 'history']);
+    // Phase 23 §6 — when a child carries a ProjectContext, memory retrieval is
+    // project-scoped by the host (the context is passed through and filtered by
+    // projectId/workspaceRoot). Unbound children (no attached project) keep
+    // session-scoped retrieval without a project filter.
     const memorySection = sources.has('memory') && (agent.memoryPolicy?.injectLimit || 0) > 0 && runtime.retrieveMemory
-      ? await this.buildChildMemorySection(runtime, agent, params.task, params.sessionId)
+      ? await this.buildChildMemorySection(runtime, agent, params.projectContext, params.task, params.sessionId)
       : '';
     const repoSection = sources.has('repo') && runtime.contextEngine
-      ? this.buildChildRepoSection(runtime, params.workspacePath, params.task, childTaskId, params.sessionId)
+      ? this.buildChildRepoSection(runtime, params.projectContext, params.task, childTaskId, params.sessionId)
       : '';
     const planSection = this.buildChildPlanSection(taskEngine, childTaskId);
     const systemPrompt = this.buildChildSystemPrompt(agent, params.allToolSchemas, memorySection, repoSection, planSection);
@@ -727,8 +799,9 @@ export class AgentEngine {
               {
                 sessionId: params.sessionId,
                 taskId: childTaskId,
-                projectId: params.projectId,
-                workspacePath: params.workspacePath,
+                projectId: params.projectContext?.projectId || params.projectId,
+                workspacePath: params.projectContext?.workspaceRoot || params.workspacePath,
+                projectContext: params.projectContext,
                 config: {},
                 agentPermissions: params.allowedTools
               }
@@ -900,13 +973,14 @@ export class AgentEngine {
   private async buildChildMemorySection(
     runtime: AgentEngineRuntime,
     agent: Agent,
+    projectContext: ProjectContext | undefined,
     task: string,
     sessionId?: string
   ): Promise<string> {
     try {
       const policy = agent.memoryPolicy || {};
       const limit = Math.max(1, Math.floor(policy.injectLimit || 3));
-      const records = await runtime.retrieveMemory!(task, {
+      const records = await runtime.retrieveMemory!(projectContext, task, {
         sessionId,
         source: policy.sources && policy.sources.length > 0 ? (policy.sources[0] as any) : undefined,
         types: policy.types as any,
@@ -978,6 +1052,33 @@ export class AgentEngine {
       console.warn('[AgentEngine] record agent-result artifact failed:', err?.message || err);
     }
   }
+}
+
+/**
+ * Phase 23 §4/§5 — parent/child project consistency. Returns null when the
+ * child may run under the parent, otherwise a violation message. The child
+ * MUST inherit the parent's projectId + workspaceRoot; a mismatch is a hard
+ * block unless the child is the 'general' workspace (explicit cross-project
+ * authorization is the only other escape, handled by the caller).
+ */
+export function assertChildProjectConsistency(
+  parent: { projectId?: string; workspacePath?: string } | undefined,
+  child: ProjectContext | undefined,
+  parentLabel = 'parent execution'
+): string | null {
+  if (!parent) return null;
+  const parentProjectId = String(parent.projectId || 'general').trim();
+  const parentWorkspace = String(parent.workspacePath || '').trim();
+  if (!child) {
+    return `child execution has no project context; ${parentLabel} requires project '${parentProjectId}'.`;
+  }
+  if (parentProjectId !== child.projectId && child.projectId !== 'general') {
+    return `${parentLabel} project '${parentProjectId}' != child project '${child.projectId}'. Explicit cross-project authorization is required.`;
+  }
+  if (parentWorkspace && parentWorkspace !== child.workspaceRoot) {
+    return `${parentLabel} workspace '${parentWorkspace}' != child workspace '${child.workspaceRoot}'.`;
+  }
+  return null;
 }
 
 /**

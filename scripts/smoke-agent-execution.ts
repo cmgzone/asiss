@@ -433,7 +433,7 @@ async function main() {
     listMcpTools: async () => [],
     toolEngine: { execute: async () => ({ success: false, error: 'unused' }) } as any,
     taskEngine,
-    retrieveMemory: async (_query: string, _opts: any) => [
+    retrieveMemory: async (_projectContext: any, _query: string, _opts: any) => [
       {
         id: 'learning:rule-9',
         type: 'procedural',

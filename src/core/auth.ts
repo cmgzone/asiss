@@ -90,6 +90,14 @@ export class AuthManager {
         return true;
     }
 
+    setPassword(username: string, password: string): boolean {
+        const user = this.users.get(username);
+        if (!user) return false;
+        user.passwordHash = this.hashPassword(password);
+        this.save();
+        return true;
+    }
+
     login(username: string, password: string): User | null {
         const user = this.users.get(username);
         if (!user || !this.verifyPassword(password, user.passwordHash)) {

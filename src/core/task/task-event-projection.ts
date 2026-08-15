@@ -66,8 +66,26 @@ export const TASK_EVENT_PROJECTIONS: Partial<Record<TaskEventName, TaskEventProj
   TaskVerified: (event) => recoveryEvent(event, 'verified'),
   TaskVerificationFailed: (event) => recoveryEvent(event, 'verification_failed'),
   TestPassed: (event) => recoveryEvent(event, 'test_passed'),
-  TestFailed: (event) => recoveryEvent(event, 'test_failed')
+  TestFailed: (event) => recoveryEvent(event, 'test_failed'),
+
+  // Phase 20 / Plan projections: live plan and step updates reach the UI.
+  TaskPlanned: (event) => planEvent(event),
+  TaskPlanUpdated: (event) => planEvent(event),
+  TaskPlanStepChanged: (event) => planEvent(event)
 };
+
+function planEvent(event: TaskEvent): StreamEventPayload | null {
+  const plan = Array.isArray(event.data?.plan) ? event.data!.plan : undefined;
+  if (!plan) return null;
+  return {
+    type: 'plan_update',
+    runId: `plan:${event.taskId}`,
+    messageId: `plan:${event.taskId}:${event.timestamp}`,
+    executionId: event.taskId,
+    plan,
+    activeStepId: typeof event.data?.stepId === 'string' ? event.data.stepId : undefined
+  };
+}
 
 function approvalDecision(event: TaskEvent, allowed: boolean): StreamEventPayload {
   const approvalId = String(event.data?.approvalId || '');

@@ -9,6 +9,7 @@
  */
 
 import { Skill } from '../core/skills';
+import { projectContextFromParams } from './workspace-guard';
 import { ContextEngine, contextEngine, renderArchitectureProfile } from '../core/context';
 
 export interface ArchitectureSkillOptions {
@@ -34,15 +35,19 @@ export class ArchitectureSkill implements Skill {
   }
 
   async execute(params: any): Promise<any> {
+    // Phase 23 — bound calls carry the canonical ProjectContext; the index is
+    // project-owned. Unbound calls fall back to the legacy workspace/root.
+    const projectContext = projectContextFromParams(params);
     const root =
-      typeof params?.__workspacePath === 'string' && params.__workspacePath.trim()
+      projectContext?.workspaceRoot
+      || (typeof params?.__workspacePath === 'string' && params.__workspacePath.trim()
         ? params.__workspacePath
-        : process.cwd();
+        : process.cwd()); // phase23-ok: unbound (no attached project) legacy fallback
 
     try {
       // Phase 9 discipline: force an on-demand refresh so an explicit query
       // never reads a stale index (files may have changed since last turn).
-      this.engine.refreshRepository(root, { force: true, sessionId: params?.__sessionId });
+      this.engine.refreshRepository(projectContext || root, { force: true, sessionId: params?.__sessionId });
       const profile = this.engine.architecture(root);
       if (!profile) {
         return {

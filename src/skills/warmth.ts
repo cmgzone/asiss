@@ -11,6 +11,7 @@
  */
 
 import { Skill } from '../core/skills';
+import { projectContextFromParams } from './workspace-guard';
 import { ContextEngine, contextEngine } from '../core/context';
 
 export interface WarmthSkillOptions {
@@ -40,15 +41,19 @@ export class WarmthSkill implements Skill {
   }
 
   async execute(params: any): Promise<any> {
+    // Phase 23 — bound calls carry the canonical ProjectContext; the index is
+    // project-owned. Unbound calls fall back to the legacy workspace/root.
+    const projectContext = projectContextFromParams(params);
     const root =
-      typeof params?.__workspacePath === 'string' && params.__workspacePath.trim()
+      projectContext?.workspaceRoot
+      || (typeof params?.__workspacePath === 'string' && params.__workspacePath.trim()
         ? params.__workspacePath
-        : process.cwd();
+        : process.cwd()); // phase23-ok: unbound (no attached project) legacy fallback
     const action = params?.action === 'refresh' ? 'refresh' : 'status';
 
     try {
       if (action === 'refresh') {
-        this.engine.refreshRepository(root, { force: true, sessionId: params?.__sessionId });
+        this.engine.refreshRepository(projectContext || root, { force: true, sessionId: params?.__sessionId });
       }
       const warmth = this.engine.indexWarmth(root);
       if (!warmth) {

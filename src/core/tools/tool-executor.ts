@@ -51,6 +51,7 @@ export async function executeNativeSkill(
   const name = request.name;
   const projectId = ctx.projectId || '';
   const workspacePath = ctx.workspacePath;
+  const projectContext = ctx.projectContext;
   const checkpointConfig = ctx.config?.checkpoints || {};
   const shellCommand = String(request.arguments?.command || '');
   const mutatesWorkspace = (name === 'apply_patch' && checkpointConfig.automaticBeforePatch !== false)
@@ -77,6 +78,9 @@ export async function executeNativeSkill(
     __sessionId: ctx.sessionId,
     __projectId: projectId || undefined,
     __workspacePath: workspacePath,
+    // Phase 23 — the canonical project identity rides with every native skill
+    // call so filesystem skills enforce the boundary from one source of truth.
+    __projectContext: projectContext || undefined,
     __taskId: ctx.taskId,
     __signal: ctx.signal
   };

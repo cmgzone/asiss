@@ -147,11 +147,21 @@ export class WebChannel implements ChannelAdapter {
     if (publicDir) {
       this.app.get('/', (_req, res) => {
         const indexPath = path.join(publicDir, 'index.html');
-        const html = fs.readFileSync(indexPath, 'utf-8')
+        let html = fs.readFileSync(indexPath, 'utf-8')
           .replace('<option>mock</option>', '')
-          .replace(":/nvidia/i.test(providerName)?'NVIDIA':'mock'", ":/nvidia/i.test(providerName)?'NVIDIA':'OpenRouter'")
-          .replace('</head>', '<link rel="stylesheet" href="/layout-fix.css"><link rel="stylesheet" href="/chat-progress.css"><link rel="stylesheet" href="/webui.css"></head>')
-          .replace('</body>', '<script src="/chat-progress.js"></script></body>');
+          .replace(":/nvidia/i.test(providerName)?'NVIDIA':'mock'", ":/nvidia/i.test(providerName)?'NVIDIA':'OpenRouter'");
+        // Inject the page-level styles/scripts at the REAL document boundaries.
+        // The inline script legitimately contains `</head>`/`</body>` inside
+        // template literals (artifact previews), so a first-occurrence replace
+        // would corrupt the page; lastIndexOf lands on the true end tags.
+        const headIdx = html.lastIndexOf('</head>');
+        if (headIdx >= 0) {
+          html = html.slice(0, headIdx) + '<link rel="stylesheet" href="/layout-fix.css"><link rel="stylesheet" href="/chat-progress.css"><link rel="stylesheet" href="/webui.css">' + html.slice(headIdx);
+        }
+        const bodyIdx = html.lastIndexOf('</body>');
+        if (bodyIdx >= 0) {
+          html = html.slice(0, bodyIdx) + '<script src="/chat-progress.js"></script>' + html.slice(bodyIdx);
+        }
         res.type('html').send(html);
       });
       // Hidden render-demo: replays the recorded delta stream against the real
@@ -781,6 +791,36 @@ export class WebChannel implements ChannelAdapter {
       }
     });
 
+    this.app.get('/api/workspace/tree', requireApiAuth, (req, res) => {
+      try {
+        const user = (req as any).user;
+        const project = this.resolveProjectContext(req.query.projectId);
+        const conversationId = typeof req.query.conversationId === 'string' ? req.query.conversationId : '';
+        const conversation = conversationId ? conversationManager.getOwned(conversationId, user.id) : undefined;
+        const workspacePath = project?.workspacePath || conversation?.workspacePath || workspaceManager.getGeneralWorkspace();
+        const tree = workspaceManager.listTree(workspacePath, Number(req.query.depth) || 4);
+        res.json({ workspacePath, projectName: project?.name || 'Workspace', tree });
+      } catch (e: any) {
+        res.status(400).json({ error: e.message });
+      }
+    });
+
+    this.app.get('/api/workspace/file', requireApiAuth, (req, res) => {
+      try {
+        const user = (req as any).user;
+        const project = this.resolveProjectContext(req.query.projectId);
+        const conversationId = typeof req.query.conversationId === 'string' ? req.query.conversationId : '';
+        const conversation = conversationId ? conversationManager.getOwned(conversationId, user.id) : undefined;
+        const workspacePath = project?.workspacePath || conversation?.workspacePath || workspaceManager.getGeneralWorkspace();
+        const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+        if (!relPath) return res.status(400).json({ error: 'path is required' });
+        const fileData = workspaceManager.readFileContent(workspacePath, relPath);
+        res.json(fileData);
+      } catch (e: any) {
+        res.status(400).json({ error: e.message });
+      }
+    });
+
     this.app.get('/api/conversations', requireApiAuth, (req, res) => {
       const user = (req as any).user;
       res.json({ conversations: conversationManager.list(user.id) });
@@ -789,7 +829,18 @@ export class WebChannel implements ChannelAdapter {
     this.app.post('/api/conversations', requireApiAuth, express.json(), (req, res) => {
       try {
         const user = (req as any).user;
-        res.status(201).json({ conversation: conversationManager.create(user.id) });
+        // Phase 23 §3 — a conversation may be created bound to a project
+        // (Select/Create Project -> ProjectContext -> Conversation).
+        const projectId = typeof req.body?.projectId === 'string' ? req.body.projectId.trim() : '';
+        const project = projectId ? this.resolveProjectContext(projectId) : undefined;
+        const conversation = project && project.workspacePath
+          ? conversationManager.create(user.id, {
+              projectId: project.id,
+              projectName: project.name,
+              workspaceRoot: project.workspacePath
+            })
+          : conversationManager.create(user.id);
+        res.status(201).json({ conversation });
       } catch (e: any) {
         res.status(500).json({ error: e.message || 'Failed to create conversation' });
       }
@@ -1593,13 +1644,18 @@ export class WebChannel implements ChannelAdapter {
         if (this.handler) {
           const user = this.auth.getUserBySession(socket.id);
           const stableUserId = user?.id || socket.data.userId || socket.id;
-          const projectContext = this.resolveProjectContext(payload?.projectId);
+          let projectContext = this.resolveProjectContext(payload?.projectId);
           const requestedConversationId = typeof payload?.conversationId === 'string'
             ? payload.conversationId.trim()
             : '';
           const conversation = !projectContext && requestedConversationId
             ? conversationManager.getOwned(requestedConversationId, stableUserId)
             : undefined;
+          // Phase 23 §3 — a conversation bound to a project supplies the
+          // canonical project identity even when the client does not repeat it.
+          if (!projectContext && conversation?.projectId && conversation.projectWorkspacePath) {
+            projectContext = this.resolveProjectContext(conversation.projectId);
+          }
           if (!projectContext && !conversation) {
             socket.emit('error', 'Select or create a General conversation before sending a message.');
             return;

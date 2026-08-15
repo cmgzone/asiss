@@ -102,6 +102,7 @@ export class PlaywrightSkill implements Skill {
     }
 
     if (!url && action !== 'search') return { error: 'url is required' };
+    // phase23-ok: engine-root artifacts directory, not project context
     const artifactsDir = path.join(process.cwd(), 'artifacts', 'playwright');
     ensureDir(artifactsDir);
 

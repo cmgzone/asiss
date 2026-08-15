@@ -14,6 +14,7 @@ type EmailConfig = {
 };
 
 const loadEmailConfig = (): EmailConfig => {
+  // phase23-ok: engine-root config file, not project context
   const cfgPath = path.join(process.cwd(), 'config.json');
   let cfg: any = {};
   if (fs.existsSync(cfgPath)) {

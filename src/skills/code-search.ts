@@ -3,6 +3,7 @@ import { execFile } from 'child_process';
 import util from 'util';
 import fs from 'fs';
 import path from 'path';
+import { resolveSkillPath, boundaryErrorResult } from './workspace-guard';
 
 const execFileAsync = util.promisify(execFile);
 
@@ -32,9 +33,14 @@ export class CodeSearchSkill implements Skill {
   async execute(params: any): Promise<any> {
     const pattern = typeof params?.pattern === 'string' ? params.pattern : '';
     if (!pattern) return { error: 'pattern is required' };
-    const base = typeof params?.path === 'string' && params.path.trim()
-      ? params.path.trim()
-      : (typeof params?.__workspacePath === 'string' ? params.__workspacePath : process.cwd());
+    let base: string;
+    try {
+      // Phase 23 — code search stays inside the active project workspace; the
+      // default is the workspace root, never process.cwd().
+      base = resolveSkillPath(params?.path || '.', params);
+    } catch (error: any) {
+      return boundaryErrorResult(error, 'code_search');
+    }
     const include = typeof params?.include === 'string' ? params.include.trim() : '';
     const exclude = typeof params?.exclude === 'string' ? params.exclude.trim() : '';
     const caseSensitive = params?.caseSensitive === true;

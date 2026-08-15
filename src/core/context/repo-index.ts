@@ -28,6 +28,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { relevanceScore, significantTokens, stemOverlap } from './relevance';
+import { ProjectContext } from '../project-context';
 import {
   fileRelevance,
   IndexedFile,
@@ -64,6 +65,9 @@ export interface IndexedFileDetail extends IndexedFile {
 
 export interface PersistentRepositoryIndex extends RepositoryIndex {
   files: IndexedFileDetail[];
+  /** Phase 23 §7 — owning project id; persisted with the index and verified
+   *  before the index is ever served to a context request. */
+  projectId?: string;
   version: number;
   /** Symbol name -> file paths that define it. */
   exportedSymbols: Record<string, string[]>;
@@ -425,7 +429,7 @@ export function buildImplementations(
   return out;
 }
 
-function finalize(root: string, files: IndexedFileDetail[], indexedAt: number, version: number): PersistentRepositoryIndex {
+function finalize(root: string, files: IndexedFileDetail[], indexedAt: number, version: number, projectId?: string): PersistentRepositoryIndex {
   const languages: Record<string, number> = {};
   let totalBytes = 0;
   const exportedSymbols: Record<string, string[]> = {};
@@ -444,6 +448,7 @@ function finalize(root: string, files: IndexedFileDetail[], indexedAt: number, v
   }
   return {
     root,
+    projectId,
     files,
     fileCount: files.length,
     totalBytes,
@@ -457,16 +462,25 @@ function finalize(root: string, files: IndexedFileDetail[], indexedAt: number, v
   };
 }
 
-/** Build a full persistent index for a workspace root. */
-export function buildPersistentIndex(root: string, options: PersistentIndexOptions = {}): PersistentRepositoryIndex {
+/** Build a full persistent index for a workspace root (project-tagged). */
+export function buildPersistentIndex(root: string, options: PersistentIndexOptions = {}, projectId?: string): PersistentRepositoryIndex {
   const base = indexWorkspace(root, options);
   const maxBytes = options.maxFileBytes ?? 512 * 1024;
   const files = base.files.map((f) => detailOf(f, root, maxBytes));
-  return finalize(root, files, Date.now(), INDEX_VERSION);
+  return finalize(root, files, Date.now(), INDEX_VERSION, projectId);
 }
 
 /** Re-parse only files whose mtime/size changed; drop files that vanished. */
 export function refreshRepositoryIndex(
+  index: PersistentRepositoryIndex,
+  root: string,
+  options: PersistentIndexOptions = {}
+): PersistentRepositoryIndex {
+  return refreshRepositoryIndexScoped(index, root, options);
+}
+
+/** Internal: refresh keeping the index's own projectId (project-scoped). */
+function refreshRepositoryIndexScoped(
   index: PersistentRepositoryIndex,
   root: string,
   options: PersistentIndexOptions = {}
@@ -493,7 +507,7 @@ export function refreshRepositoryIndex(
     }
     next.push(detailOf(file, root, maxBytes));
   }
-  return finalize(root, next, Date.now(), index.version);
+  return finalize(root, next, Date.now(), index.version, index.projectId);
 }
 
 function defaultDataRoot(): string {
@@ -505,6 +519,35 @@ function defaultDataRoot(): string {
 export function repositoryIndexPath(root: string, dataRoot?: string): string {
   const hash = crypto.createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 16);
   return path.join(dataRoot || defaultDataRoot(), 'repo-index', `${hash}.json`);
+}
+
+/**
+ * Phase 23 §7 — an index belongs to a project when both carry a projectId and
+ * they match, or when the index has no projectId (legacy index) and the
+ * workspace root matches. Never serve a project another project's index.
+ */
+export function repositoryIndexBelongsTo(
+  index: { projectId?: string; root: string } | undefined,
+  projectContext: ProjectContext
+): boolean {
+  if (!index) return false;
+  if (index.projectId && projectContext.projectId) {
+    return index.projectId === projectContext.projectId;
+  }
+  return compareRoots(index.root, projectContext.workspaceRoot);
+}
+
+function compareRoots(a: string, b: string): boolean {
+  const resolve = (v: string) => {
+    try {
+      return path.resolve(v);
+    } catch {
+      return v;
+    }
+  };
+  const ra = resolve(a);
+  const rb = resolve(b);
+  return process.platform === 'win32' ? ra.toLowerCase() === rb.toLowerCase() : ra === rb;
 }
 
 /** Persist the index; returns the file path written. */
@@ -531,19 +574,22 @@ export function loadRepositoryIndex(root: string, dataRoot?: string): Persistent
 /**
  * Load -> incrementally refresh -> save, or build fresh when nothing is
  * persisted. This is the entry point hosts use instead of indexWorkspace.
+ * The index is tagged with the owning projectId so a later request from a
+ * different project can never receive it (Phase 23 §7).
  */
 export function getRepositoryIndex(
   root: string,
   options: PersistentIndexOptions = {},
-  dataRoot?: string
+  dataRoot?: string,
+  projectId?: string
 ): PersistentRepositoryIndex {
   const existing = loadRepositoryIndex(root, dataRoot);
   if (existing) {
-    const refreshed = refreshRepositoryIndex(existing, root, options);
+    const refreshed = refreshRepositoryIndexScoped(existing, root, options);
     saveRepositoryIndex(refreshed, dataRoot);
     return refreshed;
   }
-  const built = buildPersistentIndex(root, options);
+  const built = buildPersistentIndex(root, options, projectId);
   saveRepositoryIndex(built, dataRoot);
   return built;
 }

@@ -17,6 +17,7 @@ interface A2AConfig {
 }
 
 const loadConfig = (): A2AConfig => {
+  // phase23-ok: engine-root config file, not project context
   const configPath = path.join(process.cwd(), 'config.json');
   if (!fs.existsSync(configPath)) return {};
   try {

@@ -33,6 +33,7 @@ export class AgentsMdSkill implements Skill {
     required: ['action']
   };
 
+  // phase23-ok: engine-root identity files (AGENTS.md/SOUL.md live beside the app), not project context
   private root = process.cwd();
 
   private defaultFiles() {

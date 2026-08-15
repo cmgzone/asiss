@@ -5,6 +5,8 @@
  *   resolve -> validate -> authorize -> execute -> normalize -> record.
  */
 
+import type { ProjectContext } from '../project-context';
+
 export interface ToolRequest {
   name: string;
   arguments?: Record<string, unknown>;
@@ -17,6 +19,13 @@ export interface ToolContext {
   taskId?: string;
   projectId?: string;
   workspacePath?: string;
+  /**
+   * Phase 23 — the canonical project identity for this tool call. When
+   * supplied, the ToolEngine validates it against projectId/workspacePath and
+   * injects it into the skill arguments (__projectContext), so filesystem
+   * skills enforce the workspace boundary from one source of truth.
+   */
+  projectContext?: ProjectContext;
   /** App config (checkpoints / agent policy knobs). */
   config?: any;
   /** Live output sink (shell streaming). */

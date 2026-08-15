@@ -4,6 +4,8 @@ import util from 'util';
 import fs from 'fs';
 import path from 'path';
 import { GitSkill } from './git';
+import { projectContextFromParams } from './workspace-guard';
+import { isPathInsideWorkspace } from '../core/project-context';
 
 const execFileAsync = util.promisify(execFile);
 const git = new GitSkill();
@@ -114,9 +116,32 @@ export class CodeReviewSkill implements Skill {
   }
 
   private resolveRepo(params: any): string | null {
+    // Phase 23 — bound calls may only review repositories inside the active
+    // project workspace; process.cwd() is never a candidate for bound calls.
+    const ctx = projectContextFromParams(params);
+    if (ctx) {
+      const candidates = [
+        typeof params?.repo === 'string' ? params.repo.trim() : '',
+        ctx.workspaceRoot
+      ].filter(Boolean);
+      for (const candidate of candidates) {
+        let dir = path.resolve(candidate);
+        if (!isPathInsideWorkspace(dir, ctx.workspaceRoot)) continue;
+        for (let i = 0; i < 8; i++) {
+          try {
+            if (fs.existsSync(path.join(dir, '.git'))) return dir;
+          } catch { /* ignore */ }
+          const parent = path.dirname(dir);
+          if (parent === dir) break;
+          dir = parent;
+        }
+      }
+      return null;
+    }
     const candidates = [
       typeof params?.repo === 'string' ? params.repo.trim() : '',
       typeof params?.__workspacePath === 'string' ? params.__workspacePath : '',
+      // phase23-ok: unbound fallback only (no attached project -> no workspace to violate)
       process.cwd()
     ].filter(Boolean);
     for (const candidate of candidates) {

@@ -175,11 +175,13 @@ AGENT TEAM ACTIONS:
     private data: ProjectData;
 
     constructor() {
+        // phase23-ok: engine-root project registry file, not a project workspace itself
         this.filePath = path.join(process.cwd(), 'projects_data.json');
         this.data = this.load();
     }
 
     private loadConfig(): any {
+        // phase23-ok: engine-root config file, not project context
         const configPath = path.join(process.cwd(), 'config.json');
         if (fs.existsSync(configPath)) {
             try {

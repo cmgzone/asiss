@@ -4,7 +4,10 @@ import { SHELL_STREAM_END_MARKER, SHELL_STREAM_MARKER } from '../core/stream-mar
 import { execFile, spawn } from 'child_process';
 import util from 'util';
 import fs from 'fs';
+import path from 'path';
 import { executionBackendManager } from '../core/execution-backend';
+import { inspectShellCommand, isPathInsideWorkspace, WorkspaceBoundaryViolationError } from '../core/project-context';
+import { projectContextFromParams, boundaryErrorResult } from './workspace-guard';
 
 const execFileAsync = util.promisify(execFile);
 
@@ -42,6 +45,24 @@ export class ShellSkill implements Skill {
       };
     }
 
+    // Phase 23 §11 — the default shell cwd is the ACTIVE PROJECT WORKSPACE,
+    // never process.cwd(). A command that would `cd` outside the workspace is
+    // rejected before it can run, and the resolved plan cwd is re-asserted
+    // inside the boundary right before spawn.
+    const projectContext = projectContextFromParams(params);
+    if (projectContext) {
+      const violation = inspectShellCommand(command, projectContext);
+      if (violation) {
+        return {
+          error: violation,
+          code: 'WORKSPACE_BOUNDARY_VIOLATION',
+          blocked: true,
+          activeProject: projectContext.projectName || projectContext.projectId,
+          activeWorkspace: projectContext.workspaceRoot
+        };
+      }
+    }
+
     // Check elevated level
     const sessionId = __sessionId || 'default';
     const execCheck = elevatedManager.shouldAllowExec(sessionId);
@@ -64,8 +85,18 @@ export class ShellSkill implements Skill {
     const streamFn = typeof __stream === 'function' ? __stream : null;
     let plan;
     try {
-      plan = executionBackendManager.createPlan(command, __workspacePath);
+      plan = executionBackendManager.createPlan(command, projectContext?.workspaceRoot || __workspacePath);
+      // Phase 23 — the plan's cwd must stay inside the active workspace.
+      if (projectContext && !isPathInsideWorkspace(plan.cwd, projectContext.workspaceRoot)) {
+        return boundaryErrorResult(
+          new WorkspaceBoundaryViolationError(projectContext, plan.cwd),
+          'shell'
+        );
+      }
     } catch (error: any) {
+      if (error?.code === 'WORKSPACE_BOUNDARY_VIOLATION') {
+        return boundaryErrorResult(error, 'shell');
+      }
       return { error: error?.message || String(error), backend: backendStatus.backend };
     }
 

@@ -181,6 +181,11 @@ export class DelegateAgentSkill implements Skill {
     const sessionId = this.normalizeString(params?.__sessionId) || undefined;
     const workspacePath = this.normalizeString(params?.__workspacePath) || undefined;
     const projectId = this.normalizeString(params?.__projectId) || undefined;
+    // Phase 23 — the parent's canonical ProjectContext is inherited by the
+    // child mission verbatim; children never determine their own workspace.
+    const projectContext = params?.__projectContext && typeof params.__projectContext === 'object'
+      ? params.__projectContext
+      : undefined;
     const parentTaskId = this.normalizeString(params?.__taskId) || undefined;
     // Internal-only: hosts (swarm, background) label the child task kind.
     // The model-facing schema never advertises this field.
@@ -198,6 +203,7 @@ export class DelegateAgentSkill implements Skill {
       sessionId,
       workspacePath,
       projectId,
+      projectContext,
       kind: kind as any
     });
 

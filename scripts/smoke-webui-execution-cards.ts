@@ -320,7 +320,39 @@ function main() {
   assert.ok(hostileHtml.includes('&lt;script&gt;'), 'hostile payload escaped, never executed');
   console.log('21. hostile tool payloads stay inert (esc first, never run) ok');
 
-  console.log('webui-cards: message->execution contract holds (21 gates, 60+ assertions)');
+  // §22 — Phase 23 streaming render contract: while a reply streams, unclosed
+  // inline markers must never flash as raw punctuation (progressiveMarkdown
+  // hides a lone trailing opener), code-block chrome is deferred until the
+  // final render (no per-tick Copy-bar flicker), and full re-renders restore
+  // the chrome so reloaded conversations match live ones.
+  const pmMatch = inline.match(/function progressiveMarkdown\(text\)\{[\s\S]*?\n    \}/);
+  assert.ok(pmMatch, 'progressiveMarkdown present in the inline script');
+  // eslint-disable-next-line no-new-func
+  const progressiveMarkdown = new Function(`return (${pmMatch![0]})`)() as (t: string) => string;
+  const pm = (t: string) => progressiveMarkdown(t);
+  assert.strictEqual(pm('Some **bold** text'), 'Some **bold** text', 'balanced bold untouched');
+  assert.strictEqual(pm('plain text'), 'plain text', 'plain text untouched');
+  assert.strictEqual(pm('Some text **'), 'Some text ', 'trailing unclosed ** opener hidden');
+  assert.strictEqual(pm('italic *'), 'italic ', 'trailing unclosed * opener hidden');
+  assert.strictEqual(pm('2 * 3'), '2 * 3', 'balanced math star untouched');
+  assert.strictEqual(pm('run `npm test'), 'run `npm test', 'mid-text backtick opener untouched');
+  assert.strictEqual(pm('`code'), '`code', 'trailing text keeps the opening backtick (no closer yet)');
+  assert.strictEqual(pm('inline `code` end'), 'inline `code` end', 'balanced code span untouched');
+  assert.strictEqual(pm('a `b` and `'), 'a `b` and ', 'trailing lone backtick hidden when odd');
+  assert.strictEqual(pm('[see docs]('), '[see docs]', 'trailing open link URL hidden');
+  assert.strictEqual(pm('[see docs'), '[see docs', 'trailing unclosed link label hidden');
+  assert.strictEqual(pm('```js\nconst x = a * b;\n'), '```js\nconst x = a * b;\n', 'inside an open code fence nothing is stripped');
+  assert.strictEqual(pm('~~strike'), '~~strike', 'mid-text strike opener untouched');
+  assert.strictEqual(pm('text ~~'), 'text ', 'trailing unclosed ~~ opener hidden');
+  assert.ok(inline.includes("body.innerHTML=m.complete?markdown(m.text):markdown(progressiveMarkdown(m.text))"), 'renderAssistantBody renders progressive while streaming, exact on done');
+  assert.ok(inline.includes('if(m.complete)enhanceCodeBlocks(el)'), 'code-block chrome deferred to the final render only');
+  assert.ok(inline.includes("markdown(progressiveMarkdown(m.text))"), 'progressive path is not dead code');
+  const rabMatch = inline.match(/function renderAssistantBody[\s\S]*?\n    \}/);
+  assert.ok(rabMatch && !/enhanceCodeBlocks\(el\);/.test(rabMatch[0].replace('if(m.complete)enhanceCodeBlocks(el);', '')), 'no unconditional per-tick enhanceCodeBlocks call remains');
+  assert.ok(inline.includes('enhanceCodeBlocks(root);scheduleExecutionRender()'), 'renderMessages restores code chrome on full re-render');
+  console.log('22. streaming render stays clean (no raw-marker flash, no chrome flicker) ok');
+
+  console.log('webui-cards: message->execution contract holds (22 gates, 70+ assertions)');
 }
 
 try {

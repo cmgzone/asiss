@@ -26,6 +26,7 @@ export class NotesSkill implements Skill {
   private filePath: string;
 
   constructor() {
+    // phase23-ok: engine-root scratch file, not project context
     this.filePath = path.join(process.cwd(), 'notes.md');
   }
 

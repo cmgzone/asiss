@@ -39,6 +39,9 @@ export interface IndexedFile {
 
 export interface RepositoryIndex {
   root: string;
+  /** Phase 23 §7 — project attribution; the index may only be served to the
+   *  project that owns it (requested projectId MUST match index.projectId). */
+  projectId?: string;
   files: IndexedFile[];
   fileCount: number;
   totalBytes: number;

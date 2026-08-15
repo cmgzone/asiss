@@ -63,3 +63,93 @@ export function containsProtocolMarkup(input: unknown): boolean {
     /<tool_call[\s\S]*?<\/tool_call\s*>/i.test(text)
   );
 }
+
+export interface ExtractedToolCall {
+  id?: string;
+  name: string;
+  arguments: Record<string, any>;
+}
+
+/**
+ * Extracts structured tool call objects from raw text containing protocol markup
+ * (e.g. `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`
+ * or `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` or markdown code blocks).
+ */
+export function extractStructuredToolCalls(text: string): ExtractedToolCall[] {
+  if (!text || typeof text !== 'string') return [];
+  const calls: ExtractedToolCall[] = [];
+
+  // Pattern 1: <tool_call>...<arg_key>...</arg_key><arg_value>...</arg_value>...</tool_call>
+  const blockRegex = /<tool_call(?:\s+name=["']([^"']+)["'])?\s*>([\s\S]*?)<\/tool_call\s*>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = blockRegex.exec(text)) !== null) {
+    const attrName = match[1];
+    const body = match[2].trim();
+
+    // Check if body is JSON
+    if (body.startsWith('{') && body.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed && typeof parsed === 'object') {
+          const name = parsed.name || attrName || 'unknown';
+          const args = parsed.arguments || parsed.args || (parsed.name ? { ...parsed } : {});
+          if (parsed.name && args.name) delete args.name;
+          calls.push({ name: String(name).trim(), arguments: args && typeof args === 'object' ? args : {} });
+          continue;
+        }
+      } catch { /* not valid JSON, fallback to tag parsing */ }
+    }
+
+    // Tag-based parsing: name could be in body before first <arg_key> or in <arg_name> or attrName
+    let name = attrName || '';
+    const args: Record<string, any> = {};
+
+    if (!name) {
+      const nameMatch = /^([a-zA-Z0-9_-]+)/.exec(body);
+      if (nameMatch && !nameMatch[1].startsWith('<')) {
+        name = nameMatch[1];
+      }
+    }
+
+    const keyValRegex = /<arg_key>(.*?)<\/arg_key>\s*<arg_value>(.*?)<\/arg_value>/gi;
+    let kvMatch: RegExpExecArray | null;
+    while ((kvMatch = keyValRegex.exec(body)) !== null) {
+      const key = kvMatch[1].trim();
+      let valStr = kvMatch[2].trim();
+      let val: any = valStr;
+      try {
+        val = JSON.parse(valStr);
+      } catch {
+        // Keep string if not JSON
+      }
+      if (key) args[key] = val;
+    }
+
+    if (!name && args.command) {
+      name = 'shell';
+    }
+
+    if (name) {
+      calls.push({ name: name.trim(), arguments: args });
+    }
+  }
+
+  // Pattern 2: ```json {"name": "...", "arguments": ...} ``` or ```tool_call ... ```
+  if (calls.length === 0) {
+    const codeBlockRegex = /```(?:json|tool_call|xml)?\s*\n?\s*(\{\s*"name"\s*:\s*"[^"]+"[\s\S]*?\})\s*\n?```/gi;
+    while ((match = codeBlockRegex.exec(text)) !== null) {
+      try {
+        const parsed = JSON.parse(match[1]);
+        if (parsed && parsed.name && typeof parsed.name === 'string') {
+          calls.push({
+            name: parsed.name.trim(),
+            arguments: parsed.arguments || parsed.args || {}
+          });
+        }
+      } catch { /* skip invalid json */ }
+    }
+  }
+
+  return calls;
+}

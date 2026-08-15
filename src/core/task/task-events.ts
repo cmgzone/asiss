@@ -15,6 +15,8 @@ export type TaskEventName =
   | 'TaskCreated'
   | 'TaskAnalyzed'
   | 'TaskPlanned'
+  | 'TaskPlanUpdated'
+  | 'TaskPlanStepChanged'
   | 'TaskReady'
   | 'TaskStarted'
   | 'TaskProgress'

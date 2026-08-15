@@ -164,6 +164,7 @@ Actions:
     private data: BusinessData;
 
     constructor() {
+        // phase23-ok: engine-root state file, not project context
         this.filePath = path.join(process.cwd(), 'business_data.json');
         this.data = this.load();
     }

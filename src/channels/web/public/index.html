@@ -20,7 +20,7 @@
     .chat-shell{min-height:0;flex:1;display:grid;grid-template-columns:minmax(0,1fr) var(--canvas);transition:grid-template-columns .25s ease}.chat-shell.canvas-closed{grid-template-columns:minmax(0,1fr) 0}.chat-main{min-width:0;min-height:0;display:flex;flex-direction:column}.messages{flex:1;overflow:auto;scrollbar-gutter:stable;padding:34px max(22px,calc((100% - 780px)/2)) 150px}.empty{max-width:760px;margin:10vh auto 0}.eyebrow{color:var(--accent2);font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:800}.empty h2{font-size:clamp(30px,4vw,52px);line-height:1.04;letter-spacing:-.055em;margin:12px 0 18px;max-width:680px}.empty p{font-size:16px;color:var(--muted);max-width:580px}.prompts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:32px}.prompt-card{border:1px solid var(--line);background:rgba(23,27,36,.64);border-radius:14px;padding:14px;text-align:left;cursor:pointer;color:var(--soft)}.prompt-card:hover{border-color:#41495b;background:var(--panel2)}
     .message{display:grid;grid-template-columns:34px minmax(0,1fr);gap:14px;margin:0 0 30px;animation:rise .28s ease both}.message.user{display:block;margin-left:auto;max-width:78%;background:var(--panel2);border:1px solid var(--line);border-radius:18px 18px 5px 18px;padding:12px 16px}.message.user .role{display:none}.role{width:31px;height:31px;border-radius:10px;background:linear-gradient(145deg,var(--accent),#6252e6);display:grid;place-items:center;font-size:11px;font-weight:800}.message-body{min-width:0;color:#e7eaf1;font-size:15px}.message-body>*:first-child{margin-top:2px}.message-body p{margin:.2em 0 1em}.message-body h1,.message-body h2,.message-body h3{letter-spacing:-.025em;margin:1.2em 0 .5em}.message-body pre{background:#080a0e;border:1px solid var(--line);border-radius:12px;padding:14px;overflow:auto}.message-body code{font-family:"SFMono-Regular",Consolas,monospace;font-size:.88em}.message-body :not(pre)>code{background:#202532;border-radius:5px;padding:2px 5px}.message-body a{color:#a99eff}.message-body ul,.message-body ol{padding-left:22px}.message-meta{color:#596276;font-size:11px;margin-top:8px}.thinking{display:flex;align-items:center;gap:9px;color:var(--muted)}.shimmer{width:132px;height:11px;border-radius:10px;background:linear-gradient(90deg,#202532 15%,#3a4252 48%,#202532 80%);background-size:240% 100%;animation:shimmer 1.4s linear infinite}
     .composer-wrap{position:absolute;left:0;right:var(--canvas);bottom:0;padding:40px max(20px,calc((100% - var(--canvas) - 800px)/2)) 22px;background:linear-gradient(transparent,var(--bg) 38%);pointer-events:none;transition:right .25s}.canvas-closed~.composer-wrap{right:0}.composer{pointer-events:auto;background:#191d26;border:1px solid #303747;border-radius:20px;padding:9px;box-shadow:0 18px 60px rgba(0,0,0,.35)}.composer textarea{display:block;width:100%;max-height:180px;resize:none;border:0;outline:0;background:transparent;color:var(--text);padding:8px 10px;line-height:1.5}.composer-row{display:flex;align-items:center;gap:7px}.composer-row .hint{color:#596276;font-size:11px;margin-left:5px;flex:1}.icon-btn{width:34px;height:34px;border:0;border-radius:10px;background:transparent;color:var(--muted);cursor:pointer}.icon-btn:hover{background:rgba(255,255,255,.06);color:var(--text)}.send{width:36px;height:36px;border:0;border-radius:11px;background:var(--text);color:#090b0f;font-weight:900;cursor:pointer}.send:disabled{opacity:.3;cursor:not-allowed}.icon-btn.stop{color:var(--danger)}.icon-btn.stop:hover{background:rgba(255,107,122,.12)}
-    .canvas{border-left:1px solid var(--line);background:#0e1117;min-width:0;overflow:hidden;display:flex;flex-direction:column;transition:opacity .2s}.canvas-closed .canvas{opacity:0;pointer-events:none}.canvas-head{height:58px;display:flex;align-items:center;padding:0 14px;border-bottom:1px solid var(--line);gap:8px}.canvas-head strong{flex:1}.live-pill{font-size:10px;color:var(--accent2);background:rgba(67,211,180,.09);padding:4px 7px;border-radius:999px}.canvas-body{padding:12px;overflow:auto;flex:1}.canvas-section{margin-bottom:20px}.canvas-title{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:#677185;margin:0 4px 8px}.activity{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:11px;margin-bottom:8px;animation:fade .25s}.activity.running{border-color:rgba(139,124,255,.45)}.activity.failed{border-color:rgba(255,107,122,.45)}.activity-top{display:flex;gap:8px;align-items:center}.activity-name{font-weight:700;flex:1}.badge{font-size:9px;text-transform:uppercase;letter-spacing:.06em;padding:2px 6px;border-radius:999px;font-weight:700;margin-left:6px}.level-low{background:rgba(67,211,180,.12);color:var(--accent2)}.level-medium{background:rgba(139,124,255,.12);color:#9a8fff}.level-high{background:rgba(255,191,64,.12);color:#ffbf40}.level-max{background:rgba(255,107,122,.14);color:#ff6b7a}.activity-state{font-size:10px;color:var(--muted)}.activity pre{max-height:190px;overflow:auto;white-space:pre-wrap;color:#aeb6c6;font:11px/1.55 Consolas,monospace;margin:9px 0 0}.artifact{display:block;border:1px solid var(--line);border-radius:12px;padding:10px;color:var(--soft);text-decoration:none;margin-bottom:8px}.artifact img{width:100%;border-radius:8px;margin-top:8px}.terminal{white-space:pre-wrap;color:#aeb7c8;font:11px/1.55 Consolas,monospace;background:#080a0e;border:1px solid var(--line);padding:11px;border-radius:12px;max-height:220px;overflow:auto}
+    .canvas{border-left:1px solid var(--line);background:#0e1117;min-width:0;overflow:hidden;display:flex;flex-direction:column;transition:opacity .2s}.canvas-closed .canvas{opacity:0;pointer-events:none}.canvas-head{height:58px;display:flex;align-items:center;padding:0 14px;border-bottom:1px solid var(--line);gap:8px}.canvas-head strong{flex:1}.project-badge{display:inline-flex;align-items:center;gap:6px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:800;color:var(--accent2);background:rgba(67,211,180,.08);border:1px solid rgba(67,211,180,.28);border-radius:999px;padding:4px 10px;cursor:pointer;margin-left:8px}.project-badge:hover{background:rgba(67,211,180,.16)}.project-badge .dot{color:var(--accent2);font-size:10px}.project-badge .badge-name{overflow:hidden;text-overflow:ellipsis}.project-panel{width:min(420px,92vw)}.project-panel .field-value{font-family:Consolas,monospace;font-size:12px;color:var(--soft);word-break:break-all;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px}.live-pill{font-size:10px;color:var(--accent2);background:rgba(67,211,180,.09);padding:4px 7px;border-radius:999px}.canvas-body{padding:12px;overflow:auto;flex:1}.canvas-section{margin-bottom:20px}.canvas-title{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:#677185;margin:0 4px 8px}.activity{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:11px;margin-bottom:8px;animation:fade .25s}.activity.running{border-color:rgba(139,124,255,.45)}.activity.failed{border-color:rgba(255,107,122,.45)}.activity-top{display:flex;gap:8px;align-items:center}.activity-name{font-weight:700;flex:1}.badge{font-size:9px;text-transform:uppercase;letter-spacing:.06em;padding:2px 6px;border-radius:999px;font-weight:700;margin-left:6px}.level-low{background:rgba(67,211,180,.12);color:var(--accent2)}.level-medium{background:rgba(139,124,255,.12);color:#9a8fff}.level-high{background:rgba(255,191,64,.12);color:#ffbf40}.level-max{background:rgba(255,107,122,.14);color:#ff6b7a}.activity-state{font-size:10px;color:var(--muted)}.activity pre{max-height:190px;overflow:auto;white-space:pre-wrap;color:#aeb6c6;font:11px/1.55 Consolas,monospace;margin:9px 0 0}.artifact{display:block;border:1px solid var(--line);border-radius:12px;padding:10px;color:var(--soft);text-decoration:none;margin-bottom:8px}.artifact img{width:100%;border-radius:8px;margin-top:8px}.terminal{white-space:pre-wrap;color:#aeb7c8;font:11px/1.55 Consolas,monospace;background:#080a0e;border:1px solid var(--line);padding:11px;border-radius:12px;max-height:220px;overflow:auto}
     .page{overflow:auto;padding:28px clamp(20px,4vw,54px) 60px}.page-head{max-width:1100px;margin:0 auto 26px}.page-head h2{font-size:32px;letter-spacing:-.045em;margin:0 0 6px}.page-head p{color:var(--muted);margin:0}.grid{max-width:1100px;margin:auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px}.card{border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);padding:18px;min-width:0}.card h3{margin:0 0 5px;font-size:16px}.card p{color:var(--muted)}.card .metric{font-size:30px;font-weight:750;letter-spacing:-.04em}.card-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px}.progress{height:5px;background:#242a36;border-radius:10px;overflow:hidden}.progress span{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2))}.wide{grid-column:1/-1}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}.field{display:grid;gap:6px}.field label{color:var(--muted);font-size:12px}.field input,.field select,.field textarea{width:100%;border:1px solid var(--line);background:#0d1016;color:var(--text);border-radius:10px;padding:10px;outline:0}.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent)}.field-row{display:flex;gap:8px;align-items:center}.field-row select{flex:1;min-width:0}.hint{color:var(--muted);font-size:11px;margin:6px 0 0}.check-grid{display:flex;gap:8px;flex-wrap:wrap}.check{border:1px solid var(--line);border-radius:10px;padding:8px 10px;color:var(--muted)}.check:has(input:checked){border-color:rgba(139,124,255,.6);color:var(--text);background:rgba(139,124,255,.08)}
     dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);width:min(580px,calc(100% - 28px));padding:0}dialog::backdrop{background:rgba(3,4,7,.72);backdrop-filter:blur(6px)}.dialog-head{padding:18px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center}.dialog-head h3{margin:0;flex:1}.dialog-body{padding:20px}.dialog-actions{padding:14px 20px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:8px}.folder-dialog{width:min(760px,calc(100% - 28px))}.folder-toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px}.folder-path{flex:1;min-width:0;border:1px solid var(--line);background:#0d1016;border-radius:10px;padding:9px 11px;color:var(--soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.folder-roots{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px}.folder-roots button{padding:6px 9px}.folder-list{border:1px solid var(--line);border-radius:12px;overflow:auto;max-height:360px;min-height:190px;background:#0d1016}.folder-row{width:100%;border:0;border-bottom:1px solid rgba(37,43,56,.75);background:transparent;color:var(--soft);padding:11px 12px;display:flex;gap:10px;align-items:center;text-align:left;cursor:pointer}.folder-row:last-child{border-bottom:0}.folder-row:hover{background:rgba(255,255,255,.045)}.folder-icon{color:var(--accent);font-size:17px}.folder-name{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.folder-type{font-size:10px;color:var(--accent2);border:1px solid rgba(67,211,180,.25);background:rgba(67,211,180,.07);padding:3px 7px;border-radius:999px}.folder-current{color:var(--muted);font-size:12px;margin-top:10px;min-height:20px}.workspace-path{display:block;color:#6f7a90;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:5px}.toast{position:fixed;right:22px;bottom:22px;background:#202632;border:1px solid #343c4d;border-radius:12px;padding:11px 14px;box-shadow:var(--shadow);z-index:50;animation:rise .2s}.login{position:fixed;inset:0;z-index:100;background:radial-gradient(circle at 50% 10%,rgba(139,124,255,.18),transparent 35%),#090b10;display:grid;place-items:center;padding:20px}.login-card{width:min(410px,100%);border:1px solid var(--line);background:rgba(17,20,27,.88);backdrop-filter:blur(22px);border-radius:24px;padding:30px;box-shadow:var(--shadow)}.login-card h1{font-size:28px;letter-spacing:-.04em;margin:18px 0 5px}.login-card p{color:var(--muted);margin:0 0 24px}.login-card .field{margin:11px 0}.login-card button{width:100%;margin-top:11px;padding:11px}.error{color:var(--danger);min-height:20px;margin-top:10px}.mobile-menu{display:none}
     @keyframes shimmer{to{background-position:-240% 0}}@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}@keyframes fade{from{opacity:0}to{opacity:1}}
@@ -83,10 +83,48 @@
 
     <main class="workspace">
       <section class="view active" id="view-chat">
-        <header class="topbar"><button class="icon-btn mobile-menu" id="menuBtn">☰</button><h1 id="chatTitle">New conversation</h1><span class="status-dot" id="connectionDot"></span><select class="select" id="projectSelect"><option value="">General workspace</option></select><select class="select" id="modelSelect"><option>Active model</option></select><button class="ghost" id="loopBtn" title="Goal → Task trace">Loop ◈</button><button class="ghost" id="canvasToggle">Canvas ◫</button></header>
+        <header class="topbar"><button class="icon-btn mobile-menu" id="menuBtn">☰</button><h1 id="chatTitle">New conversation</h1><button type="button" class="project-badge hidden" id="projectBadge" title="Active project context"><span class="dot">●</span><span class="badge-name" id="projectBadgeName">General</span></button><span class="status-dot" id="connectionDot"></span><select class="select" id="projectSelect"><option value="">General workspace</option></select><select class="select" id="modelSelect"><option>Active model</option></select><button class="ghost" id="loopBtn" title="Goal → Task trace">Loop ◈</button><button class="ghost" id="canvasToggle">Canvas ◫</button></header>
         <div class="chat-shell" id="chatShell">
           <div class="chat-main"><div class="messages" id="messages"></div></div>
-          <aside class="canvas" id="canvas"><div class="canvas-head"><strong>Live canvas</strong><span class="live-pill">LIVE</span><button class="icon-btn" id="canvasClose">×</button></div><div class="canvas-body"><div class="canvas-section"><div class="canvas-title">Execution</div><div id="executionPanel"><div class="exec-line muted">No mission running.</div></div></div><div class="canvas-section"><div class="canvas-title">Activity</div><div id="activityList"><div class="activity"><div class="activity-top"><span>Ready</span><span class="activity-state">waiting</span></div></div></div></div><div class="canvas-section"><div class="canvas-title">Terminal stream</div><div class="terminal" id="terminal">No command output yet.</div></div><div class="canvas-section"><div class="canvas-title">Artifacts</div><div id="artifactList"></div></div><div class="canvas-section"><div class="canvas-title">Suggestions</div><div id="suggestions"></div></div></div></aside>
+          <aside class="canvas" id="canvas">
+            <div class="canvas-head"><strong>Live canvas</strong><span class="live-pill">LIVE</span><button class="icon-btn" id="canvasClose">×</button></div>
+            <div class="canvas-nav" id="canvasNav">
+              <button type="button" class="canvas-tab active" data-tab="plan">◈ Plan</button>
+              <button type="button" class="canvas-tab" data-tab="diffs">⧉ Diffs <span class="tab-badge hidden" id="diffsBadge">0</span></button>
+              <button type="button" class="canvas-tab" data-tab="files">📁 Files</button>
+              <button type="button" class="canvas-tab" data-tab="preview">◫ Preview</button>
+              <button type="button" class="canvas-tab" data-tab="terminal">⌨ Terminal</button>
+            </div>
+            <div class="canvas-body" id="canvasBody">
+              <div class="canvas-tab-pane active" id="pane-plan">
+                <div class="canvas-section"><div class="canvas-title">Execution</div><div id="executionPanel"><div class="exec-line muted">No mission running.</div></div></div>
+                <div class="canvas-section"><div class="canvas-title">Plan &amp; Milestones</div><div id="planPanel"><div class="exec-line muted">No plan active.</div></div></div>
+                <div class="canvas-section"><div class="canvas-title">Activity</div><div id="activityList"><div class="activity"><div class="activity-top"><span>Ready</span><span class="activity-state">waiting</span></div></div></div></div>
+                <div class="canvas-section"><div class="canvas-title">Suggestions</div><div id="suggestions"></div></div>
+              </div>
+              <div class="canvas-tab-pane" id="pane-diffs">
+                <div class="diff-header"><select class="select" id="diffFileSelect"><option value="">No modified files</option></select><button type="button" class="icon-btn" id="copyDiffBtn" title="Copy diff">📋</button></div>
+                <div class="diff-view" id="diffViewer">No changes recorded yet.</div>
+              </div>
+              <div class="canvas-tab-pane" id="pane-files" style="position:relative">
+                <div class="file-tree-header"><span id="fileTreeRoot">Project Files</span><button type="button" class="icon-btn" id="refreshTreeBtn" title="Refresh files">⟳</button></div>
+                <div class="file-tree" id="fileTree">Select or create a project to inspect files.</div>
+                <div class="file-inspector hidden" id="fileInspector">
+                  <div class="inspector-header"><span class="inspector-filename" id="inspectorFilename">file.ts</span><button type="button" class="icon-btn" id="closeInspectorBtn">×</button></div>
+                  <pre class="inspector-code" id="inspectorCode"></pre>
+                </div>
+              </div>
+              <div class="canvas-tab-pane" id="pane-preview">
+                <div class="preview-toolbar"><button type="button" class="ghost" id="previewReloadBtn">↻ Reload</button><div class="spacer"></div><span class="preview-title" id="previewTitle">Live Preview</span></div>
+                <iframe class="preview-iframe" id="previewIframe" sandbox="allow-scripts allow-same-origin"></iframe>
+                <div class="canvas-section" style="margin-top:14px"><div class="canvas-title">Artifacts</div><div id="artifactList"></div></div>
+              </div>
+              <div class="canvas-tab-pane" id="pane-terminal">
+                <div class="terminal-toolbar"><button type="button" class="ghost" id="clearTerminalBtn">Clear</button><button type="button" class="ghost" id="copyTerminalBtn">Copy</button></div>
+                <div class="terminal" id="terminal">No command output yet.</div>
+              </div>
+            </div>
+          </aside>
         </div>
         <div class="composer-wrap" id="composerWrap"><form class="composer" id="composer"><textarea id="chatInput" rows="1" placeholder="Ask Gitu to build, fix, research, or automate…" aria-label="Message"></textarea><div class="composer-row"><button type="button" class="icon-btn" id="voiceBtn" title="Voice input">●</button><label class="icon-btn" title="Attach images"><input type="file" id="imageInput" class="hidden" accept="image/png,image/jpeg,image/webp,image/gif" multiple>＋</label><span class="hint" id="composerHint">Enter to send · Shift+Enter for a new line</span><span class="hint" id="attachmentHint"></span><label class="icon-btn" title="Read responses aloud"><input type="checkbox" id="ttsToggle" class="hidden">◖</label><button type="button" class="icon-btn stop hidden" id="stopBtn" title="Stop running">■</button><button class="send" id="sendBtn" aria-label="Send">↑</button></div></form></div>
       </section>
@@ -112,6 +150,7 @@
   <dialog id="workspaceDialog" class="folder-dialog"><form id="workspaceForm"><div class="dialog-head"><h3 id="workspaceTitle">Select a real project folder</h3><button type="button" id="workspaceClose" class="icon-btn">×</button></div><div class="dialog-body"><div class="folder-roots" id="folderRoots"></div><div class="folder-toolbar"><button type="button" class="ghost" id="folderUp">↑ Up</button><div class="folder-path" id="folderPathLabel" title=""></div><button type="button" class="ghost" id="folderNew">New folder</button></div><div class="folder-list" id="folderList"><div style="padding:18px;color:var(--muted)">Loading folders…</div></div><div class="folder-current" id="folderCurrentHint"></div><input type="hidden" id="workspacePath" required><input type="hidden" id="workspaceProjectId"></div><div class="dialog-actions"><button type="button" id="workspaceCancel" class="ghost">Cancel</button><button type="button" class="ghost" id="folderCreateProject">Create project folder here</button><button type="submit" class="primary" id="workspaceSubmit">Use this folder</button></div></form></dialog>
   <dialog id="projectDialog"><form id="projectForm"><div class="dialog-head"><h3>Create project</h3><button type="button" id="projectClose" class="icon-btn">×</button></div><div class="dialog-body"><div class="field"><label>Project name</label><input id="projectName" maxlength="100" placeholder="Customer portal" required></div><div class="field"><label>Description</label><textarea id="projectDescription" rows="4" maxlength="1000" placeholder="What should this project accomplish?"></textarea></div><div class="field"><label>Workspace location</label><div class="folder-toolbar"><div class="folder-path" id="projectLocation">Default Gitu Projects folder</div><button type="button" class="ghost" id="projectBrowse">Browse folders</button></div></div><p>The project folder will be created automatically inside the selected location.</p></div><div class="dialog-actions"><button type="button" id="projectCancel" class="ghost">Cancel</button><button type="submit" class="primary">Create project</button></div></form></dialog>
   <dialog id="newFolderDialog"><form id="newFolderForm"><div class="dialog-head"><h3>Create local folder</h3><button type="button" id="newFolderClose" class="icon-btn">×</button></div><div class="dialog-body"><div class="field"><label>Folder name</label><input id="newFolderName" maxlength="100" placeholder="New project" required></div></div><div class="dialog-actions"><button type="button" id="newFolderCancel" class="ghost">Cancel</button><button type="submit" class="primary">Create folder</button></div></form></dialog>
+  <dialog id="projectInfoDialog" class="project-panel"><div class="dialog-head"><h3>PROJECT</h3><button type="button" id="projectInfoClose" class="icon-btn">×</button></div><div class="dialog-body"><div class="field"><label>Project</label><div class="field-value" id="projectInfoName">—</div></div><div class="field"><label>Workspace</label><div class="field-value" id="projectInfoWorkspace">—</div></div><div class="field"><label>Repository</label><div class="field-value" id="projectInfoRepo">—</div></div><div class="field"><label>Agents</label><div class="field-value" id="projectInfoAgents">0 active</div></div><p class="hint" style="margin-top:10px">Every conversation, execution, memory lookup and tool call in this chat is bound to this project workspace.</p></div></form></dialog>
   <dialog id="modelDialog"><form method="dialog" id="modelForm"><div class="dialog-head"><h3>Add custom model</h3><button value="cancel" class="icon-btn">×</button></div><div class="dialog-body form-grid"><div class="field"><label>Name</label><input id="modelName" required></div><div class="field"><label>Provider</label><select id="modelProvider"><option value="openrouter">OpenRouter</option><option value="ollama">Ollama</option><option value="openai">OpenAI-compatible</option></select></div><div class="field"><label>Model ID</label><input id="modelId" required></div><div class="field"><label>Base URL</label><input id="modelBaseUrl"></div><div class="field"><label>API key</label><input id="modelApiKey" type="password"></div><div class="field"><label>Max output tokens</label><input id="modelTokens" type="number"></div><div class="field"><label>Level (auto-inferred)</label><select id="modelLevel"><option value="">Auto</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="max">Max</option></select></div></div><div class="dialog-actions"><button value="cancel" class="ghost">Cancel</button><button value="default" class="primary">Add model</button></div></form></dialog>
   <dialog id="loopDialog" class="loop-dialog">
     <div class="loop-head"><strong>Autonomous loop</strong><span class="loop-mute">Goal → Task → Agent → Execute → Verify → Repair → Complete → Learn</span><div class="spacer"></div><button type="button" class="ghost" id="loopRefresh">↻ Refresh</button><button type="button" class="icon-btn" id="loopClose" title="Close">×</button></div>
@@ -151,6 +190,17 @@
       return s.replace(/\n{3,}/g,'\n\n');
     }
     function markdown(text){const safe=esc(stripToolProtocol(text));const html=window.marked?marked.parse(safe,{breaks:true,gfm:true}):safe.replace(/\n/g,'<br>');const box=document.createElement('div');box.innerHTML=html;box.querySelectorAll('a').forEach(a=>{try{const u=new URL(a.href,location.origin);if(!['http:','https:'].includes(u.protocol))a.removeAttribute('href');else{a.target='_blank';a.rel='noopener noreferrer'}}catch{a.removeAttribute('href')}});return box.innerHTML}
+    // Streaming guard: while a reply is still arriving, an unclosed inline
+    // marker (bold/italic/code/strike/link) would render as raw punctuation
+    // until the closing marker streams in — visible as a `**`/backtick flash
+    // on every throttled tick. progressiveMarkdown hides a lone trailing
+    // opener so the live body never shows half-open markup; open code fences
+    // are skipped (marked already renders them as a growing code block and
+    // <pre> content is escaped, never parsed). The raw text is untouched in
+    // message state; the final assistant_done render is always exact.
+    function progressiveMarkdown(text){
+      let t=String(text??'');if(!t)return t;if((t.split('```').length-1)%2===1)return t;if(t.endsWith('**')&&(t.split('**').length-1)%2===1)t=t.slice(0,-2);else if(t.endsWith('__')&&(t.split('__').length-1)%2===1)t=t.slice(0,-2);else if(t.endsWith('~~')&&(t.split('~~').length-1)%2===1)t=t.slice(0,-2);else if(t.endsWith('`')&&!t.endsWith('``')&&(t.split('`').length-1)%2===1)t=t.slice(0,-1);else if(t.endsWith('*')&&!t.endsWith('**')&&(t.split('*').length-1)%2===1)t=t.slice(0,-1);else if(t.endsWith('~')&&!t.endsWith('~~')&&(t.split('~').length-1)%2===1)t=t.slice(0,-1);else if(t.endsWith('[')&&(t.split('[').length-1)>(t.split(']').length-1))t=t.slice(0,-1);else if(t.endsWith('(')){const o=(t.split('(').length-1),c=(t.split(')').length-1);if(o>c){const li=t.lastIndexOf('(');if(li>0&&t.charAt(li-1)===']')t=t.slice(0,li)}}return t;
+    }
     // Dependency-free syntax highlighting for markdown code blocks. The UI is
     // fully self-hosted (offline desktop), so no CDN highlighter is used — a
     // small tokenizer covers comments, strings, numbers, keywords and calls
@@ -159,9 +209,10 @@
     function highlightCode(src,lang){const keywords=HL_KEYWORDS[lang]||HL_KEYWORDS.js;const ignoreCase=/^(sql|bash|sh|shell|html|css|yaml|yml|ini|toml|dockerfile)$/.test(lang||'');const hashComments=/^(python|bash|sh|shell|yaml|yml|ruby|perl|makefile|dockerfile|ini|toml|r)$/.test(lang||'');const comment=hashComments?'(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/|#[^\\n]*|<!--[\\s\\S]*?-->)':'(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/|<!--[\\s\\S]*?-->)';const re=new RegExp(comment+'|("(?:[^"\\\\\\n]|\\\\.)*"|\'(?:[^\'\\\\\\n]|\\\\.)*\'|`(?:[^`\\\\]|\\\\.)*`)|(\\b0x[0-9a-fA-F]+\\b|\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b)|([A-Za-z_$][\\w$]*)','g');const escSrc=String(src).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));let out='',last=0,m;while((m=re.exec(escSrc))){out+=escSrc.slice(last,m.index);if(m[1])out+='<span class="tok-c">'+m[1]+'</span>';else if(m[2])out+='<span class="tok-s">'+m[2]+'</span>';else if(m[3])out+='<span class="tok-n">'+m[3]+'</span>';else{const w=m[4];const word=ignoreCase?w.toLowerCase():w;if(keywords.includes(word))out+='<span class="tok-k">'+w+'</span>';else if(/^\s*\(/.test(escSrc.slice(m.index+m[0].length)))out+='<span class="tok-f">'+w+'</span>';else out+=w}last=m.index+m[0].length}out+=escSrc.slice(last);return out}
     // Code blocks render as embedded editor artifacts: a header bar with the
     // language tag + copy action, then the monospace body with the existing
-    // dependency-free highlighter. Wrapping happens once per block (dataset
-    // guard survives streaming re-renders because renderAssistantBody rebuilds
-    // the body from scratch, so these nodes are always fresh).
+    // dependency-free highlighter. Enhancement runs ONLY on the final render
+    // (assistant_done / full re-render) so the chrome never flickers in and
+    // out while a block is still streaming (the dataset guards make the pass
+    // idempotent for restored histories).
     function enhanceCodeBlocks(root){if(!root)return;root.querySelectorAll('.message-body pre').forEach(pre=>{if(pre.dataset.hlDone)return;pre.dataset.hlDone='1';const code=pre.querySelector('code');const lang=(code&&(code.className.match(/language-(\w+)/)||[])[1])||'';const wrap=document.createElement('div');wrap.className='code-block';const bar=document.createElement('div');bar.className='code-bar';if(lang){const tag=document.createElement('span');tag.className='code-lang';tag.textContent=lang;bar.appendChild(tag)}const btn=document.createElement('button');btn.type='button';btn.className='code-copy';btn.textContent='Copy';btn.title='Copy code';btn.onclick=async(e)=>{e.stopPropagation();const text=(code?code.textContent:pre.textContent)||'';try{await navigator.clipboard.writeText(text)}catch{const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove()}toast('Code copied')};bar.appendChild(btn);pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(bar);wrap.appendChild(pre);if(code&&!code.dataset.hl){code.dataset.hl='1';code.innerHTML=highlightCode(code.textContent,lang.toLowerCase())}})}
     function toast(text,bad=false){const el=$('#toast');el.textContent=text;el.style.borderColor=bad?'rgba(255,107,122,.5)':'';el.classList.remove('hidden');clearTimeout(toast.t);toast.t=setTimeout(()=>el.classList.add('hidden'),3200)}
     function updateStopButton(){const stop=$('#stopBtn');if(!stop)return;stop.classList.toggle('hidden',!state.missionActive);const hint=$('#composerHint');if(hint)hint.textContent=state.missionActive?'Enter to stop · Shift+Enter for a new line':'Enter to send · Shift+Enter for a new line'}
@@ -193,7 +244,18 @@
     }
     function renderExecution(){
       const root=$('#executionPanel');if(!root)return;
-      const ex=currentScopeExecution();if(!ex){root.innerHTML='<div class="exec-line muted">No mission running.</div>';return}
+      const ex=currentScopeExecution();
+      const planRoot=$('#planPanel');
+      const diffViewer=$('#diffViewer');
+      const diffSelect=$('#diffFileSelect');
+      const diffsBadge=$('#diffsBadge');
+      if(!ex){
+        root.innerHTML='<div class="exec-line muted">No mission running.</div>';
+        if(planRoot)planRoot.innerHTML='<div class="exec-line muted">No plan active.</div>';
+        if(diffViewer)diffViewer.textContent='No changes recorded yet.';
+        if(diffsBadge)diffsBadge.classList.add('hidden');
+        return;
+      }
       const badge=executionStatusBadge(ex.status);
       const active=ex.tools.find(t=>t.id===ex.activeToolId);
       const done=ex.tools.filter(t=>t.status!=='running').length;
@@ -209,6 +271,34 @@
         ${ex.latestError?`<div class="exec-line err">⚠ ${esc(String(ex.latestError).slice(0,140))}</div>`:''}
         ${chips.length?`<div class="exec-chips">${chips.join('')}</div>`:''}
       `;
+      if(planRoot){
+        if(ex.plan&&ex.plan.length){
+          planRoot.innerHTML=ex.plan.map(s=>{
+            const st=s.status==='COMPLETED'?'completed':s.status==='IN_PROGRESS'?'in-progress':s.status==='FAILED'?'failed':'pending';
+            const ico=st==='completed'?'✓':st==='in-progress'?'◉':st==='failed'?'⚠':'○';
+            return `<div class="plan-step-panel ${st}"><span class="card-plan-ico">${ico}</span><div style="flex:1;min-width:0"><strong style="display:block;color:var(--soft)">${esc(s.title)}</strong>${s.description?`<small style="color:var(--muted);font-size:10.5px">${esc(s.description)}</small>`:''}</div></div>`;
+          }).join('');
+        }else{
+          planRoot.innerHTML='<div class="exec-line muted">No plan active for this mission.</div>';
+        }
+      }
+      if(diffViewer&&diffSelect&&diffsBadge){
+        const diffs=ex.diffs||[];
+        if(diffs.length){
+          diffsBadge.textContent=String(diffs.length);
+          diffsBadge.classList.remove('hidden');
+          const currentSelected=diffSelect.value;
+          diffSelect.innerHTML=diffs.map((d,idx)=>`<option value="${idx}">${esc(d.file)}</option>`).join('');
+          if(currentSelected&&diffs[Number(currentSelected)])diffSelect.value=currentSelected;
+          const activeIdx=Number(diffSelect.value)||0;
+          const activeDiff=diffs[activeIdx]?.diff||'';
+          renderDiffContent(diffViewer,activeDiff);
+        }else{
+          diffsBadge.classList.add('hidden');
+          diffSelect.innerHTML='<option value="">No modified files</option>';
+          diffViewer.textContent='No changes recorded yet.';
+        }
+      }
     }
     // ===== Phase 21 — per-execution chat cards (PURE identity/HTML) =====
     // Delimited so smoke-webui-execution-cards.ts can extract and unit-test
@@ -252,6 +342,12 @@
       const dur=cardDuration(ex.startedAt,ex.endedAt);
       const openTools=o.openTools instanceof Set?o.openTools:new Set();
       const collapsed=!!o.collapsed;
+      const planRows=(ex.plan||[]).map(step=>{
+        const stS=step.status==='COMPLETED'?'completed':step.status==='IN_PROGRESS'?'in-progress':step.status==='FAILED'?'failed':'pending';
+        const icoS=stS==='completed'?'✓':stS==='in-progress'?'◉':stS==='failed'?'⚠':'○';
+        return `<div class="card-plan-step ${stS}"><span class="card-plan-ico">${icoS}</span><span class="card-plan-title">${CARD_ESC(step.title)}</span></div>`;
+      }).join('');
+      const planSection=planRows?`<div class="card-plan-list">${planRows}</div>`:'';
       const toolRows=(ex.tools||[]).slice(-12).map(t=>{
         const stT=t.status==='running'?'running':t.status==='failed'?'failed':'completed';
         const icoT=stT==='running'?'◉':stT==='failed'?'⚠':'✓';
@@ -285,6 +381,7 @@
           <div class="exec-card-body">
             <div class="exec-card-counts">${done}/${ex.tools.length} tools${agentsLine}</div>
             ${ex.progress!=null?`<div class="exec-progress-line" aria-hidden="true"><span style="width:${Math.round(ex.progress)}%"></span></div>`:''}
+            ${planSection}
             ${agentRows?`<div class="exec-agents">${agentRows}</div>`:''}
             ${ex.recoveryPhase?`<div class="exec-card-recovery">↻ ${CARD_ESC(ex.recoveryPhase)}</div>`:''}
             ${ex.latestError?`<div class="exec-card-error">⚠ ${CARD_ESC(String(ex.latestError).slice(0,180))}</div>`:''}
@@ -470,6 +567,148 @@
         + (ex.terminal?`<div class="exec-history-section">Terminal</div><div class="exec-history-term">${esc(ex.terminal.slice(-8000))}</div>`:'')
         + (ex.latestError?`<div class="exec-history-section">Error</div><div class="exec-card-error" style="margin:8px 16px 16px">⚠ ${esc(String(ex.latestError).slice(0,500))}</div>`:'');
     }
+
+    function renderDiffContent(el, rawDiff){
+      if(!rawDiff){el.textContent='No diff content.';return}
+      const lines=String(rawDiff).split('\n');
+      let html='';
+      let lineOld=1, lineNew=1;
+      for(const line of lines){
+        if(line.startsWith('@@')){
+          const m=/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+          if(m){lineOld=parseInt(m[1],10);lineNew=parseInt(m[2],10)}
+          html+=`<div class="diff-line hunk"><span class="diff-line-num">...</span><span>${esc(line)}</span></div>`;
+        }else if(line.startsWith('+')&&!line.startsWith('+++')){
+          html+=`<div class="diff-line add"><span class="diff-line-num">${lineNew++}</span><span>${esc(line)}</span></div>`;
+        }else if(line.startsWith('-')&&!line.startsWith('---')){
+          html+=`<div class="diff-line del"><span class="diff-line-num">${lineOld++}</span><span>${esc(line)}</span></div>`;
+        }else{
+          html+=`<div class="diff-line ctx"><span class="diff-line-num">${lineOld++}</span><span>${esc(line)}</span></div>`;
+          lineNew++;
+        }
+      }
+      el.innerHTML=html||esc(rawDiff);
+    }
+
+    async function loadWorkspaceTree(){
+      const rootEl=$('#fileTree');
+      if(!rootEl)return;
+      try{
+        const query=new URLSearchParams();
+        if(state.projectId)query.set('projectId',state.projectId);
+        else if(state.conversationId)query.set('conversationId',state.conversationId);
+        const res=await fetch('/api/workspace/tree?'+query.toString(),{headers:{Authorization:'Bearer '+state.token}});
+        if(!res.ok)throw new Error('Failed to load project tree');
+        const data=await res.json();
+        const tree=data.tree||[];
+        const rootTitle=$('#fileTreeRoot');
+        if(rootTitle)rootTitle.textContent=data.projectName||'Project Files';
+        if(!tree.length){rootEl.innerHTML='<div class="exec-line muted" style="padding:8px">No files found in workspace.</div>';return}
+        rootEl.innerHTML=renderTreeNodes(tree);
+        wireTreeClicks(rootEl);
+      }catch(err){
+        rootEl.innerHTML=`<div class="exec-line err" style="padding:8px">⚠ ${esc(err.message)}</div>`;
+      }
+    }
+
+    function renderTreeNodes(nodes){
+      return (nodes||[]).map(n=>{
+        if(n.isDir){
+          return `<div class="tree-item"><div class="tree-node" data-dir="${esc(n.path)}"><span class="tree-icon">▸</span>📁 <span>${esc(n.name)}</span></div><div class="tree-children hidden">${renderTreeNodes(n.children||[])}</div></div>`;
+        }
+        const ext=n.extension||'';
+        const fileIcon=ext==='ts'||ext==='js'?'📄':ext==='html'||ext==='css'?'🌐':ext==='json'||ext==='md'?'📝':'📄';
+        return `<div class="tree-node file" data-file="${esc(n.path)}"><span class="tree-icon">${fileIcon}</span><span>${esc(n.name)}</span></div>`;
+      }).join('');
+    }
+
+    function wireTreeClicks(rootEl){
+      rootEl.querySelectorAll('.tree-node[data-dir]').forEach(node=>{
+        node.onclick=()=>{
+          const children=node.nextElementSibling;
+          if(!children)return;
+          const open=children.classList.toggle('hidden');
+          const icon=node.querySelector('.tree-icon');
+          if(icon)icon.textContent=open?'▸':'▾';
+        };
+      });
+      rootEl.querySelectorAll('.tree-node[data-file]').forEach(node=>{
+        node.onclick=()=>openFileInspector(node.dataset.file);
+      });
+    }
+
+    async function openFileInspector(relPath){
+      const inspector=$('#fileInspector');
+      const filename=$('#inspectorFilename');
+      const code=$('#inspectorCode');
+      if(!inspector||!code)return;
+      filename.textContent=relPath;
+      code.textContent='Loading…';
+      inspector.classList.remove('hidden');
+      try{
+        const query=new URLSearchParams({path:relPath});
+        if(state.projectId)query.set('projectId',state.projectId);
+        else if(state.conversationId)query.set('conversationId',state.conversationId);
+        const res=await fetch('/api/workspace/file?'+query.toString(),{headers:{Authorization:'Bearer '+state.token}});
+        if(!res.ok)throw new Error('Could not read file');
+        const data=await res.json();
+        code.textContent=data.content||'';
+      }catch(e){
+        code.textContent='Error reading file: '+e.message;
+      }
+    }
+
+    function wireCanvasTabs(){
+      const nav=$('#canvasNav');
+      if(!nav)return;
+      nav.querySelectorAll('.canvas-tab').forEach(tab=>{
+        tab.onclick=()=>{
+          nav.querySelectorAll('.canvas-tab').forEach(t=>t.classList.remove('active'));
+          tab.classList.add('active');
+          const targetTab=tab.dataset.tab;
+          document.querySelectorAll('.canvas-tab-pane').forEach(p=>p.classList.remove('active'));
+          const targetPane=document.getElementById(`pane-${targetTab}`);
+          if(targetPane)targetPane.classList.add('active');
+          if(targetTab==='files')loadWorkspaceTree();
+          if(targetTab==='preview')reloadPreviewIframe();
+        };
+      });
+      const closeInspector=$('#closeInspectorBtn');
+      if(closeInspector)closeInspector.onclick=()=>$('#fileInspector')?.classList.add('hidden');
+      const refreshTree=$('#refreshTreeBtn');
+      if(refreshTree)refreshTree.onclick=()=>loadWorkspaceTree();
+      const diffSelect=$('#diffFileSelect');
+      if(diffSelect)diffSelect.onchange=()=>{
+        const ex=currentScopeExecution();
+        const diffs=ex?.diffs||[];
+        const idx=Number(diffSelect.value)||0;
+        const diffViewer=$('#diffViewer');
+        if(diffViewer&&diffs[idx])renderDiffContent(diffViewer,diffs[idx].diff);
+      };
+      const copyDiff=$('#copyDiffBtn');
+      if(copyDiff)copyDiff.onclick=()=>{
+        const diffViewer=$('#diffViewer');
+        if(diffViewer&&navigator.clipboard){navigator.clipboard.writeText(diffViewer.textContent||'');toast('Diff copied');}
+      };
+      const clearTerm=$('#clearTerminalBtn');
+      if(clearTerm)clearTerm.onclick=()=>{const t=$('#terminal');if(t)t.textContent='';};
+      const copyTerm=$('#copyTerminalBtn');
+      if(copyTerm)copyTerm.onclick=()=>{const t=$('#terminal');if(t&&navigator.clipboard){navigator.clipboard.writeText(t.textContent||'');toast('Terminal output copied');}};
+      const reloadPrev=$('#previewReloadBtn');
+      if(reloadPrev)reloadPrev.onclick=()=>reloadPreviewIframe();
+    }
+
+    function reloadPreviewIframe(){
+      const iframe=$('#previewIframe');
+      if(!iframe)return;
+      const ex=currentScopeExecution();
+      const htmlArtifact=(ex?.artifacts||[]).find(a=>(a.url||a.filename||'').toLowerCase().endsWith('.html'));
+      if(htmlArtifact&&htmlArtifact.url){
+        iframe.src=htmlArtifact.url;
+      }else{
+        iframe.srcdoc=`<!DOCTYPE html><html><body style="font-family:sans-serif;display:grid;place-items:center;height:90vh;color:#888;margin:0"><div><p style="text-align:center">No active HTML artifact or prototype to preview.</p><p style="text-align:center;font-size:12px">Ask Gitu to create an HTML prototype or web page to preview it live here.</p></div></body></html>`;
+      }
+    }
     async function api(url,options={}){const headers={...(options.headers||{}),Authorization:`Bearer ${state.token}`};if(options.body&&!headers['Content-Type'])headers['Content-Type']='application/json';const res=await fetch(url,{...options,headers});if(res.status===401){signOut();throw new Error('Please sign in again.')}const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.error||`Request failed (${res.status})`);return data}
 async function artifactUrl(url){if(!url)return'';try{const r=await fetch(url,{headers:{Authorization:`Bearer ${state.token}`}});if(!r.ok)return'';const u=URL.createObjectURL(await r.blob());trackBlobUrl(u);return u}catch{return''}}
 const blobUrls=[];function trackBlobUrl(u){blobUrls.push(u);while(blobUrls.length>20)URL.revokeObjectURL(blobUrls.shift())}
@@ -508,7 +747,7 @@ const blobUrls=[];function trackBlobUrl(u){blobUrls.push(u);while(blobUrls.lengt
     }
     async function loadLoop(){try{const r=await fetch('/api/loop',{headers:state.token?{Authorization:'Bearer '+state.token}:{}});const d=await r.json();if(!r.ok||d.error){$('#goalList').innerHTML='<div class="loop-empty">Could not load the loop trace ('+(r.status||'error')+'). Sign in and try again.</div>';$('#taskList').innerHTML='';return}loopData=d;renderLoop()}catch(e){}}
     function emptyMarkup(){return `<div class="empty"><div class="eyebrow">Autonomous by design</div><h2>Give Gitu an outcome, not a sequence of clicks.</h2><p>It can inspect, edit, run tools, recover from failures, verify work, and delegate independent tasks in parallel.</p><div class="prompts"><button class="prompt-card">Audit this project and fix the highest-impact issue</button><button class="prompt-card">Build this feature end to end and verify it</button><button class="prompt-card">Research this topic and produce an evidence-backed brief</button><button class="prompt-card">Split this work across specialist agents in parallel</button></div></div>`}
-    function renderMessages(){const root=$('#messages');if(!state.messages.length){root.innerHTML=emptyMarkup();root.querySelectorAll('.prompt-card').forEach(b=>b.onclick=()=>{$('#chatInput').value=b.textContent;sendMessage()});return}root.innerHTML='';state.messages.forEach(m=>appendMessageNode(m,false));executionCards.clear();executionCardVersions.clear();for(const exId of executionStore.executions.keys())mountExecutionCard(exId);scheduleExecutionRender();requestAnimationFrame(()=>root.scrollTop=root.scrollHeight)}
+    function renderMessages(){const root=$('#messages');if(!state.messages.length){root.innerHTML=emptyMarkup();root.querySelectorAll('.prompt-card').forEach(b=>b.onclick=()=>{$('#chatInput').value=b.textContent;sendMessage()});return}root.innerHTML='';state.messages.forEach(m=>appendMessageNode(m,false));executionCards.clear();executionCardVersions.clear();for(const exId of executionStore.executions.keys())mountExecutionCard(exId);enhanceCodeBlocks(root);scheduleExecutionRender();requestAnimationFrame(()=>root.scrollTop=root.scrollHeight)}
     function appendMessageNode(m,animate=true){const root=$('#messages');root.querySelector('.empty')?.remove();const el=document.createElement('article');const kindClass=m.kind==='activity'?'activity-message':m.kind;el.className=`message ${kindClass}${animate?' entering':''}`;if(m.runId)el.dataset.run=m.runId;if(m.activityId)el.dataset.activityMessage=m.activityId;if(m.kind==='user')el.innerHTML=`<div class="message-body">${esc(m.text).replace(/\n/g,'<br>')}</div>`;else if(m.kind==='activity'){const toolKind=toolSummaryKind(m.name),detail=formatToolDetail(m.name,m.output,m.status);el.innerHTML=`<div class="activity-spacer"></div><div class="activity-stack"><button type="button" class="tool-summary ${esc(m.status||'running')}" data-tool="${esc(toolKind)}" aria-expanded="false"><span class="tool-summary-icon" aria-hidden="true">${esc(toolSummaryIcon(m.name))}</span><span class="tool-summary-label">${esc(m.text)}</span><span class="tool-summary-caret" aria-hidden="true"></span></button><div class="tool-detail hidden"><div class="tool-detail-head"><span>${esc(toolDetailLabel(m.name))}</span><span class="tool-detail-status">${esc(m.status||'running')}</span></div><pre>${esc(detail)}</pre></div></div>`      }else if(m.kind==='update')el.innerHTML=`<div class="update-rail" aria-hidden="true"></div><div class="message-body">${markdown(m.text)}</div>`;else el.innerHTML=`<div class="role">G</div><div><div class="assistant-head"><span class="assistant-name">Gitu</span><span class="assistant-time">· just now</span></div><div class="message-body">${m.pending?'<div class="work-status" data-work="1"><span class="work-dot"></span><span class="work-label">Thinking</span></div>':markdown(m.text)}</div><div class="message-meta">${m.complete===false?'In progress':(m.stopped?'Stopped':m.failed?'Failed':'Completed')}</div>${m.execution&&!Array.isArray(m.execution.tools)?`<div class="message-execution st-${esc(String(m.execution.state||'completed'))}">${esc(m.execution.text||'')}</div>`:''}<div class="message-actions">${(m.failed||m.stopped)?'<button type="button" class="retry-btn" data-retry="1">↻ Retry</button>':''}</div></div>`;root.appendChild(el);if(m.execution&&Array.isArray(m.execution.tools)&&!executionStore.executions.has(String(m.execution.id))){const cardEl=document.createElement('article');cardEl.className='message exec-card-message';cardEl.id=executionCardId(m.execution.id);cardEl.dataset.execution=m.execution.id;cardEl.innerHTML=cardHtmlForExecution(m.execution,{collapsed:true});root.appendChild(cardEl)}if(m.kind==='user'||nearBottom())root.scrollTop=root.scrollHeight;if(m.kind==='assistant'||m.kind==='update')enhanceCodeBlocks(el);return el}
     function retryButtonHtml(){return '<button type="button" class="retry-btn" data-retry="1">↻ Retry</button>'}
     function syncRetryButton(m){const el=$(`[data-run="${CSS.escape(m.runId||'')}"]`);if(!el)return;const meta=el.querySelector('.message-meta');if(meta&&m.stopped)meta.textContent='Stopped';else if(meta&&m.failed)meta.textContent='Failed';const wrap=el.querySelector('.message-actions');if(wrap)wrap.innerHTML=(m.failed||m.stopped)?retryButtonHtml():''}
@@ -521,7 +760,9 @@ const blobUrls=[];function trackBlobUrl(u){blobUrls.push(u);while(blobUrls.lengt
     // the DOM re-render is deferred to at most one per 60 ms, then flushed
     // synchronously when the run completes.
     let assistantRenderTimer=null;
-    function renderAssistantBody(el,m){const body=el.querySelector('.message-body');if(body)body.innerHTML=markdown(m.text);enhanceCodeBlocks(el);const meta=el.querySelector('.message-meta');if(meta)meta.textContent=m.complete?'Completed':'In progress';if(nearBottom()){const root=$('#messages');if(root)root.scrollTop=root.scrollHeight}}
+    function renderAssistantBody(el,m){
+      const body=el.querySelector('.message-body');if(body)body.innerHTML=m.complete?markdown(m.text):markdown(progressiveMarkdown(m.text));if(m.complete)enhanceCodeBlocks(el);const meta=el.querySelector('.message-meta');if(meta)meta.textContent=m.complete?'Completed':'In progress';if(nearBottom()){const root=$('#messages');if(root)root.scrollTop=root.scrollHeight}
+    }
     function scheduleAssistantRender(m,done){
       const runId=m.runId;
       if(done){
@@ -590,7 +831,7 @@ function showRepoWarmth(d){const el=$('#repoWarmth');if(!el)return;el.classList.
     function signOut(){localStorage.removeItem('gitu:token');state.token='';state.socket?.disconnect();$('#app').classList.add('hidden');$('#loginView').classList.remove('hidden')}
     async function loadProjects(){
       const data=await api('/api/projects');state.projects=data.projects||[];
-      $('#projectSelect').innerHTML='<option value="">General workspace</option>'+state.projects.map(p=>`<option value="${esc(p.id)}">${esc(p.name||p.title)}</option>`).join('');$('#projectSelect').value=state.projectId;
+      $('#projectSelect').innerHTML='<option value="">General workspace</option>'+state.projects.map(p=>`<option value="${esc(p.id)}">${esc(p.name||p.title)}</option>`).join('');$('#projectSelect').value=state.projectId;renderProjectBadge();
       $('#projectsGrid').innerHTML=state.projects.map(p=>`<article class="card"><div class="eyebrow">${esc(p.status||'project')}</div><h3>${esc(p.name||p.title)}</h3><p>${esc(p.description||'No description')}</p><div class="progress"><span style="width:${Number(p.progress||0)}%"></span></div><p>${Number(p.progress||0)}% · ${Number(p.taskCount||0)} tasks</p><small style="color:${p.workspaceExists?'var(--accent2)':'var(--warn)'}">${p.workspaceExists?esc(p.workspaceName||'Workspace attached'):'Workspace required before editing'}</small>${p.workspaceExists?`<small class="workspace-path" title="${esc(p.workspacePath)}">${esc(p.workspacePath)}</small>`:''}<div class="card-actions"><button class="ghost project-chat" data-id="${esc(p.id)}">Open chat</button>${p.workspaceExists?'':`<button class="primary project-create-workspace" data-id="${esc(p.id)}">Create workspace</button>`}<button class="ghost project-attach" data-id="${esc(p.id)}">Browse folders</button>${p.workspaceExists?`<button class="ghost project-open" data-id="${esc(p.id)}">Open folder</button>`:''}</div></article>`).join('')||'<div class="card wide">No projects yet. Ask Gitu to create one.</div>';
       $$('.project-chat').forEach(b=>b.onclick=()=>{$('#projectSelect').value=b.dataset.id;switchProject(b.dataset.id)});
       $$('.project-create-workspace').forEach(b=>b.onclick=()=>createProjectWorkspace(b.dataset.id));
@@ -623,7 +864,7 @@ function showRepoWarmth(d){const el=$('#repoWarmth');if(!el)return;el.classList.
     function showView(name){$$('.view').forEach(v=>v.classList.toggle('active',v.id===`view-${name}`));$$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===name));document.body.classList.remove('menu-open');if(name==='projects')loadProjects();if(name==='agents')loadAgents();if(name==='skills')loadSkills().then(loadPortableSkills);if(name==='runtime')loadRuntime();if(name==='analytics')loadAnalytics();if(name==='settings')loadSettings()}
     $('#loginForm').onsubmit=async e=>{e.preventDefault();$('#loginError').textContent='';try{const r=await fetch('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('#loginUser').value.trim(),password:$('#loginPass').value})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Invalid credentials');state.token=d.token;state.user=d.username;localStorage.setItem('gitu:token',state.token);localStorage.setItem('gitu:user',state.user);connectSocket()}catch(e){$('#loginError').textContent=e.message}};
     $('#messages').onclick=e=>{const retry=e.target.closest('.retry-btn');if(retry){retryMessage();return}    const historyBtn=e.target.closest('.exec-history-open');if(historyBtn){openExecutionHistory(historyBtn.closest('.exec-card-message')?.dataset.execution);return}const execCard=e.target.closest('.exec-card');if(execCard){const toolRow=e.target.closest('.exec-tool-row');if(toolRow){toolRow.classList.toggle('open');const d=toolRow.querySelector('.exec-tool-detail');if(d)d.classList.toggle('hidden');return}const collapsed=execCard.classList.toggle('collapsed');execCard.parentElement.dataset.collapsed=collapsed?'1':'0';execCard.parentElement.dataset.manual=collapsed?'1':'0';execCard.querySelector('.exec-card-toggle').textContent=collapsed?'▸':'⌄';return}const button=e.target.closest('.tool-summary');if(!button)return;const detail=button.closest('.activity-stack')?.querySelector('.tool-detail');if(!detail)return;const open=detail.classList.toggle('hidden')===false;button.setAttribute('aria-expanded',String(open))};$('#execHistoryClose').onclick=()=>$('#execHistoryDialog').close();$('#execHistoryDialog').addEventListener('click',e=>{const toolRow=e.target.closest('.exec-tool-row');if(!toolRow)return;toolRow.classList.toggle('open');const d=toolRow.querySelector('.exec-tool-detail');if(d)d.classList.toggle('hidden')});
-    $('#nav').onclick=e=>{const b=e.target.closest('[data-view]');if(b)showView(b.dataset.view)};$$('.mobile-menu').forEach(b=>b.onclick=()=>document.body.classList.toggle('menu-open'));$('#menuBtn').onclick=()=>document.body.classList.toggle('menu-open');$('#newChat').onclick=()=>createConversation().catch(error=>toast(error.message,true));$('#logout').onclick=signOut;$('#composer').onsubmit=e=>{e.preventDefault();sendMessage()};$('#chatInput').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(state.missionActive){stopMission();return}sendMessage()}};$('#chatInput').oninput=e=>{e.target.style.height='auto';e.target.style.height=Math.min(e.target.scrollHeight,180)+'px'};$('#projectSelect').onchange=e=>switchProject(e.target.value);$('#modelSelect').onchange=async e=>{if(!e.target.value)return;try{await api('/api/models/use',{method:'POST',body:JSON.stringify({id:e.target.value})});toast('Model switched');loadModels()}catch(err){toast(err.message,true)}};function toggleCanvas(open){$('#chatShell').classList.toggle('canvas-closed',!open);$('#composerWrap').style.right=open?'var(--canvas)':'0'}$('#canvasToggle').onclick=()=>toggleCanvas($('#chatShell').classList.contains('canvas-closed'));$('#canvasClose').onclick=()=>toggleCanvas(false);$('#loopBtn').onclick=()=>{$('#loopDialog').showModal();loadLoop();if(!loopTimer)loopTimer=setInterval(loadLoop,3000)};$('#loopClose').onclick=()=>{$('#loopDialog').close();clearInterval(loopTimer);loopTimer=null};$('#loopRefresh').onclick=loadLoop;$('#loopDialog').addEventListener('click',e=>{const goalChip=e.target.closest('[data-goal]');if(goalChip){const el=$('#goalList').querySelector(`[data-goal="${CSS.escape(goalChip.dataset.goal)}"]`);if(el)el.scrollIntoView({block:'nearest'});return}const taskChip=e.target.closest('[data-task]');if(taskChip){const el=$('#taskList').querySelector(`[data-task="${CSS.escape(taskChip.dataset.task)}"]`);if(el)el.scrollIntoView({block:'nearest'})}});$('#repoRefreshBtn').onclick=()=>{if(!state.socket||!state.socket.connected){toast('Not connected',true);return}if(!state.projectId&&!state.conversationId){toast('Attach a project folder first',true);return}state.socket.emit('message',{type:'repo_refresh',projectId:state.projectId||'',conversationId:state.conversationId||''});toast('Refreshing repository index…')};$('#voiceBtn').onclick=toggleVoice;function stopMission(){if(!state.socket||!state.socket.connected){toast('Not connected',true);return}state.socket.emit('stop',{projectId:state.projectId||undefined,conversationId:state.projectId?undefined:state.conversationId});$('#stopBtn').classList.add('hidden');toast('Stopping…')}$('#stopBtn').onclick=stopMission;$('#execSheetStop').onclick=()=>{stopMission();document.getElementById('execSheet')?.classList.remove('open')};$('#execSheetClose').onclick=()=>{const ex=currentScopeExecution();state.sheetDismissedFor=ex?ex.id:null;document.getElementById('execSheet')?.classList.remove('open')};$('#execSheetTools').onclick=e=>{const toolRow=e.target.closest('.exec-tool-row');if(!toolRow)return;toolRow.classList.toggle('open');const d=toolRow.querySelector('.exec-tool-detail');if(d)d.classList.toggle('hidden')};$('#execSheetGrab').onclick=()=>{const sheet=document.getElementById('execSheet');if(sheet&&sheet.dataset.dragged){delete sheet.dataset.dragged;return}const ex=currentScopeExecution();state.sheetDismissedFor=ex?ex.id:null;sheet?.classList.remove('open')};wireExecSheetDrag();$('#saveSettingsTop').onclick=saveSettings;$('#addModelBtn').onclick=()=>$('#modelDialog').showModal();
+    $('#nav').onclick=e=>{const b=e.target.closest('[data-view]');if(b)showView(b.dataset.view)};$$('.mobile-menu').forEach(b=>b.onclick=()=>document.body.classList.toggle('menu-open'));$('#menuBtn').onclick=()=>document.body.classList.toggle('menu-open');$('#newChat').onclick=()=>createConversation().catch(error=>toast(error.message,true));$('#logout').onclick=signOut;function renderProjectBadge(){const badge=$('#projectBadge');const nameEl=$('#projectBadgeName');if(!badge||!nameEl)return;const project=state.projects.find(p=>p.id===state.projectId);if(state.projectId&&project){badge.classList.remove('hidden');nameEl.textContent=project.name||project.title||project.id}else{badge.classList.add('hidden');nameEl.textContent='General'}}function openProjectInfo(){const badge=$('#projectBadge');const nameEl=$('#projectBadgeName');if(!badge||badge.classList.contains('hidden'))return;const project=state.projects.find(p=>p.id===state.projectId);if(!project){toast('No project attached',true);return}$('#projectInfoName').textContent=project.name||project.title||project.id;$('#projectInfoWorkspace').textContent=project.workspacePath||project.workspace||'not attached';$('#projectInfoRepo').textContent=project.repo||project.repository||(project.workspacePath?project.workspacePath.split(/[\\/]/).pop():'—');$('#projectInfoAgents').textContent='Active in this chat';$('#projectInfoDialog').showModal()}$('#projectBadge').onclick=openProjectInfo;$('#projectInfoClose').onclick=()=>$('#projectInfoDialog').close();$('#composer').onsubmit=e=>{e.preventDefault();sendMessage()};$('#chatInput').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(state.missionActive){stopMission();return}sendMessage()}};$('#chatInput').oninput=e=>{e.target.style.height='auto';e.target.style.height=Math.min(e.target.scrollHeight,180)+'px'};$('#projectSelect').onchange=e=>switchProject(e.target.value);$('#modelSelect').onchange=async e=>{if(!e.target.value)return;try{await api('/api/models/use',{method:'POST',body:JSON.stringify({id:e.target.value})});toast('Model switched');loadModels()}catch(err){toast(err.message,true)}};function toggleCanvas(open){$('#chatShell').classList.toggle('canvas-closed',!open);$('#composerWrap').style.right=open?'var(--canvas)':'0'}$('#canvasToggle').onclick=()=>toggleCanvas($('#chatShell').classList.contains('canvas-closed'));$('#canvasClose').onclick=()=>toggleCanvas(false);$('#loopBtn').onclick=()=>{$('#loopDialog').showModal();loadLoop();if(!loopTimer)loopTimer=setInterval(loadLoop,3000)};$('#loopClose').onclick=()=>{$('#loopDialog').close();clearInterval(loopTimer);loopTimer=null};$('#loopRefresh').onclick=loadLoop;$('#loopDialog').addEventListener('click',e=>{const goalChip=e.target.closest('[data-goal]');if(goalChip){const el=$('#goalList').querySelector(`[data-goal="${CSS.escape(goalChip.dataset.goal)}"]`);if(el)el.scrollIntoView({block:'nearest'});return}const taskChip=e.target.closest('[data-task]');if(taskChip){const el=$('#taskList').querySelector(`[data-task="${CSS.escape(taskChip.dataset.task)}"]`);if(el)el.scrollIntoView({block:'nearest'})}});$('#repoRefreshBtn').onclick=()=>{if(!state.socket||!state.socket.connected){toast('Not connected',true);return}if(!state.projectId&&!state.conversationId){toast('Attach a project folder first',true);return}state.socket.emit('message',{type:'repo_refresh',projectId:state.projectId||'',conversationId:state.conversationId||''});toast('Refreshing repository index…')};$('#voiceBtn').onclick=toggleVoice;function stopMission(){if(!state.socket||!state.socket.connected){toast('Not connected',true);return}state.socket.emit('stop',{projectId:state.projectId||undefined,conversationId:state.projectId?undefined:state.conversationId});$('#stopBtn').classList.add('hidden');toast('Stopping…')}$('#stopBtn').onclick=stopMission;$('#execSheetStop').onclick=()=>{stopMission();document.getElementById('execSheet')?.classList.remove('open')};$('#execSheetClose').onclick=()=>{const ex=currentScopeExecution();state.sheetDismissedFor=ex?ex.id:null;document.getElementById('execSheet')?.classList.remove('open')};$('#execSheetTools').onclick=e=>{const toolRow=e.target.closest('.exec-tool-row');if(!toolRow)return;toolRow.classList.toggle('open');const d=toolRow.querySelector('.exec-tool-detail');if(d)d.classList.toggle('hidden')};$('#execSheetGrab').onclick=()=>{const sheet=document.getElementById('execSheet');if(sheet&&sheet.dataset.dragged){delete sheet.dataset.dragged;return}const ex=currentScopeExecution();state.sheetDismissedFor=ex?ex.id:null;sheet?.classList.remove('open')};wireExecSheetDrag();wireCanvasTabs();$('#saveSettingsTop').onclick=saveSettings;$('#addModelBtn').onclick=()=>$('#modelDialog').showModal();
 $('#fetchOpencodeModels').onclick=async()=>{const keyDoc=$('#keyOpencode').value.trim();if(!keyDoc){toast('Enter your OpenCode Zen key in API keys first.',true);return}try{const d=await api('/api/models/opencode',{method:'POST',body:JSON.stringify({apiKey:keyDoc})});const list=d.models||[];const sel=$('#opencodeModelSelect');sel.innerHTML=list.map(m=>`<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('')||'<option value="">No models returned</option>';if(list.length){const cur=$('#keyOpencodeModel').value.trim();if(cur){const found=[...sel.options].find(o=>o.value===cur);if(found)found.selected=true;else{const o=document.createElement('option');o.value=cur;o.textContent=cur+' (current)';o.selected=true;sel.appendChild(o)}}else{$('#keyOpencodeModel').value=list[0].id}toast(`Loaded ${list.length} OpenCode models`)}else{toast('No models returned',true)}}catch(e){toast(e.message,true)}};
 function updateProviderFields(){const p=$('#setProvider').value;const oc=/opencode/i.test(p);$('#modelFieldOpencode').style.display=oc?'':'none';$('#modelFieldGeneric').style.display=oc?'none':'';}
 $('#setProvider').onchange=updateProviderFields;

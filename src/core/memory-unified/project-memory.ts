@@ -22,6 +22,7 @@ import os from 'os';
 import path from 'path';
 import { atomicWriteJsonSync } from '../atomic-write';
 import type { PersistentRepositoryIndex } from '../context/repo-index';
+import { ProjectContext, comparePath } from '../project-context';
 import {
   type MemoryProvider,
   type RetrievedMemory,
@@ -278,20 +279,29 @@ export class ProjectMemoryBridge {
    * Retrieval through the unified layer: the consolidation layer when given
    * (dedupe/merge + lifecycle applied, archived/expired excluded), else the
    * catalog's weighted scorer — filtered to 'project' records for this
-   * workspace root. Empty when no unified layer is wired.
+   * project context (Phase 23 §6: project-scoped by construction). Empty when
+   * no unified layer is wired.
    */
   retrieve(
-    workspaceRoot: string,
+    workspaceRootOrContext: string | ProjectContext,
     query: string,
     options: { layer?: MemoryConsolidation; limit?: number } = {}
   ): RetrievedMemory[] {
     const limit = Math.max(1, Math.floor(options.limit ?? 5));
+    const projectContext: ProjectContext = typeof workspaceRootOrContext === 'string'
+      ? { projectId: 'project', projectName: 'Project', workspaceRoot: workspaceRootOrContext }
+      : workspaceRootOrContext;
     const layer: any = options.layer ?? this.catalog;
     if (!layer || typeof layer.retrieve !== 'function') return [];
-    const hits = layer.retrieve(query, { source: 'project', types: ['project'], limit: limit * 2 });
-    const resolved = path.resolve(workspaceRoot);
+    const hits = layer.retrieve(query, {
+      source: 'project',
+      types: ['project'],
+      projectContext,
+      limit: limit * 2
+    });
+    const resolved = comparePath(projectContext.workspaceRoot);
     return hits
-      .filter((r: RetrievedMemory) => r.metadata?.workspaceRoot && path.resolve(String(r.metadata.workspaceRoot)) === resolved)
+      .filter((r: RetrievedMemory) => r.metadata?.workspaceRoot && comparePath(String(r.metadata.workspaceRoot)) === resolved)
       .slice(0, limit);
   }
 

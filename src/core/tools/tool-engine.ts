@@ -20,6 +20,13 @@ import {
   errorResult
 } from './tool-result';
 import {
+  ProjectContext,
+  ProjectContextError,
+  validateProjectContext,
+  validateToolContext,
+  workspaceRootOf
+} from '../project-context';
+import {
   SkillRegistryLike,
   McpGateway,
   DynamicToolGateway,
@@ -102,6 +109,35 @@ export class ToolEngine {
     const normalized = normalizeToolRequest(request, this.skills, (name) => this.dynamicTools.normalizeName(name));
     const nativeSkill = this.skills.get(normalized.name);
     const isNative = Boolean(nativeSkill);
+
+    // Phase 23 — resolve the canonical ProjectContext and validate the tool's
+    // attribution against it BEFORE any dispatch. A workspace/project mismatch
+    // is a hard block (validateToolContext), never a silent fallback.
+    let projectContext: ProjectContext | undefined;
+    try {
+      projectContext = this.resolveProjectContext(ctx);
+      if (projectContext) {
+        validateToolContext(
+          {
+            projectId: ctx.projectId,
+            workspaceRoot: ctx.workspacePath ? workspaceRootOf(ctx.workspacePath) : undefined
+          },
+          projectContext,
+          normalized.name
+        );
+        // The boundary owns the workspace: the ProjectContext.workspaceRoot is
+        // the only workspace the tool may touch. Legacy workspacePath wins only
+        // when it matches (validated above); otherwise the context wins.
+        ctx = { ...ctx, projectContext, workspacePath: projectContext.workspaceRoot, projectId: projectContext.projectId };
+      }
+    } catch (contextError: any) {
+      if (contextError instanceof ProjectContextError || contextError?.code === 'WORKSPACE_BOUNDARY_VIOLATION') {
+        const message = `Tool '${normalized.name}' blocked by project-context validation: ${contextError.message}`;
+        console.error(`[ToolEngine] ${message} project=${ctx.projectId || '?'} workspace=${ctx.workspacePath || '?'}`);
+        return errorResult(normalized.name, message, { denied: true, reason: contextError.message });
+      }
+      throw contextError;
+    }
 
     // Record STARTED before dispatch (matches the previous behavior where the
     // task record existed even for calls that then failed validation/policy).
@@ -196,6 +232,24 @@ export class ToolEngine {
       console.warn('[TaskEngine] record tool start failed:', taskError?.message || taskError);
       return null;
     }
+  }
+
+  /**
+   * Phase 23 — derive the canonical ProjectContext for a tool call:
+   * ctx.projectContext when given (validated), else a context built from the
+   * legacy projectId/workspacePath pair. Undefined when nothing is attached
+   * (tools without a workspace — e.g. web_search — keep running unbound).
+   */
+  private resolveProjectContext(ctx: ToolContext): ProjectContext | undefined {
+    if (ctx.projectContext) return validateProjectContext(ctx.projectContext);
+    const workspacePath = typeof ctx.workspacePath === 'string' && ctx.workspacePath.trim() ? ctx.workspacePath.trim() : '';
+    const projectId = typeof ctx.projectId === 'string' && ctx.projectId.trim() ? ctx.projectId.trim() : '';
+    if (!workspacePath) return undefined;
+    return {
+      projectId: projectId || 'general',
+      projectName: projectId || 'General Workspace',
+      workspaceRoot: workspacePath
+    };
   }
 
   private async finishTaskRecord(

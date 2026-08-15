@@ -17,6 +17,7 @@ export class TrustedActionsSkill {
     const action = String(params?.action || '').trim();
     if (action !== 'status') return { error: 'Invalid action' };
     trustedActions.refresh();
+    // phase23-ok: engine-root config file, not project context
     const configPath = path.join(process.cwd(), 'config.json');
     let cfg: any = {};
     if (fs.existsSync(configPath)) {

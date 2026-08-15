@@ -32,8 +32,9 @@ export class MemoryManager {
   private mode: 'sqlite' | 'json' = 'json';
 
   constructor(filename: string = 'memory.sqlite') {
-    this.dbPath = path.join(process.cwd(), filename);
-    this.jsonPath = path.join(process.cwd(), 'memory.json');
+    // phase23-ok: engine-root state files (the app's own memory store), never project context
+    this.dbPath = path.join(process.cwd(), filename); // phase23-ok
+    this.jsonPath = path.join(process.cwd(), 'memory.json'); // phase23-ok
 
     const dbExists = fs.existsSync(this.dbPath);
     const sqliteLoaded = this.initSqlite();
@@ -352,6 +353,7 @@ export class MemoryManager {
 
     let config = { ...defaults };
     try {
+      // phase23-ok: engine-root config file, not project context
       const configPath = path.join(process.cwd(), 'config.json');
       if (fs.existsSync(configPath)) {
         const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));

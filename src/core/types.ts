@@ -22,7 +22,7 @@ export interface MediaPayload {
   filename?: string;
 }
 
-export type StreamEventType = 'assistant_start' | 'assistant_delta' | 'assistant_done' | 'assistant_error' | 'assistant_update' | 'assistant_stopped' | 'mission_start' | 'mission_end' | 'tool_start' | 'tool_delta' | 'tool_done' | 'approval_required' | 'approval_granted' | 'approval_denied' | 'repository_refreshed' | 'recovery';
+export type StreamEventType = 'assistant_start' | 'assistant_delta' | 'assistant_done' | 'assistant_error' | 'assistant_update' | 'assistant_stopped' | 'mission_start' | 'mission_end' | 'tool_start' | 'tool_delta' | 'tool_done' | 'approval_required' | 'approval_granted' | 'approval_denied' | 'repository_refreshed' | 'recovery' | 'plan_update' | 'file_diff';
 
 /**
  * Canonical execution contract (Phase 2): ONE executionId -> MANY dynamic
@@ -77,6 +77,15 @@ export interface StreamEventPayload {
   filesReParsed?: number;
   symbolsRefreshed?: number;
   timestamp?: number;
+  /** Plan and milestone tracking (Phase 20 & Canvas). */
+  plan?: any[];
+  activeStepId?: string;
+  /** File diff and code inspection tracking. */
+  file?: string;
+  diff?: string;
+  oldContent?: string;
+  newContent?: string;
+  diffs?: Array<{ file: string; diff: string }>;
 }
 
 export interface ChannelAdapter {

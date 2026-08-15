@@ -10,6 +10,7 @@
  */
 
 import { Skill } from '../core/skills';
+import { projectContextFromParams } from './workspace-guard';
 import { ContextEngine, contextEngine, renderMinimalContext } from '../core/context';
 
 export interface MinimalContextSkillOptions {
@@ -38,10 +39,14 @@ export class MinimalContextSkill implements Skill {
   }
 
   async execute(params: any): Promise<any> {
+    // Phase 23 — bound calls carry the canonical ProjectContext; the index is
+    // project-owned. Unbound calls fall back to the legacy workspace/root.
+    const projectContext = projectContextFromParams(params);
     const root =
-      typeof params?.__workspacePath === 'string' && params.__workspacePath.trim()
+      projectContext?.workspaceRoot
+      || (typeof params?.__workspacePath === 'string' && params.__workspacePath.trim()
         ? params.__workspacePath
-        : process.cwd();
+        : process.cwd()); // phase23-ok: unbound (no attached project) legacy fallback
     const goal = typeof params?.goal === 'string' && params.goal.trim() ? params.goal.trim() : '';
     const file = typeof params?.file === 'string' && params.file.trim() ? params.file.trim() : '';
     if (!goal && !file) return { error: 'Provide a goal phrase or a root-relative file path.' };
@@ -49,7 +54,7 @@ export class MinimalContextSkill implements Skill {
     try {
       // Phase 9 discipline: force an on-demand refresh so an explicit query
       // never reads a stale index (files may have changed since last turn).
-      this.engine.refreshRepository(root, { force: true, sessionId: params?.__sessionId });
+      this.engine.refreshRepository(projectContext || root, { force: true, sessionId: params?.__sessionId });
       const context = this.engine.minimalContext(root, goal, {
         seedFiles: file ? [file] : undefined,
         maxBytes: typeof params?.maxBytes === 'number' ? params.maxBytes : undefined,

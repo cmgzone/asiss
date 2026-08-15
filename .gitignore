@@ -42,6 +42,7 @@ nclaw-*
 
 # Runtime artifacts
 artifacts/
+acceptance-shots/
 
 # Separate app, not part of the gitu harness
 ai-news-daily-cup/

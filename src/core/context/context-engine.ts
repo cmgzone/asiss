@@ -62,10 +62,15 @@ import {
   PersistentRepositoryIndex,
   refreshRepositoryIndex,
   renderGoalFileHints,
+  repositoryIndexBelongsTo,
   resolveSymbols as resolveIndexSymbols,
   saveRepositoryIndex,
   SymbolResolution
 } from './repo-index';
+import {
+  ProjectContext,
+  validateProjectContext
+} from '../project-context';
 
 export interface ContextEngineConfig {
   /** Token budget for the assembled context. Default 32000. */
@@ -159,6 +164,67 @@ export class ContextEngine {
   private readonly lastWarm = new Map<string, number>();
   private readonly warmth = new Map<string, RepositoryWarmth>();
 
+  /**
+   * Phase 23 §7/§8 — resolve the repository index for a request. Accepts a
+   * ProjectContext (canonical) or a legacy workspace root. The index may only
+   * be returned when it belongs to the requesting project
+   * (repositoryIndexBelongsTo): requested projectId -> index.projectId MUST
+   * match, else DO NOT RETURN THE INDEX.
+   */
+  private indexFor(projectContextOrRoot: ProjectContext | string): RepositoryIndex | undefined {
+    if (this.injectedIndex) return this.injectedIndex;
+    if (typeof projectContextOrRoot === 'object' && projectContextOrRoot !== null) {
+      let ctx: ProjectContext;
+      try {
+        ctx = validateProjectContext(projectContextOrRoot);
+      } catch {
+        return undefined;
+      }
+      // Single cache keyed by workspace root; ownership is verified on EVERY
+      // request (not just cache misses) so an impostor project sharing a root
+      // can never receive the cached index.
+      const cached = this.indexCache.get(ctx.workspaceRoot);
+      if (cached) {
+        if (repositoryIndexBelongsTo(cached, ctx)) return cached;
+        return undefined;
+      }
+      let index: RepositoryIndex | undefined;
+      try {
+        if (this.config.repository?.persistent !== false) {
+          index = getRepositoryIndex(ctx.workspaceRoot, this.persistentOptions(), this.dataRoot(), ctx.projectId);
+        } else {
+          index = indexWorkspace(ctx.workspaceRoot, this.repositoryOptions());
+        }
+      } catch {
+        try {
+          index = indexWorkspace(ctx.workspaceRoot, this.repositoryOptions());
+        } catch {
+          return undefined;
+        }
+      }
+      if (index) {
+        // Adopt legacy (untagged) persisted indexes into the project that
+        // first touches them, so ownership is deterministic from here on.
+        const persistent = index as PersistentRepositoryIndex;
+        if (persistent.version !== undefined && !persistent.projectId && ctx.projectId) {
+          persistent.projectId = ctx.projectId;
+          try {
+            saveRepositoryIndex(persistent, this.dataRoot());
+          } catch {
+            // in-memory tag still applies for this process
+          }
+        }
+        if (repositoryIndexBelongsTo(index, ctx)) {
+          this.indexCache.set(ctx.workspaceRoot, index);
+          return index;
+        }
+      }
+      return undefined;
+    }
+    // Legacy root-string path (kept for callers that pass a bare workspace).
+    return this.indexRepository(String(projectContextOrRoot));
+  }
+
   constructor(options: ContextEngineOptions = {}) {
     this.summarizer = options.summarizer;
     this.config = options.config || {};
@@ -242,7 +308,8 @@ export class ContextEngine {
    * Repository index for a workspace (cached per root). Prefers the Phase 8
    * persistent, symbol-aware index (load -> incremental refresh -> save);
    * falls back to the lightweight Phase 7 index when persistence is disabled
-   * or unavailable.
+   * or unavailable. Phase 23: project-aware callers should use indexFor with a
+   * ProjectContext so the index ownership check applies.
    */
   indexRepository(root: string): RepositoryIndex | undefined {
     if (this.injectedIndex) return this.injectedIndex;
@@ -277,10 +344,18 @@ export class ContextEngine {
    * via repository.telemetry.enabled). Returns true when a refresh actually ran.
    */
   refreshRepository(
-    root: string,
+    rootOrProject: string | ProjectContext,
     options: { force?: boolean; sessionId?: string; taskId?: string } = {}
   ): boolean {
+    const root = typeof rootOrProject === 'string' ? rootOrProject : rootOrProject?.workspaceRoot;
     if (!root) return false;
+    const projectContext = typeof rootOrProject === 'object' && rootOrProject !== null ? rootOrProject : undefined;
+    // Phase 23 §7 — never warm/refresh an index for a project that does not
+    // own it. The refresh must preserve the index's projectId.
+    if (projectContext) {
+      const current = this.indexCache.get(root);
+      if (current && !repositoryIndexBelongsTo(current, projectContext)) return false;
+    }
     const warm = this.config.repository?.warm;
     if (warm?.enabled === false) return false;
     const throttleMs = warm?.throttleMs ?? 5000;
@@ -295,6 +370,9 @@ export class ContextEngine {
         const before = index.files;
         const refreshed = refreshRepositoryIndex(index, root, this.persistentOptions());
         saveRepositoryIndex(refreshed, this.dataRoot());
+        // Phase 23 — the refreshed index stays tagged with its owning
+        // projectId; the single root-keyed cache entry is updated so bound and
+        // legacy callers never read a stale twin.
         this.indexCache.set(root, refreshed);
         const reparsed = refreshed.files.filter((f) => !before.includes(f));
         stats = {
@@ -314,7 +392,12 @@ export class ContextEngine {
         return false;
       }
     } else {
-      const built = this.indexRepository(root);
+      // Phase 23 — when a project context is supplied, the warm build is
+      // project-tagged from the start so ownership never falls back to a
+      // root-equality guess.
+      const built = projectContext
+        ? getRepositoryIndex(root, this.persistentOptions(), this.dataRoot(), projectContext.projectId)
+        : this.indexRepository(root);
       if (!built) return false;
       stats = { filesReParsed: built.fileCount, symbolsRefreshed: 0, fileCount: built.fileCount };
     }
@@ -371,8 +454,9 @@ export class ContextEngine {
    * the `minimal.enabled === false` opt-out is set. `goalHints.maxFiles`
    * seeds the context; `minimal.maxBytes` / `minimal.maxFiles` cap it.
    */
-  repositorySection(root: string, goal: string): string {
-    const index = this.indexRepository(root);
+  repositorySection(rootOrProject: string | ProjectContext, goal: string): string {
+    const root = typeof rootOrProject === 'string' ? rootOrProject : rootOrProject?.workspaceRoot;
+    const index = this.indexFor(rootOrProject);
     if (!index) return '';
     const cfg = this.config.repository || {};
     if (cfg.goalHints?.enabled === false) {
@@ -381,8 +465,8 @@ export class ContextEngine {
     const staticText = renderRepositoryContext(index, goal, { relevantFiles: [], maxListed: cfg.maxListed ?? 40 });
     const hints =
       isPersistentIndex(index) && cfg.minimal?.enabled !== false
-        ? this.minimalContextSection(root, goal, this.minimalContextOptions(cfg))
-        : this.goalFilesSection(root, goal);
+        ? this.minimalContextSection(rootOrProject, goal, this.minimalContextOptions(cfg))
+        : this.goalFilesSection(rootOrProject as any, goal);
     return hints ? `${staticText}\n\n${hints}` : staticText;
   }
 
@@ -402,8 +486,8 @@ export class ContextEngine {
    * '' when the index is lightweight or nothing matches (callers fall back
    * to the plain goal-file hints).
    */
-  minimalContextSection(root: string, goal: string, options: MinimalContextOptions = {}): string {
-    return renderMinimalContext(this.minimalContext(root, goal, options));
+  minimalContextSection(rootOrProject: string | ProjectContext, goal: string, options: MinimalContextOptions = {}): string {
+    return renderMinimalContext(this.minimalContext(rootOrProject, goal, options));
   }
 
   /**
@@ -412,14 +496,14 @@ export class ContextEngine {
    * Returns [] for lightweight indexes or when nothing resolves.
    */
   resolveSymbols(root: string, goal: string, limit = 8): SymbolResolution[] {
-    const index = this.indexRepository(root);
+    const index = this.indexFor(root);
     if (!index || !isPersistentIndex(index)) return [];
     return resolveIndexSymbols(index, goal, limit);
   }
 
   /** Per-goal "files relevant to the current goal" hint (symbol-aware). */
-  goalFilesSection(root: string, goal: string): string {
-    const index = this.indexRepository(root);
+  goalFilesSection(rootOrProject: string | ProjectContext, goal: string): string {
+    const index = this.indexFor(rootOrProject);
     if (!index) return '';
     return renderGoalFileHints(index, goal, { maxFiles: this.config.repository?.goalHints?.maxFiles ?? 8 });
   }
@@ -434,7 +518,7 @@ export class ContextEngine {
    * Move 3 builds on). Empty for lightweight indexes or no dependents.
    */
   dependents(root: string, target: string, options: DependentsOptions = {}): Dependent[] {
-    const index = this.indexRepository(root);
+    const index = this.indexFor(root);
     if (!index || !isPersistentIndex(index)) return [];
     return findDependents(index, target, options);
   }
@@ -447,7 +531,7 @@ export class ContextEngine {
    * empty impact for lightweight indexes or unknown targets.
    */
   changeImpact(root: string, target: string, options: ChangeImpactOptions = {}): ChangeImpact {
-    const index = this.indexRepository(root);
+    const index = this.indexFor(root);
     if (!index || !isPersistentIndex(index)) return emptyChangeImpact(target);
     return analyzeChangeImpact(index, target, options);
   }
@@ -460,7 +544,7 @@ export class ContextEngine {
    * Undefined for lightweight indexes.
    */
   architecture(root: string): ArchitectureProfile | undefined {
-    const index = this.indexRepository(root);
+    const index = this.indexFor(root);
     if (!index || !isPersistentIndex(index)) return undefined;
     return discoverArchitecture(index);
   }
@@ -479,8 +563,8 @@ export class ContextEngine {
    * budget let the closure finish; bare packages are reported as external
    * leaves. Empty for lightweight indexes.
    */
-  minimalContext(root: string, goal: string, options: MinimalContextOptions = {}): MinimalContext {
-    const index = this.indexRepository(root);
+  minimalContext(rootOrProject: string | ProjectContext, goal: string, options: MinimalContextOptions = {}): MinimalContext {
+    const index = this.indexFor(rootOrProject);
     if (!index || !isPersistentIndex(index)) return emptyMinimalContext(goal);
     return selectMinimalContext(index, goal, options);
   }
@@ -492,7 +576,7 @@ export class ContextEngine {
    * indexes or unknown symbols.
    */
   callersOf(root: string, symbol: string, options: SymbolUsageOptions = {}): SymbolReference[] {
-    const index = this.indexRepository(root);
+    const index = this.indexFor(root);
     if (!index || !isPersistentIndex(index)) return [];
     return findCallers(index, symbol, options);
   }
@@ -503,7 +587,7 @@ export class ContextEngine {
    * lightweight indexes or unknown files.
    */
   calleesOf(root: string, filePath: string, options: SymbolUsageOptions = {}): SymbolCallee[] {
-    const index = this.indexRepository(root);
+    const index = this.indexFor(root);
     if (!index || !isPersistentIndex(index)) return [];
     return findCallees(index, filePath, options);
   }
@@ -514,7 +598,7 @@ export class ContextEngine {
    * lightweight indexes or unknown symbols.
    */
   implementationsOf(root: string, symbol: string, options: SymbolUsageOptions = {}): SymbolReference[] {
-    const index = this.indexRepository(root);
+    const index = this.indexFor(root);
     if (!index || !isPersistentIndex(index)) return [];
     return findImplementations(index, symbol, options);
   }
@@ -526,14 +610,14 @@ export class ContextEngine {
    * lightweight indexes.
    */
   symbolIntelligenceEvidence(root: string): SymbolIntelligenceEvidence | undefined {
-    const index = this.indexRepository(root);
+    const index = this.indexFor(root);
     if (!index || !isPersistentIndex(index)) return undefined;
     return measureSymbolIntelligence(index);
   }
 
   /** Relevant files for the goal: symbol-aware when the index is persistent. */
   relevantFiles(root: string, goal: string, limit = 12) {
-    const index = this.indexRepository(root);
+    const index = this.indexFor(root);
     if (!index) return [];
     if (isPersistentIndex(index)) return matchBySymbols(index, goal, limit);
     return matchFiles(index, goal, limit);

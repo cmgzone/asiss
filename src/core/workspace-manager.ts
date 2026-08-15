@@ -193,10 +193,84 @@ export class WorkspaceManager {
         continue;
       }
       markers.push(marker);
-      if (!type || marker !== '.git') type = markerType;
+      if (!type && marker !== '.git') type = markerType;
     }
     if (!type && markers.includes('.git')) type = 'Git project';
     return { type, markers };
+  }
+
+  public listTree(directoryPath: string, maxDepth = 4): any[] {
+    const root = path.resolve(String(directoryPath || ''));
+    this.assertAllowed(root);
+    if (!this.isExistingDirectory(root)) return [];
+
+    const IGNORED = new Set(['.git', 'node_modules', 'dist', '.wwebjs_cache', '.wwebjs_auth', '.freebuff', '.trae', 'dist-esm']);
+
+    const walk = (currentDir: string, currentDepth: number): any[] => {
+      if (currentDepth > maxDepth) return [];
+      try {
+        const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+        const items: any[] = [];
+        for (const entry of entries) {
+          if (IGNORED.has(entry.name)) continue;
+          const fullPath = path.join(currentDir, entry.name);
+          const relPath = path.relative(root, fullPath).replace(/\\/g, '/');
+          if (entry.isDirectory()) {
+            items.push({
+              name: entry.name,
+              path: relPath,
+              isDir: true,
+              children: walk(fullPath, currentDepth + 1)
+            });
+          } else if (entry.isFile()) {
+            let sizeBytes = 0;
+            try { sizeBytes = fs.statSync(fullPath).size; } catch {}
+            const ext = path.extname(entry.name).toLowerCase().replace(/^\./, '');
+            items.push({
+              name: entry.name,
+              path: relPath,
+              isDir: false,
+              sizeBytes,
+              extension: ext
+            });
+          }
+        }
+        items.sort((a, b) => {
+          if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+          return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+        });
+        return items;
+      } catch {
+        return [];
+      }
+    };
+
+    return walk(root, 1);
+  }
+
+  public readFileContent(workspacePath: string, relPath: string): { content: string; path: string; name: string; extension: string; sizeBytes: number } {
+    const root = path.resolve(String(workspacePath || ''));
+    this.assertAllowed(root);
+    const target = path.resolve(root, String(relPath || ''));
+    if (!target.startsWith(root) && !target.startsWith(root.toLowerCase())) {
+      throw new Error('Access denied: path escapes workspace.');
+    }
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+      throw new Error('File does not exist or is not a file.');
+    }
+    const stat = fs.statSync(target);
+    if (stat.size > 2_000_000) {
+      throw new Error('File exceeds 2MB limit for direct preview.');
+    }
+    const content = fs.readFileSync(target, 'utf-8');
+    const ext = path.extname(target).toLowerCase().replace(/^\./, '');
+    return {
+      content,
+      path: path.relative(root, target).replace(/\\/g, '/'),
+      name: path.basename(target),
+      extension: ext,
+      sizeBytes: stat.size
+    };
   }
 }
 

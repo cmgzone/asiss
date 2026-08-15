@@ -467,7 +467,11 @@ export class TaskEngine {
     }
     let current = plan ? new TaskEntity(entity.record).setPlan(plan).record : entity.record;
     current = this.persist(new TaskEntity(current).transition('READY').record);
-    await this.emit('TaskPlanned', taskId, { steps: (current.plan || []).length });
+    await this.emit('TaskPlanned', taskId, {
+      steps: (current.plan || []).length,
+      plan: current.plan,
+      sessionId: current.context?.sessionId || current.sessionId
+    });
     await this.emit('TaskReady', taskId);
     return current;
   }
@@ -1225,6 +1229,14 @@ export class TaskEngine {
     if (!(allowed[step.status] || []).includes(status)) return record.plan;
     const plan = record.plan.map((s, i) => (i === idx ? { ...s, status } : s));
     this.persist(new TaskEntity(record).with({ plan }).record);
+    const activeStep = plan.find((s) => s.status === 'IN_PROGRESS');
+    await this.emit('TaskPlanStepChanged', taskId, {
+      stepId,
+      status,
+      plan,
+      activeStepId: activeStep?.id,
+      sessionId: record.context?.sessionId || record.sessionId
+    });
     return plan;
   }
 

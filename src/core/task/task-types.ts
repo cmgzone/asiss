@@ -64,7 +64,11 @@ export interface TaskContextData {
   sessionId?: string;
   channel?: string;
   projectId?: string;
+  /** Phase 23 — canonical project identity on the task record. */
+  projectName?: string;
   workspacePath?: string;
+  /** Phase 23 — canonical workspace root (=== workspacePath for bound tasks). */
+  workspaceRoot?: string;
   /** The user's original request that produced this task. */
   userGoal?: string;
   input?: string;
@@ -101,6 +105,10 @@ export interface ToolExecution {
   error?: string;
   /** Host project attribution (D3: legacy before_tool carried projectId). */
   projectId?: string;
+  /** Phase 23 — agent attribution for diagnosable tool logs. */
+  agentId?: string;
+  /** Phase 23 — per-call execution id for diagnosable tool logs. */
+  executionId?: string;
   /** Host-computed role (mutation / verification / inspection). */
   kind?: TaskToolKind;
 }
@@ -127,6 +135,10 @@ export interface TaskToolExecutionInput {
   error?: string;
   /** Host project attribution (D3: legacy before_tool carried projectId). */
   projectId?: string;
+  /** Phase 23 — agent attribution for diagnosable tool logs. */
+  agentId?: string;
+  /** Phase 23 — per-call execution id for diagnosable tool logs. */
+  executionId?: string;
   /** Host-computed role (mutation / verification / inspection). */
   kind?: TaskToolKind;
 }

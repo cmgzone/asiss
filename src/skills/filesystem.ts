@@ -1,23 +1,11 @@
 import { Skill } from '../core/skills';
 import fs from 'fs';
 import path from 'path';
-
-// Resolve a user/model-supplied path. Absolute paths are used as-is;
-// relative paths resolve against the workspace root (process.cwd()).
-function resolvePath(value: unknown): string {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (raw === '~') return process.env.HOME || process.cwd();
-  if (raw.startsWith('~/')) {
-    const home = process.env.HOME || process.cwd();
-    return path.resolve(home, raw.slice(2));
-  }
-  return path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(process.cwd(), raw);
-}
+import { resolveSkillPath, boundaryErrorResult } from './workspace-guard';
 
 export class ReadFileSkill implements Skill {
   name = 'read_file';
-  description = 'Read the contents of a file from disk and return its text. Supports an optional 1-based line range and optional maximum character limit.';
+  description = 'Read the contents of a file from disk and return its text. Supports an optional 1-based line range and optional maximum character limit. Paths resolve inside the active project workspace only.';
   capabilities = ['file_read'];
   inputSchema = {
     type: 'object',
@@ -31,7 +19,14 @@ export class ReadFileSkill implements Skill {
   };
 
   async execute(params: any): Promise<any> {
-    const filePath = resolvePath(params?.path ?? params?.filePath ?? params?.file);
+    let filePath: string;
+    try {
+      // Phase 23 — workspace boundary: relative paths resolve against the
+      // active project workspace; absolute paths outside it are BLOCKED.
+      filePath = resolveSkillPath(params?.path ?? params?.filePath ?? params?.file, params);
+    } catch (error: any) {
+      return boundaryErrorResult(error, 'read_file');
+    }
     if (!filePath) return { error: 'Path is required.' };
     let stat: fs.Stats;
     try {
@@ -64,7 +59,7 @@ export class ReadFileSkill implements Skill {
 
 export class WriteFileSkill implements Skill {
   name = 'write_file';
-  description = 'Create a new file or overwrite an existing file with the provided content. Parent directories are created automatically. Set append=true to append to an existing file instead of overwriting.';
+  description = 'Create a new file or overwrite an existing file with the provided content. Parent directories are created automatically. Set append=true to append to an existing file instead of overwriting. Paths resolve inside the active project workspace only.';
   capabilities = ['file_write'];
   inputSchema = {
     type: 'object',
@@ -77,7 +72,13 @@ export class WriteFileSkill implements Skill {
   };
 
   async execute(params: any): Promise<any> {
-    const filePath = resolvePath(params?.path ?? params?.filePath ?? params?.file);
+    let filePath: string;
+    try {
+      // Phase 23 — writing outside the active workspace is a hard block.
+      filePath = resolveSkillPath(params?.path ?? params?.filePath ?? params?.file, params);
+    } catch (error: any) {
+      return boundaryErrorResult(error, 'write_file');
+    }
     const content = params?.content ?? params?.text ?? params?.data;
     if (!filePath) return { error: 'Path is required.' };
     if (typeof content !== 'string') return { error: 'Content must be a string.' };
@@ -102,7 +103,7 @@ export class WriteFileSkill implements Skill {
 
 export class ListDirectorySkill implements Skill {
   name = 'list_directory';
-  description = 'List the immediate files and directories inside a folder. Returns names and entry types, sorted directories-first.';
+  description = 'List the immediate files and directories inside a folder. Returns names and entry types, sorted directories-first. Paths resolve inside the active project workspace only.';
   capabilities = ['file_list'];
   inputSchema = {
     type: 'object',
@@ -113,7 +114,13 @@ export class ListDirectorySkill implements Skill {
   };
 
   async execute(params: any): Promise<any> {
-    const dirPath = resolvePath(params?.path ?? params?.directory ?? params?.dir ?? '.');
+    let dirPath: string;
+    try {
+      // Phase 23 — defaults to the workspace root when bound, never process.cwd().
+      dirPath = resolveSkillPath(params?.path ?? params?.directory ?? params?.dir ?? '.', params);
+    } catch (error: any) {
+      return boundaryErrorResult(error, 'list_directory');
+    }
     try {
       if (!fs.existsSync(dirPath)) return { error: `Directory not found: ${dirPath}` };
       const stat = fs.statSync(dirPath);
@@ -166,7 +173,7 @@ function globToRegExp(pattern: string): RegExp {
 
 export class GlobSkill implements Skill {
   name = 'glob';
-  description = 'Find files and directories matching a glob pattern (e.g. "src/**/*.ts", "*.json"). Returns relative paths. node_modules and .git are skipped.';
+  description = 'Find files and directories matching a glob pattern (e.g. "src/**/*.ts", "*.json"). Returns relative paths. node_modules and .git are skipped. Searches inside the active project workspace only.';
   capabilities = ['file_glob'];
   inputSchema = {
     type: 'object',
@@ -180,7 +187,13 @@ export class GlobSkill implements Skill {
   async execute(params: any): Promise<any> {
     const pattern = String(params?.pattern || '').trim();
     if (!pattern) return { error: 'Pattern is required.' };
-    const cwd = resolvePath(params?.cwd ?? params?.dir ?? '.');
+    let cwd: string;
+    try {
+      // Phase 23 — globs stay inside the active workspace.
+      cwd = resolveSkillPath(params?.cwd ?? params?.dir ?? '.', params);
+    } catch (error: any) {
+      return boundaryErrorResult(error, 'glob');
+    }
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
       return { error: `Search directory not found: ${cwd}` };
     }

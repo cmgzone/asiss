@@ -60,6 +60,7 @@ export const CANONICAL_BATTERY: BatteryEntry[] = [
   { name: 'execution-store', timeoutMs: 300_000 },
   { name: 'webui-cards', timeoutMs: 300_000 },
   { name: 'phase22', timeoutMs: 120_000 },
+  { name: 'phase23', timeoutMs: 120_000 },
   { name: 'webui-e2e', timeoutMs: 180_000 },
   { name: 'scheduler', timeoutMs: 300_000 },
   { name: 'agent-engine', timeoutMs: 300_000 },

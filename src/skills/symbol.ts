@@ -8,6 +8,7 @@
  */
 
 import { Skill } from '../core/skills';
+import { projectContextFromParams } from './workspace-guard';
 import { ContextEngine, contextEngine } from '../core/context';
 
 export interface SymbolSkillOptions {
@@ -37,10 +38,14 @@ export class SymbolSkill implements Skill {
   async execute(params: any): Promise<any> {
     const explicit = typeof params?.symbol === 'string' && params.symbol.trim() ? params.symbol.trim() : '';
     const goal = typeof params?.goal === 'string' && params.goal.trim() ? params.goal.trim() : '';
+    // Phase 23 — bound calls carry the canonical ProjectContext; the index is
+    // project-owned. Unbound calls fall back to the legacy workspace/root.
+    const projectContext = projectContextFromParams(params);
     const root =
-      typeof params?.__workspacePath === 'string' && params.__workspacePath.trim()
+      projectContext?.workspaceRoot
+      || (typeof params?.__workspacePath === 'string' && params.__workspacePath.trim()
         ? params.__workspacePath
-        : process.cwd();
+        : process.cwd()); // phase23-ok: unbound (no attached project) legacy fallback
     const limit = Math.min(20, Math.max(1, typeof params?.limit === 'number' ? params.limit : 5));
     const query = explicit ? `resolve ${explicit}` : goal;
     if (!query.trim()) return { error: 'Provide a symbol name or a goal phrase containing it.' };
@@ -48,7 +53,7 @@ export class SymbolSkill implements Skill {
     try {
       // Phase 9: force an on-demand refresh so an explicit query never reads
       // a stale index (files may have changed since the last mission turn).
-      this.engine.refreshRepository(root, { force: true, sessionId: params?.__sessionId });
+      this.engine.refreshRepository(projectContext || root, { force: true, sessionId: params?.__sessionId });
       const resolved = this.engine.resolveSymbols(root, query, limit);
       if (resolved.length === 0) {
         return {

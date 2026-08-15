@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { ProjectContext, isPathInsideWorkspace, validateProjectContext } from './project-context';
 
 export type ExecutionBackendName = 'local' | 'docker' | 'ssh';
 
@@ -37,13 +38,21 @@ export class ExecutionBackendManager {
   private readonly configPath: string;
 
   constructor(configPath?: string) {
+    // phase23-ok: engine-root config file, not project context
     this.configPath = configPath ? path.resolve(configPath) : path.join(process.cwd(), 'config.json');
   }
 
-  public createPlan(command: string, workspacePath?: string): ExecutionPlan {
+  /**
+   * Build an execution plan. Phase 23: when a ProjectContext is supplied, the
+   * resolved cwd MUST stay inside projectContext.workspaceRoot — the shell
+   * layer never escapes the active project. Without a context, legacy
+   * behavior applies (attached workspace path, or process.cwd() only when
+   * allowProcessCwd is explicitly configured).
+   */
+  public createPlan(command: string, workspacePath?: string, projectContext?: ProjectContext): ExecutionPlan {
     const config = this.loadConfig();
     const backend = config.backend === 'docker' || config.backend === 'ssh' ? config.backend : 'local';
-    const cwd = this.resolveWorkspace(workspacePath, config.allowProcessCwd === true);
+    const cwd = this.resolveWorkspace(workspacePath, config.allowProcessCwd === true, projectContext);
     const env = this.filteredEnvironment(config.envAllowlist || []);
     if (backend === 'docker') return this.dockerPlan(command, cwd, env, config);
     if (backend === 'ssh') return this.sshPlan(command, cwd, env, config);
@@ -118,13 +127,28 @@ export class ExecutionBackendManager {
     return { backend: 'ssh', executable: 'ssh', args, cwd, env: this.minimumHostEnvironment(), displayCwd: `${target}:${remoteWorkspace}` };
   }
 
-  private resolveWorkspace(workspacePath: string | undefined, allowProcessCwd: boolean): string {
+  private resolveWorkspace(workspacePath: string | undefined, allowProcessCwd: boolean, projectContext?: ProjectContext): string {
     const requested = String(workspacePath || '').trim();
     if (!requested) {
+      if (projectContext) {
+        // The active project owns the default cwd — never process.cwd().
+        return projectContext.workspaceRoot;
+      }
+      // phase23-ok: explicit allowProcessCwd config opt-in (no project attached)
       if (allowProcessCwd) return process.cwd();
       throw new Error('Shell execution requires an attached project or General chat workspace.');
     }
     const resolved = path.resolve(requested);
+    if (projectContext) {
+      const ctx = validateProjectContext(projectContext);
+      if (!isPathInsideWorkspace(resolved, ctx.workspaceRoot)) {
+        const error: any = new Error(
+          `WORKSPACE_BOUNDARY_VIOLATION\n\nActive project: ${ctx.projectName || ctx.projectId}\nActive workspace: ${ctx.workspaceRoot}\n\nRequested path:\n${resolved}\n\nThe requested path belongs to another workspace. Explicit cross-project authorization is required.`
+        );
+        error.code = 'WORKSPACE_BOUNDARY_VIOLATION';
+        throw error;
+      }
+    }
     if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
       throw new Error('Shell workspace does not exist or is not a directory.');
     }

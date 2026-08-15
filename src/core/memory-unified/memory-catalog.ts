@@ -19,6 +19,8 @@ import type { LearningManager } from '../learning-manager';
 import type { TaskEngine } from '../task';
 import type { TaskMemory } from '../task/task-memory';
 import type { EpisodicCapture } from './episodic-capture';
+import type { ProjectContext } from '../project-context';
+import { comparePath } from '../project-context';
 import {
   createMemoryRecord,
   memoryRecordId,
@@ -51,6 +53,13 @@ export interface UnifiedMemoryDeps {
 
 export interface RetrieveOptions {
   sessionId?: string;
+  /**
+   * Phase 23 §6 — project-scoped retrieval by construction. When supplied,
+   * records that carry a different projectId or workspaceRoot are excluded
+   * BEFORE scoring, so a project never retrieves another project's memory
+   * simply because the semantic query happens to match.
+   */
+  projectContext?: ProjectContext;
   /** Restrict hits to one source store (conversation | learning | task). */
   source?: MemorySource;
   /** Context budget — "smallest useful context". Default 5. */
@@ -90,6 +99,29 @@ const DEFAULT_WEIGHTS = {
 };
 
 /**
+ * Phase 23 §6 — a record belongs to the active project when its project
+ * attribution (projectId / workspaceRoot on metadata) matches the context, or
+ * when it carries no project attribution at all (session-scoped records whose
+ * session is itself bound to the project by the conversation registry).
+ * Project-scoped records with no workspaceRoot to verify are excluded — they
+ * cannot be proven to belong, so they are not served.
+ */
+export function recordBelongsToProject(record: MemoryRecord, projectContext: ProjectContext): boolean {
+  const meta = record.metadata || {};
+  if (typeof meta.projectId === 'string' && meta.projectId.trim() && meta.projectId.trim() !== projectContext.projectId) {
+    return false;
+  }
+  if (typeof meta.workspaceRoot === 'string' && meta.workspaceRoot.trim()) {
+    return comparePath(meta.workspaceRoot) === comparePath(projectContext.workspaceRoot);
+  }
+  if (record.scope === 'project') {
+    // Project-scoped but unverifiable — never served to another project.
+    return false;
+  }
+  return true;
+}
+
+/**
  * Ranked scoring over candidate records with a context budget. Deduped by
  * canonical id (higher score wins); filters type / minImportance /
  * minConfidence; each hit carries a scoreBreakdown. Shared by the catalog's
@@ -111,6 +143,7 @@ export function scoreRecords(candidates: ScoredCandidate[], opts: RetrieveOption
   for (const { record, relevance } of candidates) {
     if (opts.types && !opts.types.includes(record.type)) continue;
     if (opts.source && record.source !== opts.source) continue;
+    if (opts.projectContext && !recordBelongsToProject(record, opts.projectContext)) continue;
     if (record.confidence < (opts.minConfidence ?? 0)) continue;
     if (record.importance < (opts.minImportance ?? 0)) continue;
 

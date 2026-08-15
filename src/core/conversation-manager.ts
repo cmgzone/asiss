@@ -4,6 +4,11 @@ import os from 'os';
 import path from 'path';
 import { workspaceManager } from './workspace-manager';
 import { atomicWriteJsonSync } from './atomic-write';
+import {
+  ProjectContext,
+  projectContextRegistry,
+  validateProjectContext
+} from './project-context';
 
 export interface StoredConversationMessage {
   kind: string;
@@ -29,6 +34,11 @@ export interface StoredConversation {
   userId: string;
   title: string;
   workspacePath: string;
+  // Phase 23 §3 — the conversation is bound to exactly one project. Stored so
+  // a reloaded conversation restores the correct project context.
+  projectId?: string;
+  projectName?: string;
+  projectWorkspacePath?: string;
   createdAt: string;
   updatedAt: string;
   messages: StoredConversationMessage[];
@@ -60,20 +70,59 @@ class ConversationManager {
       }));
   }
 
-  public create(userId: string): StoredConversation {
+  public create(userId: string, projectContext?: ProjectContext): StoredConversation {
     const data = this.read();
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
+    const project = projectContext ? validateProjectContext(projectContext) : undefined;
     const conversation: StoredConversation = {
       id,
       userId,
       title: 'New conversation',
-      workspacePath: workspaceManager.createGeneralConversationWorkspace(id),
+      workspacePath: project?.workspaceRoot || workspaceManager.createGeneralConversationWorkspace(id),
+      projectId: project?.projectId,
+      projectName: project?.projectName,
+      projectWorkspacePath: project?.workspaceRoot,
       createdAt: now,
       updatedAt: now,
       messages: []
     };
     data.conversations.push(conversation);
+    this.write(data);
+    // Phase 23 §3 — conversationId -> projectId lives in the canonical
+    // registry too, so execution/memory/tool layers resolve the project from
+    // the conversation without re-reading message metadata.
+    if (project) {
+      projectContextRegistry.bindConversation(id, { ...project, conversationId: id });
+    }
+    return conversation;
+  }
+
+  /** Bind an existing conversation to a project (or clear it). */
+  public bindProject(id: string, userId: string, projectContext?: ProjectContext): StoredConversation | undefined {
+    const data = this.read();
+    const conversation = data.conversations.find(
+      (item) => item.id === id && item.userId === userId
+    );
+    if (!conversation) return undefined;
+    const project = projectContext ? validateProjectContext(projectContext) : undefined;
+    conversation.projectId = project?.projectId;
+    conversation.projectName = project?.projectName;
+    conversation.projectWorkspacePath = project?.workspaceRoot;
+    if (project) {
+      conversation.workspacePath = project.workspaceRoot;
+      projectContextRegistry.bindConversation(id, { ...project, conversationId: id });
+    } else {
+      conversation.workspacePath = workspaceManager.createGeneralConversationWorkspace(id);
+      // Unbinding a conversation removes it from the registry.
+      projectContextRegistry.bindConversation(id, {
+        projectId: 'general',
+        projectName: 'General Workspace',
+        workspaceRoot: conversation.workspacePath,
+        conversationId: id
+      });
+    }
+    conversation.updatedAt = new Date().toISOString();
     this.write(data);
     return conversation;
   }
