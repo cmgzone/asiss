@@ -10,6 +10,7 @@ export interface RetryOptions {
     baseDelayMs: number;
     maxDelayMs: number;
     retryOn?: (error: any) => boolean;       // Return true to retry
+    retryLimitFor?: (error: any) => number;  // Per-error retry cap (overrides maxRetries)
     onRetry?: (attempt: number, error: any, delayMs: number) => void;
 }
 
@@ -41,6 +42,18 @@ function getRetryAfterMs(err: any): number | null {
     return null;
 }
 
+/**
+ * Provider response-parsing failures (malformed JSON in the model reply —
+ * typically a truncated tool-call arguments string). These are retryable but
+ * only once: the same turn is re-requested, never more.
+ */
+export function isProviderParseError(err: any): boolean {
+    if (!err) return false;
+    if (err?.code === 'TOOL_ARGUMENTS_JSON_PARSE') return true;
+    const msg = String(err?.message || err).toLowerCase();
+    return /unterminated string in json|unexpected (token|end of json input|non-whitespace character|number)|invalid json|json\.parse|expected (property name|double-quoted property name)/.test(msg);
+}
+
 function jitter(delayMs: number): number {
     return delayMs + Math.random() * delayMs * 0.3;
 }
@@ -58,7 +71,8 @@ export async function withRetry<T>(
         } catch (err: any) {
             lastError = err;
 
-            if (attempt >= options.maxRetries) break;
+            const retryCap = options.retryLimitFor ? options.retryLimitFor(err) : options.maxRetries;
+            if (attempt >= retryCap) break;
 
             const shouldRetry = options.retryOn
                 ? options.retryOn(err)
@@ -98,15 +112,28 @@ export async function withRetry<T>(
 }
 
 /**
- * Convenience wrapper for model.generate() with retry
+ * Convenience wrapper for model.generate() with retry.
+ *
+ * Transient failures (429/5xx/network) retry up to 3 times. Provider
+ * response-parsing failures (malformed JSON, e.g. an unterminated tool-call
+ * arguments string) retry the SAME model turn at most ONCE, then surface as a
+ * controlled provider error.
  */
-export function withModelRetry<T>(fn: () => Promise<T>, label?: string): Promise<T> {
+export interface ModelRetryOptions {
+    maxRetries?: number;
+    retryOn?: (error: any) => boolean;
+}
+
+export function withModelRetry<T>(fn: () => Promise<T>, label?: string, opts?: ModelRetryOptions): Promise<T> {
+    const maxRetries = opts?.maxRetries ?? 3;
     return withRetry(fn, {
-        maxRetries: 3,
+        maxRetries,
         baseDelayMs: 2000,
         maxDelayMs: 60000,
+        retryOn: opts?.retryOn ?? ((err: any) => isTransientError(err) || isProviderParseError(err)),
+        retryLimitFor: (err: any) => (isProviderParseError(err) ? 1 : maxRetries),
         onRetry: (attempt, err, delayMs) => {
-            console.warn(`[${label || 'ModelRetry'}] Attempt ${attempt}/3 failed (${err.message || err}), retrying in ${Math.round(delayMs / 1000)}s...`);
+            console.warn(`[${label || 'ModelRetry'}] Attempt ${attempt}/${maxRetries} failed (${err.message || err}), retrying in ${Math.round(delayMs / 1000)}s...`);
         }
     });
 }

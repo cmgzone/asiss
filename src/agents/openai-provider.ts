@@ -8,6 +8,7 @@ import {
   extractCacheUsage,
   stripCacheControl
 } from '../core/prompt-cache';
+import { parseToolCallArguments } from '../core/provider-parse';
 import fetch from 'node-fetch';
 
 /**
@@ -152,7 +153,7 @@ export class GenericOpenAIProvider implements ModelProvider {
                 result.toolCalls = (message.tool_calls as any[]).map((tc: any) => ({
                     id: tc.id,
                     name: tc.function.name,
-                    arguments: JSON.parse(tc.function.arguments)
+                    arguments: parseToolCallArguments(tc.function.arguments, { provider: this.name, toolName: tc.function?.name })
                 }));
             }
 
@@ -204,53 +205,71 @@ export class GenericOpenAIProvider implements ModelProvider {
                 let usageData: any;
                 const stream: any = (response as any).body;
 
-                stream.on('data', (chunk: Buffer) => {
-                    const lines = chunk.toString().split('\n');
-                    for (const line of lines) {
-                        const trimmed = line.trim();
-                        if (!trimmed || trimmed === 'data: [DONE]') continue;
-                        if (!trimmed.startsWith('data: ')) continue;
-                        try {
-                            const data = JSON.parse(trimmed.slice(6));
-                            if (data.usage) { usageData = data.usage; continue; }
-                            const delta = data.choices[0]?.delta;
+                // SSE lines can be fragmented across network 'data' events, so
+                // buffer partial lines across chunks before parsing. Parsing
+                // each chunk with split('\n') dropped lines that straddled a
+                // chunk boundary, silently corrupting streamed tool-call
+                // arguments and yielding unterminated JSON at the end.
+                let buffer = '';
+                const handleLine = (line: string) => {
+                    const trimmed = line.trim();
+                    if (!trimmed || trimmed === 'data: [DONE]') return;
+                    if (!trimmed.startsWith('data: ')) return;
+                    try {
+                        const data = JSON.parse(trimmed.slice(6));
+                        if (data.usage) { usageData = data.usage; return; }
+                        const delta = data.choices[0]?.delta;
 
-                            if (delta?.content) {
-                                result.content += delta.content;
-                                if (onChunk) onChunk(delta.content);
-                            }
-
-                            if (delta?.tool_calls) {
-                                delta.tool_calls.forEach((tc: any) => {
-                                    if (!toolCallsMap[tc.index]) {
-                                        toolCallsMap[tc.index] = { id: tc.id, name: tc.function?.name || '', arguments: '' };
-                                    }
-                                    if (tc.function?.arguments) {
-                                        toolCallsMap[tc.index].arguments += tc.function.arguments;
-                                    }
-                                });
-                            }
-                        } catch (e) {
-                            // Ignore partial or malformed lines
+                        if (delta?.content) {
+                            result.content += delta.content;
+                            if (onChunk) onChunk(delta.content);
                         }
+
+                        if (delta?.tool_calls) {
+                            delta.tool_calls.forEach((tc: any) => {
+                                if (!toolCallsMap[tc.index]) {
+                                    toolCallsMap[tc.index] = { id: tc.id, name: tc.function?.name || '', arguments: '' };
+                                }
+                                if (tc.function?.arguments) {
+                                    toolCallsMap[tc.index].arguments += tc.function.arguments;
+                                }
+                            });
+                        }
+                    } catch (e) {
+                        // Ignore partial or malformed lines
+                    }
+                };
+                stream.on('data', (chunk: Buffer) => {
+                    buffer += chunk.toString();
+                    let newlineIndex: number;
+                    while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+                        handleLine(buffer.slice(0, newlineIndex));
+                        buffer = buffer.slice(newlineIndex + 1);
                     }
                 });
 
                 stream.on('end', () => {
-                    const toolCalls = Object.values(toolCallsMap).map((tc: any) => ({
-                        id: tc.id || 'unknown',
-                        name: tc.name,
-                        arguments: tc.arguments ? JSON.parse(tc.arguments) : {}
-                    }));
-                    if (toolCalls.length > 0) result.toolCalls = toolCalls;
-                    if (usageData) {
-                        result.usage = {
-                            promptTokens: Number(usageData.prompt_tokens ?? 0),
-                            completionTokens: Number(usageData.completion_tokens ?? 0),
-                            ...extractCacheUsage(usageData)
-                        };
+                    try {
+                        if (buffer.trim()) handleLine(buffer);
+                        const toolCalls = Object.values(toolCallsMap).map((tc: any) => ({
+                            id: tc.id || 'unknown',
+                            name: tc.name,
+                            arguments: tc.arguments
+                                ? parseToolCallArguments(tc.arguments, { provider: this.name, toolName: tc.name })
+                                : {}
+                        }));
+                        if (toolCalls.length > 0) result.toolCalls = toolCalls;
+                        if (usageData) {
+                            result.usage = {
+                                promptTokens: Number(usageData.prompt_tokens ?? 0),
+                                completionTokens: Number(usageData.completion_tokens ?? 0),
+                                ...extractCacheUsage(usageData)
+                            };
+                        }
+                        resolve(result);
+                    } catch (err) {
+                        reject(err);
                     }
-                    resolve(result);
                 });
 
                 stream.on('error', (err: Error) => reject(err));

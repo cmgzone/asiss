@@ -66,6 +66,8 @@ export const CANONICAL_BATTERY: BatteryEntry[] = [
   { name: 'agent-engine', timeoutMs: 300_000 },
   { name: 'agent-task-profile', timeoutMs: 300_000 },
   { name: 'agent-execution', timeoutMs: 300_000 },
+  { name: 'mission-progress-guard', timeoutMs: 300_000 },
+  { name: 'provider-parse-error', timeoutMs: 120_000 },
   { name: 'memory-unified', timeoutMs: 300_000 },
   { name: 'repo-index', timeoutMs: 300_000 },
   { name: 'checkpoints', timeoutMs: 300_000 },

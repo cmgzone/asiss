@@ -78,6 +78,7 @@ import { DynamicToolManager } from '../core/dynamic-tools';
 import { ResilientModelProvider } from '../core/resilient-model';
 import { analyticsTracker } from '../core/analytics-tracker';
 import { withModelRetry } from '../core/retry-handler';
+import { redactSecrets } from '../core/redact';
 import { guardrailManager } from '../core/guardrails';
 import { costTracker } from '../core/cost-tracker';
 import { modelRouter } from '../core/model-router';
@@ -1266,6 +1267,75 @@ export class AgentRunner {
     if (name !== 'shell') return false;
     const command = String(call?.arguments?.command || '');
     return /\b(test|tests|build|lint|typecheck|check|verify|pytest|jest|vitest|mocha|tsc|cargo\s+test|go\s+test|dotnet\s+test|git\s+(?:diff|status))\b/i.test(command);
+  }
+
+  /**
+   * Mission progress guard — classify a tool call as read-only inspection.
+   * Intentionally conservative: a tool that is not known to mutate is treated
+   * as inspection unless the canonical mutation classification says otherwise.
+   * Verification is not mutation, but it is legitimate progress.
+   */
+  private isReadOnlyMissionTool(call: any): boolean {
+    const name = String(call?.name || '').trim();
+    if (!name) return false;
+    // Existing canonical mutation classification remains authoritative.
+    if (MUTATING_TOOL_NAMES.has(name)) return false;
+    // Verification is not mutation, but it is legitimate progress.
+    if (this.isVerificationToolCall(call)) return false;
+    return true;
+  }
+
+  /**
+   * Mission progress guard — anchors every recovery prompt to the user's
+   * original request so the model cannot invent or broaden scope.
+   */
+  private missionGoalAnchor(userRequest: string): string {
+    const goal = String(userRequest || '').trim();
+    if (!goal) return '';
+    return [
+      '',
+      'Stay within the user\'s original goal:',
+      goal,
+      '',
+      'Do not broaden scope.'
+    ].join('\n');
+  }
+
+  /**
+   * Mission progress guard — the runtime system message that redirects an
+   * implementation mission stalled in read-only inspection toward the required
+   * mutation: READ -> READ -> READ -> guard -> mutation -> verify -> final.
+   */
+  private buildInspectionStallRedirect(userRequest: string): string {
+    return [
+      'Inspection is sufficient. The user\'s requested implementation has NOT been completed.',
+      'Stop inspecting and perform the required mutation now.',
+      'Use apply_patch/write/edit or another available mutation tool.',
+      'After mutation, verify the result.',
+      'Do not broaden the task.'
+    ].join('\n') + this.missionGoalAnchor(userRequest);
+  }
+
+  /**
+   * Mission progress guard — the stronger instruction for a prose-only model
+   * turn in FORCE_MUTATION: the model talked about the change but did not call
+   * a mutation tool. Such a turn can never count as progress or completion.
+   */
+  private buildMutationRetryInstruction(userRequest: string): string {
+    return [
+      'You have not performed the requested implementation.',
+      '',
+      'Your previous response contained only planning/prose and no mutation tool call.',
+      '',
+      'Execute the change now.',
+      '',
+      'Required:',
+      '- call a mutation tool',
+      '- modify the relevant workspace files',
+      '- do not provide another explanation before executing',
+      '- do not inspect unrelated files',
+      '- do not broaden the task'
+    ].join('\n') + this.missionGoalAnchor(userRequest);
   }
 
   private selectRelevantMemories(memories: Memory[], query: string, limit: number): Memory[] {
@@ -2486,6 +2556,11 @@ export class AgentRunner {
     let suppressedToolRequests = 0;
     const toolRequired = this.requiresToolExecution(msg.content);
     const verificationRequired = /\b(fix|debug|implement|build|code|edit|modify|refactor|test|verify)\b/i.test(msg.content);
+    // Mission progress guard: a read-only loop is not the same thing as task
+    // completion. implementationTask distinguishes editing/building missions
+    // (which must mutate the workspace before they may finalize) from pure
+    // research/answer missions (whose exploration budget may finalize).
+    const implementationTask = toolRequired || verificationRequired;
     const maxForcedContinuations = unlimitedTools
       ? Number.MAX_SAFE_INTEGER
       : (typeof agentConfig.maxPrematureCompletions === 'number'
@@ -2496,6 +2571,25 @@ export class AgentRunner {
     let lastToolError = '';
     let repeatedFailureRecoveries = 0;
     let explorationBatches = 0;
+    // Mission progress guard — track whether the mission has actually mutated
+    // the workspace and whether inspection is producing useful progress. A
+    // read-only loop must never be interpreted as task completion, so
+    // inspection stalls on implementation tasks redirect to mutation instead
+    // of finalizing. forceFinalAnswer is deliberately NOT used for stalls.
+    let missionHasMutated = false;
+    let inspectionStallRecoveries = 0;
+    let consecutiveReadOnlyBatches = 0;
+    const INSPECTION_STALL_THRESHOLD = 3;
+    const MAX_INSPECTION_STALL_RECOVERIES = 2;
+    // Mission progress guard — FORCE_MUTATION state machine. Once the guard
+    // has directed the model to mutate (inspection limit, capped/disabled
+    // inspection tool, repeated inspection, or a refused prose-only turn),
+    // prose-only model turns are no longer progress: each one gets a stronger
+    // mutation instruction, and repeated prose-only turns end in a controlled
+    // failure instead of a false completion.
+    let mutationForced = false;
+    let mutationRetries = 0;
+    const MAX_MUTATION_RETRIES = 2;
     // Phase 12 Move 3 — verification-pending state is engine-owned
     let missionVerificationPending = false;
     // Phase 2 execution contract — terminal status for mission_end:
@@ -2897,7 +2991,7 @@ export class AgentRunner {
         modelEngine.recordModelOutcome(actualProviderId, { success: true, latencyMs: Date.now() - modelStartedAt });
         } catch (modelError: any) {
           modelEngine.recordModelOutcome(selection?.provider.id || currentModel.id, { success: false, latencyMs: Date.now() - modelStartedAt });
-          const errorMsg = `Model provider error: ${modelError?.message || String(modelError)}`;
+          const errorMsg = `Model provider error: ${redactSecrets(modelError?.message || String(modelError))}`;
           console.error(`[AgentRunner] ${errorMsg}`);
           executionStateManager.markBlocked(sessionId, errorMsg);
           iterationPresentation = {
@@ -2971,10 +3065,74 @@ export class AgentRunner {
           }
           for (const call of response.toolCalls) this.normalizeToolCall(call);
           const disabledRequests = response.toolCalls.filter(call => missionDisabledTools.has(String(call?.name || '')));
-          if (forceFinalAnswer || disabledRequests.length > 0) {
-            forceFinalAnswer = true;
+          if (forceFinalAnswer) {
             suppressedToolRequests += 1;
             if (suppressedToolRequests >= 2) {
+              const candidate = String(response.content || '').trim();
+              const finalText = candidate && !this.looksLikeProgressOnly(candidate)
+                ? candidate
+                : 'The task could not be completed with the available tool actions. The completed tool results have been preserved.';
+              iterationPresentation = {
+                text: finalText,
+                runId: turnRunId,
+                messageId: turnMessageId,
+                metadata: {
+                  final: true,
+                  completed: Boolean(candidate) && (!implementationTask || missionHasMutated),
+                  toolBudgetStopped: true
+                }
+              };
+              return {
+                content: finalText,
+                verdict: candidate
+                  ? { type: 'complete', summary: finalText }
+                  : { type: 'fail', error: 'Tool execution closed before a reliable final answer.' },
+                totalToolCalls,
+                lastBatchHadFailure,
+                toolRequired,
+                verificationRequired
+              };
+            }
+          }
+          if (disabledRequests.length > 0 && !forceFinalAnswer) {
+            suppressedToolRequests += 1;
+            // Mission progress guard — a suppressed tool is not a completed
+            // mission. Redirect an unfinished implementation toward mutation.
+            if (implementationTask && !missionHasMutated) {
+              mutationForced = true;
+              const disabledNames = disabledRequests
+                .map(call => String(call?.name || '').trim())
+                .filter(Boolean);
+              this.memory.add(sessionId, {
+                role: 'system',
+                content: [
+                  `The following tool(s) were suppressed because they are unavailable or capped: ${disabledNames.join(', ')}.`,
+                  'The implementation is not considered complete merely because a tool was suppressed.',
+                  'Do not request those tools again.',
+                  'Use an available mutation tool to implement the requested change.',
+                  'Then verify the change.',
+                  'Only provide a final answer after the requested work is actually complete.',
+                  this.missionGoalAnchor(msg.content)
+                ].filter(Boolean).join('\n'),
+                timestamp: Date.now(),
+                metadata: { type: 'mission_tool_recovery', disabledTools: disabledNames }
+              });
+              return {
+                content: String(response.content || ''),
+                verdict: { type: 'continue', reason: 'Disabled tool recovered by redirecting the mission toward mutation.' },
+                totalToolCalls,
+                lastBatchHadFailure,
+                toolRequired,
+                verificationRequired
+              };
+            }
+          }
+          // Catch-all: a suppressed or forced-final batch must never execute
+          // its tools. Preserves the original suppression behavior — repeated
+          // suppression still finalizes research/answer missions, and
+          // forced-final turns never run tools.
+          if (forceFinalAnswer || disabledRequests.length > 0) {
+            if (disabledRequests.length > 0 && suppressedToolRequests >= 2) {
               const candidate = String(response.content || '').trim();
               const finalText = candidate && !this.looksLikeProgressOnly(candidate)
                 ? candidate
@@ -2983,7 +3141,11 @@ export class AgentRunner {
                 text: finalText,
                 runId: turnRunId,
                 messageId: turnMessageId,
-                metadata: { final: true, completed: Boolean(candidate), toolBudgetStopped: true }
+                metadata: {
+                  final: true,
+                  completed: Boolean(candidate) && (!implementationTask || missionHasMutated),
+                  toolBudgetStopped: true
+                }
               };
               return {
                 content: finalText,
@@ -2998,7 +3160,10 @@ export class AgentRunner {
             }
             this.memory.add(sessionId, {
               role: 'system',
-              content: 'A tool call was suppressed because that tool has already completed its allowed work for this task. Produce the complete final answer now using the collected evidence. Do not call another tool and do not describe future work.',
+              content: [
+                'A tool call was suppressed because that tool has already completed its allowed work for this task. Produce the complete final answer now using the collected evidence. Do not call another tool and do not describe future work.',
+                this.missionGoalAnchor(msg.content)
+              ].filter(Boolean).join('\n'),
               timestamp: Date.now(),
               metadata: { type: 'mission_tool_budget' }
             });
@@ -3036,6 +3201,33 @@ export class AgentRunner {
             }
             if (exceededTool) {
               missionDisabledTools.add(exceededTool);
+              // Mission progress guard — a capped tool does NOT mean the
+              // implementation task is complete. Redirect toward mutation
+              // instead of finalizing an unfinished edit.
+              if (implementationTask && !missionHasMutated) {
+                mutationForced = true;
+                this.memory.add(sessionId, {
+                  role: 'system',
+                  content: [
+                    `Tool '${exceededTool}' reached its per-task call limit and is now disabled.`,
+                    'This does NOT mean the implementation task is complete.',
+                    'Use another appropriate tool to perform the required mutation.',
+                    'Do not continue repeating the disabled tool.',
+                    'After changing the workspace, verify the result.',
+                    this.missionGoalAnchor(msg.content)
+                  ].filter(Boolean).join('\n'),
+                  timestamp: Date.now(),
+                  metadata: { type: 'mission_tool_budget', phase: 'recover_to_mutation', exceededTool }
+                });
+                return {
+                  content: String(response.content || ''),
+                  verdict: { type: 'continue', reason: `Tool '${exceededTool}' was capped; mission must continue through another valid action.` },
+                  totalToolCalls,
+                  lastBatchHadFailure,
+                  toolRequired,
+                  verificationRequired
+                };
+              }
               forceFinalAnswer = true;
               this.memory.add(sessionId, {
                 role: 'system',
@@ -3071,7 +3263,8 @@ export class AgentRunner {
                   `Runtime recovery: ${reason}`,
                   lastToolError ? `Last error: ${lastToolError}` : '',
                   `Do not call the same failed command again. Use a different approach appropriate for ${process.platform}.`,
-                  'Continue autonomously and verify the alternative.'
+                  'Continue autonomously and verify the alternative.',
+                  this.missionGoalAnchor(msg.content)
                 ].filter(Boolean).join('\n'),
                 timestamp: Date.now(),
                 metadata: { type: 'repetition_recovery' }
@@ -3086,6 +3279,42 @@ export class AgentRunner {
               };
             }
             if (!lastBatchHadFailure) {
+              // Mission progress guard — a repeated batch that consists ONLY of
+              // inspection tools is a READ loop, not a completion point. Disable
+              // exactly the repeated read-only tools and keep the mission alive
+              // toward the required mutation. forceFinalAnswer is only for
+              // genuinely terminal conditions (requirement: repeated successful
+              // read batches must never convert into "task complete").
+              const repeatedInspectionOnly = response.toolCalls.every(call => this.isReadOnlyMissionTool(call));
+              if (repeatedInspectionOnly) {
+                mutationForced = true;
+                for (const call of response.toolCalls) {
+                  const name = String(call?.name || '').trim();
+                  if (name && this.isReadOnlyMissionTool(call)) {
+                    missionDisabledTools.add(name);
+                  }
+                }
+                this.memory.add(sessionId, {
+                  role: 'system',
+                  content: [
+                    'Repeated inspection detected. Do not inspect again. Proceed to implementation.',
+                    'The repeated read-only tool(s) have been disabled for this mission.',
+                    'Use an available mutation tool (apply_patch/write/edit or another mutation tool) to perform the requested change.',
+                    'After mutation, verify the result.',
+                    this.missionGoalAnchor(msg.content)
+                  ].filter(Boolean).join('\n'),
+                  timestamp: Date.now(),
+                  metadata: { type: 'repetition_recovery', phase: 'repeated_inspection_disabled' }
+                });
+                return {
+                  content: String(response.content || ''),
+                  verdict: { type: 'continue', reason: 'Repeated inspection detected; the mission continues toward the required mutation.' },
+                  totalToolCalls,
+                  lastBatchHadFailure,
+                  toolRequired,
+                  verificationRequired
+                };
+              }
               forceFinalAnswer = true;
               for (const call of response.toolCalls) missionDisabledTools.add(String(call.name || ''));
               this.memory.add(sessionId, {
@@ -3127,10 +3356,76 @@ export class AgentRunner {
           }
 
           const batchMutates = response.toolCalls.some(call => MUTATING_TOOL_NAMES.has(String(call?.name || '')));
+          const batchVerifies = response.toolCalls.some(call => this.isVerificationToolCall(call));
+          const batchIsReadOnly = response.toolCalls.every(call => this.isReadOnlyMissionTool(call));
           if (batchMutates) {
+            missionHasMutated = true;
+            consecutiveReadOnlyBatches = 0;
             explorationBatches = 0;
-          } else {
+            inspectionStallRecoveries = 0;
+            mutationRetries = 0;
+          } else if (batchVerifies) {
+            // Verification is legitimate progress and should not count as
+            // pointless exploration.
+            consecutiveReadOnlyBatches = 0;
+            explorationBatches = 0;
+          } else if (batchIsReadOnly) {
+            consecutiveReadOnlyBatches += 1;
             explorationBatches += 1;
+            // Mission progress guard: an implementation task that keeps
+            // inspecting without mutating is stalled, not finished. Never
+            // finalize it; redirect to the required mutation instead.
+            if (implementationTask && !missionHasMutated && consecutiveReadOnlyBatches >= INSPECTION_STALL_THRESHOLD) {
+              inspectionStallRecoveries += 1;
+              mutationForced = true;
+              this.memory.add(sessionId, {
+                role: 'system',
+                content: this.buildInspectionStallRedirect(msg.content),
+                timestamp: Date.now(),
+                metadata: {
+                  type: 'mission_progress_guard',
+                  phase: 'inspect_to_mutate',
+                  consecutiveReadOnlyBatches,
+                  inspectionStallRecoveries
+                }
+              });
+              // If the model ignores the instruction repeatedly, stop the
+              // exact read-only tools that caused the stall. Do NOT set
+              // forceFinalAnswer yet.
+              if (inspectionStallRecoveries >= MAX_INSPECTION_STALL_RECOVERIES) {
+                for (const call of response.toolCalls) {
+                  const name = String(call?.name || '').trim();
+                  if (name && this.isReadOnlyMissionTool(call)) {
+                    missionDisabledTools.add(name);
+                  }
+                }
+                this.memory.add(sessionId, {
+                  role: 'system',
+                  content: [
+                    'RUNTIME PROGRESS GUARD: Repeated inspection has stalled the implementation.',
+                    'The repeated read-only tools have been disabled for this mission.',
+                    'Mutation tools remain available.',
+                    'Perform the required mutation now using apply_patch/write/edit or another available mutation tool.',
+                    'After mutation, verify the result.',
+                    'Do not request the disabled inspection tools again.',
+                    this.missionGoalAnchor(msg.content)
+                  ].filter(Boolean).join('\n'),
+                  timestamp: Date.now(),
+                  metadata: {
+                    type: 'mission_progress_guard',
+                    phase: 'inspection_tools_disabled'
+                  }
+                });
+              }
+              return {
+                content: String(response.content || ''),
+                verdict: { type: 'continue', reason: 'Read-only inspection stalled before a workspace mutation.' },
+                totalToolCalls,
+                lastBatchHadFailure,
+                toolRequired,
+                verificationRequired
+              };
+            }
             if (explorationBatches >= maxExplorationBatches) {
               const explorationReason = `Ran ${explorationBatches} consecutive read-only tool batches (${response.toolCalls.map(c => c.name).join(', ')}) without making any changes.`;
               if (lastBatchHadFailure && repeatedFailureRecoveries < 1) {
@@ -3149,6 +3444,31 @@ export class AgentRunner {
                 return {
                   content: String(response.content || ''),
                   verdict: { type: 'continue', reason: explorationReason },
+                  totalToolCalls,
+                  lastBatchHadFailure,
+                  toolRequired,
+                  verificationRequired
+                };
+              }
+              // Mission progress guard — do not finalize an implementation
+              // task that has not mutated yet; force the transition instead.
+              if (implementationTask && !missionHasMutated) {
+                mutationForced = true;
+                this.memory.add(sessionId, {
+                  role: 'system',
+                  content: [
+                    explorationReason,
+                    this.buildInspectionStallRedirect(msg.content)
+                  ].filter(Boolean).join('\n'),
+                  timestamp: Date.now(),
+                  metadata: {
+                    type: 'mission_progress_guard',
+                    phase: 'forced_mutation'
+                  }
+                });
+                return {
+                  content: String(response.content || ''),
+                  verdict: { type: 'continue', reason: 'Read-only exploration limit reached before implementation.' },
                   totalToolCalls,
                   lastBatchHadFailure,
                   toolRequired,
@@ -3362,6 +3682,14 @@ export class AgentRunner {
               : result.success && this.isVerificationToolCall(result.call)
                 ? 'verification'
                 : 'inspection';
+            // Mission progress guard — a successful mutation means the mission
+            // has actually changed the workspace, so read-only stalls reset.
+            if (result.success && kind === 'mutation') {
+              missionHasMutated = true;
+              consecutiveReadOnlyBatches = 0;
+              explorationBatches = 0;
+              mutationRetries = 0;
+            }
             if (kind !== 'inspection' && result.executionId) {
               try {
                 await taskEngine.recordToolKind(missionTaskId, result.executionId, kind);
@@ -3382,7 +3710,10 @@ export class AgentRunner {
               missionDisabledTools.add(String(result.call.name));
               this.memory.add(sessionId, {
                 role: 'system',
-                content: `Tool '${result.call.name}' has completed its one allowed write for this task. Do not call it again; continue with the task and produce the final result.`,
+                content: [
+                  `Tool '${result.call.name}' has completed its one allowed write for this task. Do not call it again; continue with the task and produce the final result.`,
+                  this.missionGoalAnchor(msg.content)
+                ].filter(Boolean).join('\n'),
                 timestamp: Date.now(),
                 metadata: { type: 'mission_tool_budget' }
               });
@@ -3392,7 +3723,10 @@ export class AgentRunner {
             forceFinalAnswer = true;
             this.memory.add(sessionId, {
               role: 'system',
-              content: `The task tool budget (${maxToolCalls}) has been reached. No more tools are available. Produce the best complete final answer now from the evidence already collected. Do not describe future work.`,
+              content: [
+                `The task tool budget (${maxToolCalls}) has been reached. No more tools are available. Produce the best complete final answer now from the evidence already collected. Do not describe future work.`,
+                this.missionGoalAnchor(msg.content)
+              ].filter(Boolean).join('\n'),
               timestamp: Date.now(),
               metadata: { type: 'mission_tool_budget' }
             });
@@ -3762,6 +4096,58 @@ export class AgentRunner {
         } else {
           const text = (response.content || "").trim();
 
+          // Mission progress guard — FORCE_MUTATION: once inspection has been
+          // declared sufficient (stall guard, capped/disabled inspection tool,
+          // repeated inspection) an implementation task that has not mutated
+          // must NEVER complete merely because the model produced prose. A
+          // prose-only turn is not progress: refuse the completion point and
+          // require an actual mutation tool call. Repeated prose-only turns
+          // end in a controlled failure, not a false completion.
+          if (implementationTask && !missionHasMutated && (mutationForced || consecutiveReadOnlyBatches >= INSPECTION_STALL_THRESHOLD)) {
+            mutationRetries += 1;
+            mutationForced = true;
+            if (mutationRetries >= MAX_MUTATION_RETRIES) {
+              const failureText = [
+                'The requested implementation was not performed.',
+                'After being directed to execute the required mutation, the agent repeatedly returned only planning text without a mutation tool call.',
+                'The mission is ended without a completed change.'
+              ].join('\n');
+              iterationPresentation = {
+                text: failureText,
+                runId: turnRunId,
+                messageId: turnMessageId,
+                reasoning: turnReasoning,
+                metadata: { final: true, completed: false, mutationRetries }
+              };
+              return {
+                content: failureText,
+                verdict: { type: 'fail', error: 'Repeated prose-only turns without the required mutation tool call.' },
+                totalToolCalls,
+                lastBatchHadFailure,
+                toolRequired,
+                verificationRequired
+              };
+            }
+            this.memory.add(sessionId, {
+              role: 'system',
+              content: this.buildMutationRetryInstruction(msg.content),
+              timestamp: Date.now(),
+              metadata: {
+                type: 'mission_progress_guard',
+                phase: 'mutation_retry',
+                mutationRetries
+              }
+            });
+            return {
+              content: String(response.content || ''),
+              verdict: { type: 'continue', reason: 'Prose-only turn in FORCE_MUTATION; the model must call a mutation tool.' },
+              totalToolCalls,
+              lastBatchHadFailure,
+              toolRequired,
+              verificationRequired
+            };
+          }
+
           // Phase 12 Move 2 — the completion decision moves into the engine's
           // turn contract. The host supplies the evidence; the engine asks its
           // completion-verdict hook "is completion allowed?" and owns the
@@ -3810,6 +4196,33 @@ export class AgentRunner {
               content: checkParts.join('\n'),
               timestamp: Date.now(),
               metadata: { type: 'runtime_completion_check' }
+            });
+          }
+
+          // Mission progress guard — reinforce the inspect -> mutate phase
+          // transition at the canonical TaskEngine boundary.
+          if (
+            turnResult.action === 'continue' &&
+            verificationRequired &&
+            !missionHasMutated &&
+            consecutiveReadOnlyBatches >= INSPECTION_STALL_THRESHOLD
+          ) {
+            this.memory.add(sessionId, {
+              role: 'system',
+              content: [
+                'Execution phase: IMPLEMENT.',
+                'Repository inspection has reached the useful limit.',
+                'The requested workspace change has not been made yet.',
+                'Use the next available mutation tool.',
+                'Do not repeat inspection.',
+                this.missionGoalAnchor(msg.content)
+              ].filter(Boolean).join('\n'),
+              timestamp: Date.now(),
+              metadata: {
+                type: 'mission_phase_transition',
+                from: 'inspect',
+                to: 'mutate'
+              }
             });
           }
 

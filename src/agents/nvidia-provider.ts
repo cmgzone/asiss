@@ -1,6 +1,7 @@
 import { ModelProvider, ModelResponse, Tool, StreamCallback, ModelAttachment, ModelLevel } from '../core/models';
 import { inferModelLevel } from '../core/model-level';
 import OpenAI from 'openai';
+import { parseToolCallArguments } from '../core/provider-parse';
 
 export class NvidiaProvider implements ModelProvider {
   id: string;
@@ -88,18 +89,12 @@ export class NvidiaProvider implements ModelProvider {
       }
 
       const toolCalls = Object.values(toolCallsMap).map((tc: any) => {
-        let args: any = {};
-        if (tc.arguments) {
-          try {
-            args = JSON.parse(tc.arguments);
-          } catch {
-            args = { __raw: tc.arguments };
-          }
-        }
         return {
           id: tc.id || 'unknown',
           name: tc.name,
-          arguments: args
+          arguments: tc.arguments
+              ? parseToolCallArguments(tc.arguments, { provider: this.name, toolName: tc.name })
+              : {}
         };
       });
 

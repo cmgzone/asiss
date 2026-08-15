@@ -42,6 +42,8 @@
     "smoke:web-api": "ts-node scripts/smoke-web-api.ts",
     "smoke:casual": "ts-node scripts/smoke-casual-conversation.ts",
     "smoke:repetition": "ts-node scripts/smoke-repetition-guard.ts",
+    "smoke:mission-progress-guard": "ts-node scripts/smoke-mission-progress-guard.ts",
+    "smoke:provider-parse-error": "ts-node scripts/smoke-provider-parse-error.ts",
     "smoke:terminal-paths": "ts-node scripts/smoke-terminal-paths.ts",
     "smoke:agent-engine": "ts-node scripts/smoke-agent-engine.ts",
     "smoke:agent-execution": "ts-node scripts/smoke-agent-execution.ts",

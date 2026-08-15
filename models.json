@@ -6,5 +6,13 @@
     "modelName": "inclusionai/ling-3.0-tiny:free",
     "baseUrl": "https://openrouter.ai/api/v1",
     "enabled": false
+  },
+  {
+    "id": "gemini-flash",
+    "name": "Gemini Flash",
+    "provider": "openai",
+    "modelName": "gemini-2.5-flash",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "enabled": true
   }
 ]

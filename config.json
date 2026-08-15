@@ -46,7 +46,7 @@
   },
   "agent": {
     "unlimitedTools": true,
-    "maxTurns": 100000,
+    "maxTurns": 1e+57,
     "maxToolCalls": 100000,
     "maxPrematureCompletions": 1000,
     "autoContinue": {

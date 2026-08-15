@@ -2,6 +2,7 @@ import { ModelProvider, ModelResponse, Tool, ToolCall, ModelAttachment, StreamCa
 import { inferModelLevel } from '../core/model-level';
 import fetch from 'node-fetch';
 import { promptCachingEnabled, isCacheableProvider, cacheSystem, cacheTools, stripCacheControl, extractCacheUsage } from '../core/prompt-cache';
+import { parseToolCallArguments } from '../core/provider-parse';
 
 /**
  * OpenCode Zen provider.
@@ -165,7 +166,7 @@ export class OpenCodeProvider implements ModelProvider {
     const toolCalls: ToolCall[] = (message?.tool_calls || []).map((tc: any) => ({
       id: tc.id || `call_${Math.random().toString(36).slice(2)}`,
       name: tc.function?.name || '',
-      arguments: safeParse(tc.function?.arguments)
+      arguments: parseToolCallArguments(tc.function?.arguments, { provider: this.name, toolName: tc.function?.name })
     }));
     return {
       content,
@@ -250,7 +251,7 @@ export class OpenCodeProvider implements ModelProvider {
         // Defensive: drop any tool call that never acquired a real name so a
         // stray empty-named call cannot brick the whole agent run.
         const toolCalls: ToolCall[] = Object.values(toolCallsMap)
-          .map((tc: any) => ({ id: tc.id || 'unknown', name: tc.name, arguments: safeParse(tc.arguments) }))
+          .map((tc: any) => ({ id: tc.id || 'unknown', name: tc.name, arguments: parseToolCallArguments(tc.arguments, { provider: this.name, toolName: tc.name }) }))
           .filter(tc => tc.name && tc.name !== 'unknown');
         if (toolCalls.length > 0) result.toolCalls = toolCalls;
         if (result.reasoning && typeof result.reasoning === 'string' && !result.reasoning.trim()) {
@@ -294,7 +295,7 @@ export class OpenCodeProvider implements ModelProvider {
         toolCalls.push({
           id: item.call_id || item.id || `call_${Math.random().toString(36).slice(2)}`,
           name: item.name || '',
-          arguments: safeParse(item.arguments)
+          arguments: parseToolCallArguments(item.arguments, { provider: this.name, toolName: item.name })
         });
       }
     }
@@ -348,13 +349,6 @@ export class OpenCodeProvider implements ModelProvider {
     }
     return models;
   }
-}
-
-function safeParse(value: any): any {
-  if (typeof value !== 'string') return value || {};
-  const trimmed = value.trim();
-  if (!trimmed) return {};
-  try { return JSON.parse(trimmed); } catch { return {}; }
 }
 
 function normalizeUsage(usage: any): { promptTokens: number; completionTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } | undefined {

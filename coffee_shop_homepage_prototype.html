@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brew Haven Coffee Co. - Artisanal Coffee Experience</title>
+    <style>
+        :root {
+            --terra-cotta: #E07A5F;
+            --olive: #5F6A3D;
+            --cream: #F4F1DE;
+            --wood: #D4A59A;
+        }
+        body {
+            font-family: 'Open Sans', sans-serif;
+            margin: 0;
+            background-color: var(--cream);
+        }
+        .hero {
+            background: linear-gradient(rgba(0,0,0,0.5), rgba(0,0,0,0.5)), 
+                        url('coffee-beans-texture.jpg');
+            height: 60vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            text-align: center;
+            padding: 0 2rem;
+        }
+        .sustainability {
+            background-color: var(--olive);
+            color: white;
+            padding: 3rem 2rem;
+            text-align: center;
+        }
+        .products {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 2rem;
+            padding: 3rem;
+        }
+    </style>
+</head>
+<body>
+    <!-- Hero Section -->
+    <section class="hero">
+        <div>
+            <h1>Brew Haven Coffee Co.</h1>
+            <p>Experience Ethical Sourcing & Multi-Sensory Flavor Journeys</p>
+            <button>Explore Our Blends</button>
+        </div>
+    </section>
+
+    <!-- Featured Products -->
+    <section class="products">
+        <div class="product-card">
+            <h3>Seasonal Roast</h3>
+            <p class="price">$18.00</p>
+        </div>
+        <div class="product-card">
+            <h3>Monthly Subscription</h3>
+            <p class="price">From $15/mo</p>
+        </div>
+    </section>
+
+    <!-- Sustainability -->
+    <section class="sustainability">
+        <h2>Our Eco Promise</h2>
+        <p>100% compostable packaging · Carbon-neutral shipping · Direct farm partnerships</p>
+        <button>Learn About Our Ethics</button>
+    </section>
+
+    <!-- Mobile Navigation -->
+    <nav class="mobile-nav">
+        <button>Shop</button>
+        <button>Our Story</button>
+        <button>Login</button>
+        <button>Cart (0)</button>
+    </nav>
+</body>
+</html>

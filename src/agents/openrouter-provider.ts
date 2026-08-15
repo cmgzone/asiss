@@ -2,6 +2,7 @@ import { ModelProvider, ModelResponse, Tool, StreamCallback, ModelAttachment, Mo
 import { inferModelLevel } from '../core/model-level';
 import OpenAI from 'openai';
 import { promptCachingEnabled, isCacheableProvider, cacheSystem, cacheTools, stripCacheControl, extractCacheUsage } from '../core/prompt-cache';
+import { parseToolCallArguments } from '../core/provider-parse';
 
 export class OpenRouterProvider implements ModelProvider {
   id: string;
@@ -110,7 +111,9 @@ export class OpenRouterProvider implements ModelProvider {
       const toolCalls = Object.values(toolCallsMap).map((tc: any) => ({
           id: tc.id || 'unknown',
           name: tc.name,
-          arguments: tc.arguments ? JSON.parse(tc.arguments) : {}
+          arguments: tc.arguments
+              ? parseToolCallArguments(tc.arguments, { provider: this.name, toolName: tc.name })
+              : {}
       }));
 
       const usage = usageData
